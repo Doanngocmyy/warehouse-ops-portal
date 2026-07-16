@@ -40,106 +40,188 @@
     <div class="diagram-toolbar"><button class="btn" id="io-export">⬇ Xuất ảnh (PNG)</button></div>
     <div class="diagram-wrap">
     <div id="io-diagram">
-      <table class="flow">
-        <caption style="caption-side:top; text-align:left; font-weight:700; padding:8px; background:#111827; color:#fff;">INBOUND PROCESS</caption>
-        <tr><th>STEP</th><th>CUSTOMER</th><th>KEC</th><th>WH (WAREHOUSE)</th><th>FACTORY (VN DOMESTIC + CN CROSS BORDER)</th></tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">1</span>PRE-INBOUND<br><span style="font-weight:400;color:#64748b;">Pre-alert &amp; Packing List</span></td>
-          <td class="cell"><div class="box purple" data-key="io-pre-inbound">(Cross-border CN)<br>TOPOLOGIE Customer sends<br>Packing List (PL)</div></td>
-          <td class="cell"></td>
-          <td class="cell"></td>
-          <td class="cell"><div class="box amber" data-key="io-pre-inbound">Factory sends<br>Packing List (PL)</div></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">2</span>ASN CREATION<br><span style="font-weight:400;color:#64748b;">Pre-inbound</span></td>
-          <td class="cell"></td>
-          <td class="cell">
-            <div class="box cyan" data-key="io-asn-creation">Create ASN<br>+ Upload ASN to FOMS</div><br>
-            <span class="cyl">FOMS ASN</span>
-          </td>
-          <td class="cell"></td>
-          <td class="cell"></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">3</span>D-1 (BEFORE ARRIVAL)<br><span style="font-weight:400;color:#64748b;">Arrival Notice &amp; Document Submission</span></td>
-          <td class="cell"></td>
-          <td class="cell">
-            <div class="box cyan" data-key="io-d1-kec">Review documents<br>&amp; driver info</div><br>↓<br>
-            <div class="box cyan" data-key="io-d1-forward">Forward documents<br>to WH</div>
-          </td>
-          <td class="cell"><div class="box green" data-key="io-d1-wh">WH prepares<br>inbound clearance</div></td>
-          <td class="cell">
-            <div class="box amber" data-key="io-d1-factory">
-              Notify KEC about upcoming arrival (D-1)<br>+ Send documents + Driver information
-              <div style="display:flex; gap:10px; margin-top:6px; text-align:left;">
-                <div style="flex:1;"><b>Domestic (VN)</b><ul><li>CI</li><li>PL</li><li>TKHQ (Barcode)</li></ul></div>
-                <div style="flex:1;"><b>Cross-border (CN)</b><ul><li>CI</li><li>PL</li><li>AN</li><li>EDO</li><li>BL (Bill of Lading)</li></ul></div>
-              </div>
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">4</span>ARRIVAL AT WAREHOUSE<br><span style="font-weight:400;color:#64748b;">Handover to WH</span></td>
-          <td class="cell"></td><td class="cell"></td>
-          <td class="cell"><div class="box green" data-key="io-arrival">Truck arrives<br>at Warehouse</div></td>
-          <td class="cell"></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">5</span>INBOUND PROCESSING<br><span style="font-weight:400;color:#64748b;">SLA D+1</span></td>
-          <td class="cell"></td><td class="cell"></td>
-          <td class="cell" colspan="2">
-            <div class="box green" data-key="io-processing" style="width:100%;">
-              Unloading → Counting → Checking → Put-away → Inventory Updated → <b>Inbound Done</b>
-            </div>
-          </td>
-        </tr>
-        <tr><td colspan="5" style="background:#111827; color:#fff; font-weight:700; padding:8px;">OUTBOUND PROCESS</td></tr>
-        <tr><th>STEP</th><th>CUSTOMER</th><th>KEC</th><th>WH (WAREHOUSE)</th><th>FACTORY (VN DOMESTIC + CN CROSS BORDER)</th></tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">1</span>OUTBOUND REQUEST</td>
-          <td class="cell"><div class="box purple" data-key="ob-request">Submit Outbound<br>Request (OR)</div></td>
-          <td class="cell"></td><td class="cell"></td><td class="cell"></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">2</span>KEC PRE-CHECK &amp; REQUEST TO WH</td>
-          <td class="cell"></td>
-          <td class="cell" colspan="2">
-            <div class="box cyan" data-key="ob-kec-check" style="text-align:left;">
-              <ul><li>Check inventory</li><li>Check xả lẻ (split shipment)</li><li>Check VAS requirement</li><li>Prepare / send Outbound Request file to WH</li></ul>
-            </div>
-          </td>
-          <td class="cell"></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">3</span>WH ALLOCATION &amp; CUSTOMS PLANNING</td>
-          <td class="cell"></td><td class="cell"></td>
-          <td class="cell"><div class="box green" data-key="ob-wh-plan" style="text-align:left;">
-            <ul><li>Check available stock</li><li>Fill Customs Declaration No.</li><li>Identify Factory source (VN/CN)</li><li>Allocate quantity</li><li>Confirm CO / NO-CO applicability</li><li>Complete OR file &amp; feedback to KEC</li></ul>
-          </div></td>
-          <td class="cell"></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">4</span>KEC CONFIRMATION &amp; SYSTEM</td>
-          <td class="cell"><div class="box purple" data-key="ob-customer-confirm">Customer confirms<br>CO</div></td>
-          <td class="cell">
-            <div class="box cyan" data-key="ob-kec-confirm" style="text-align:left;">
-              <ul><li>Review OR file from WH</li><li>Send to Customer for confirm CO</li><li>If confirmed: Upload OR to FOMS → Trigger WH execution</li></ul>
-            </div><br><span class="cyl">FOMS OR</span>
-          </td>
-          <td class="cell"></td><td class="cell"></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">5</span>WAREHOUSE EXECUTION (SLA)</td>
-          <td class="cell"></td><td class="cell"></td>
-          <td class="cell"><div class="box green" data-key="ob-execution">Pick → VAS (if any) → Labeling → Pack → DO Preparation → Submit to Customs</div></td>
-          <td class="cell"><div class="box amber" data-key="ob-sla"><b>SLA OUTBOUND</b><br>Day 1: DO Declaration + Customs Submission (COT before 14:00)<br>Day 2: Pickup Arrangement</div></td>
-        </tr>
-        <tr>
-          <td class="steplabel"><span class="stepno">6</span>OUTBOUND DONE<br><span style="font-weight:400;color:#64748b;">ETD</span></td>
-          <td class="cell"></td><td class="cell"></td><td class="cell"></td>
-          <td class="cell"><div class="box slate" data-key="ob-done">ETD +2</div></td>
-        </tr>
-      </table>
+<svg viewBox="0 0 1522 548" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+  <defs>
+    <marker id="arrowIB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#111111"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1522" height="548" fill="#ffffff"/>
+  <text x="761" y="26" text-anchor="middle" font-size="18" font-weight="bold" fill="#111111">INBOUND PROCESS FLOW</text>
+  <rect x="0" y="66.0" width="1522" height="118" fill="#ffffff"/>
+  <line x1="0" y1="66.0" x2="1522" y2="66.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="80.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="129.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">CUSTOMER</text>
+  <rect x="0" y="184.0" width="1522" height="118" fill="#f4f4f5"/>
+  <line x1="0" y1="184.0" x2="1522" y2="184.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="198.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="247.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">KEC</text>
+  <rect x="0" y="302.0" width="1522" height="118" fill="#ffffff"/>
+  <line x1="0" y1="302.0" x2="1522" y2="302.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="316.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="358.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">WH</text>
+  <text x="73.0" y="372.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">(WAREHOUSE)</text>
+  <rect x="0" y="420.0" width="1522" height="118" fill="#f4f4f5"/>
+  <line x1="0" y1="420.0" x2="1522" y2="420.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="434.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="483.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">FACTORY</text>
+  <line x1="0" y1="538.0" x2="1522" y2="538.0" stroke="#cbd5e1" stroke-width="1"/>
+  <line x1="150.0" y1="60" x2="150.0" y2="538.0" stroke="#94a3b8" stroke-width="1.2"/>
+  <g class="clickable" data-key="io-pre-inbound">
+    <rect x="170.0" y="88.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="234.0" y="108.4" text-anchor="middle" font-size="10" fill="#111111">TOPOLOGIE (Cross-</text>
+    <text x="234.0" y="121.6" text-anchor="middle" font-size="10" fill="#111111">border CN)</text>
+    <text x="234.0" y="134.8" text-anchor="middle" font-size="10" fill="#111111">sends Packing List</text>
+    <text x="234.0" y="148.0" text-anchor="middle" font-size="10" fill="#111111">(PL)</text>
+  </g>
+  <g class="clickable" data-key="io-asn-creation">
+    <rect x="318.0" y="206.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="382.0" y="239.3" text-anchor="middle" font-size="11.5" fill="#111111">Create ASN + Upload</text>
+    <text x="382.0" y="254.0" text-anchor="middle" font-size="11.5" fill="#111111">ASN to FOMS</text>
+    <ellipse cx="382.0" cy="288.0" rx="42" ry="10" fill="#ffffff" stroke="#111111" stroke-width="1.5"/>
+    <text x="382.0" y="292.0" text-anchor="middle" font-size="9" fill="#111111">FOMS ASN</text>
+  </g>
+  <g class="clickable" data-key="io-d1-factory">
+    <rect x="466.0" y="442.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="530.0" y="469.0" text-anchor="middle" font-size="10" fill="#111111">Notify KEC (D-1) +</text>
+    <text x="530.0" y="482.2" text-anchor="middle" font-size="10" fill="#111111">Send documents +</text>
+    <text x="530.0" y="495.4" text-anchor="middle" font-size="10" fill="#111111">Driver info</text>
+  </g>
+  <g class="clickable" data-key="io-d1-kec">
+    <rect x="614.0" y="206.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="678.0" y="239.3" text-anchor="middle" font-size="11.5" fill="#111111">Review documents</text>
+    <text x="678.0" y="254.0" text-anchor="middle" font-size="11.5" fill="#111111">&amp; driver info</text>
+  </g>
+  <g class="clickable" data-key="io-d1-forward">
+    <rect x="762.0" y="206.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="826.0" y="239.3" text-anchor="middle" font-size="11.5" fill="#111111">Forward documents</text>
+    <text x="826.0" y="254.0" text-anchor="middle" font-size="11.5" fill="#111111">to WH</text>
+  </g>
+  <g class="clickable" data-key="io-d1-wh">
+    <rect x="910.0" y="324.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="974.0" y="357.3" text-anchor="middle" font-size="11.5" fill="#111111">WH prepares</text>
+    <text x="974.0" y="372.0" text-anchor="middle" font-size="11.5" fill="#111111">inbound clearance</text>
+  </g>
+  <g class="clickable" data-key="io-arrival">
+    <rect x="1058.0" y="324.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="1122.0" y="357.3" text-anchor="middle" font-size="11.5" fill="#111111">Truck arrives</text>
+    <text x="1122.0" y="372.0" text-anchor="middle" font-size="11.5" fill="#111111">at Warehouse</text>
+  </g>
+  <g class="clickable" data-key="io-processing">
+    <rect x="1206.0" y="324.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="1270.0" y="345.0" text-anchor="middle" font-size="9.5" fill="#111111">SLA D+1:</text>
+    <text x="1270.0" y="357.7" text-anchor="middle" font-size="9.5" fill="#111111">Unloading→Counting</text>
+    <text x="1270.0" y="370.4" text-anchor="middle" font-size="9.5" fill="#111111">→Checking→Put-</text>
+    <text x="1270.0" y="383.1" text-anchor="middle" font-size="9.5" fill="#111111">away→Inv. Updated</text>
+  </g>
+  <g class="clickable" data-key="io-processing">
+    <rect x="1354.0" y="324.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="1418.0" y="364.7" text-anchor="middle" font-size="11.5" fill="#111111">Inbound Done</text>
+  </g>
+  <path d="M 298.0 125.0 L 308.0 125.0 L 308.0 243.0 L 314.0 243.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <path d="M 446.0 243.0 L 456.0 243.0 L 456.0 479.0 L 462.0 479.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <path d="M 594.0 479.0 L 604.0 479.0 L 604.0 243.0 L 610.0 243.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <line x1="742.0" y1="243.0" x2="758.0" y2="243.0" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <path d="M 890.0 243.0 L 900.0 243.0 L 900.0 361.0 L 906.0 361.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <line x1="1038.0" y1="361.0" x2="1054.0" y2="361.0" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <line x1="1186.0" y1="361.0" x2="1202.0" y2="361.0" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <line x1="1334.0" y1="361.0" x2="1350.0" y2="361.0" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+  <g class="clickable" data-key="io-pre-inbound">
+    <rect x="170.0" y="442.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="234.0" y="462.4" text-anchor="middle" font-size="10" fill="#111111">Factory (Domestic</text>
+    <text x="234.0" y="475.6" text-anchor="middle" font-size="10" fill="#111111">VN)</text>
+    <text x="234.0" y="488.8" text-anchor="middle" font-size="10" fill="#111111">sends Packing List</text>
+    <text x="234.0" y="502.0" text-anchor="middle" font-size="10" fill="#111111">(PL)</text>
+  </g>
+  <path d="M 298.0 479.0 L 308.0 479.0 L 308.0 243.0 L 314.0 243.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowIB)"/>
+</svg>
+<svg viewBox="0 0 1374 548" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+  <defs>
+    <marker id="arrowOB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#111111"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1374" height="548" fill="#ffffff"/>
+  <text x="687" y="26" text-anchor="middle" font-size="18" font-weight="bold" fill="#111111">OUTBOUND PROCESS FLOW</text>
+  <rect x="0" y="66.0" width="1374" height="118" fill="#ffffff"/>
+  <line x1="0" y1="66.0" x2="1374" y2="66.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="80.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="129.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">CUSTOMER</text>
+  <rect x="0" y="184.0" width="1374" height="118" fill="#f4f4f5"/>
+  <line x1="0" y1="184.0" x2="1374" y2="184.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="198.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="247.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">KEC</text>
+  <rect x="0" y="302.0" width="1374" height="118" fill="#ffffff"/>
+  <line x1="0" y1="302.0" x2="1374" y2="302.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="316.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="358.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">WH</text>
+  <text x="73.0" y="372.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">(WAREHOUSE)</text>
+  <rect x="0" y="420.0" width="1374" height="118" fill="#f4f4f5"/>
+  <line x1="0" y1="420.0" x2="1374" y2="420.0" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="8" y="434.0" width="130" height="90" rx="6" fill="#111111"/>
+  <text x="73.0" y="483.0" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">FACTORY</text>
+  <line x1="0" y1="538.0" x2="1374" y2="538.0" stroke="#cbd5e1" stroke-width="1"/>
+  <line x1="150.0" y1="60" x2="150.0" y2="538.0" stroke="#94a3b8" stroke-width="1.2"/>
+  <g class="clickable" data-key="ob-request">
+    <rect x="170.0" y="88.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="234.0" y="121.3" text-anchor="middle" font-size="11.5" fill="#111111">Submit Outbound</text>
+    <text x="234.0" y="136.0" text-anchor="middle" font-size="11.5" fill="#111111">Request (OR)</text>
+  </g>
+  <g class="clickable" data-key="ob-kec-check">
+    <rect x="318.0" y="206.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="382.0" y="226.6" text-anchor="middle" font-size="9.8" fill="#111111">Check</text>
+    <text x="382.0" y="239.6" text-anchor="middle" font-size="9.8" fill="#111111">inventory/split/VAS</text>
+    <text x="382.0" y="252.6" text-anchor="middle" font-size="9.8" fill="#111111">+ prepare OR file to</text>
+    <text x="382.0" y="265.6" text-anchor="middle" font-size="9.8" fill="#111111">WH</text>
+  </g>
+  <g class="clickable" data-key="ob-wh-plan">
+    <rect x="466.0" y="324.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="530.0" y="339.0" text-anchor="middle" font-size="9.3" fill="#111111">Check stock, customs</text>
+    <text x="530.0" y="351.5" text-anchor="middle" font-size="9.3" fill="#111111">decl.,</text>
+    <text x="530.0" y="364.0" text-anchor="middle" font-size="9.3" fill="#111111">factory source,</text>
+    <text x="530.0" y="376.5" text-anchor="middle" font-size="9.3" fill="#111111">CO/NO-CO,</text>
+    <text x="530.0" y="389.0" text-anchor="middle" font-size="9.3" fill="#111111">complete OR file</text>
+  </g>
+  <g class="clickable" data-key="ob-kec-confirm">
+    <rect x="614.0" y="206.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="678.0" y="226.6" text-anchor="middle" font-size="9.8" fill="#111111">Review OR file,</text>
+    <text x="678.0" y="239.6" text-anchor="middle" font-size="9.8" fill="#111111">send</text>
+    <text x="678.0" y="252.6" text-anchor="middle" font-size="9.8" fill="#111111">Customer to confirm</text>
+    <text x="678.0" y="265.6" text-anchor="middle" font-size="9.8" fill="#111111">CO</text>
+    <ellipse cx="678.0" cy="288.0" rx="42" ry="10" fill="#ffffff" stroke="#111111" stroke-width="1.5"/>
+    <text x="678.0" y="292.0" text-anchor="middle" font-size="9" fill="#111111">FOMS OR</text>
+  </g>
+  <g class="clickable" data-key="ob-customer-confirm">
+    <rect x="762.0" y="88.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="826.0" y="121.3" text-anchor="middle" font-size="11.5" fill="#111111">Customer</text>
+    <text x="826.0" y="136.0" text-anchor="middle" font-size="11.5" fill="#111111">confirms CO</text>
+  </g>
+  <g class="clickable" data-key="ob-execution">
+    <rect x="910.0" y="324.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="974.0" y="351.7" text-anchor="middle" font-size="9" fill="#111111">Pick→VAS→Labeling→</text>
+    <text x="974.0" y="363.9" text-anchor="middle" font-size="9" fill="#111111">Pack→DO Prep→Submit</text>
+    <text x="974.0" y="376.1" text-anchor="middle" font-size="9" fill="#111111">Customs</text>
+  </g>
+  <g class="clickable" data-key="ob-sla">
+    <rect x="1058.0" y="442.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="1122.0" y="463.6" text-anchor="middle" font-size="9" fill="#111111">SLA OUTBOUND: Day1 DO</text>
+    <text x="1122.0" y="475.8" text-anchor="middle" font-size="9" fill="#111111">Decl.+</text>
+    <text x="1122.0" y="488.0" text-anchor="middle" font-size="9" fill="#111111">Customs (COT 14:00);</text>
+    <text x="1122.0" y="500.2" text-anchor="middle" font-size="9" fill="#111111">Day2 Pickup</text>
+  </g>
+  <g class="clickable" data-key="ob-done">
+    <rect x="1206.0" y="442.0" width="128" height="74" rx="7" fill="#ffffff" stroke="#111111" stroke-width="1.8"/>
+    <text x="1270.0" y="475.3" text-anchor="middle" font-size="11.5" fill="#111111">Outbound Done</text>
+    <text x="1270.0" y="490.0" text-anchor="middle" font-size="11.5" fill="#111111">ETD +2</text>
+  </g>
+  <path d="M 298.0 125.0 L 308.0 125.0 L 308.0 243.0 L 314.0 243.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowOB)"/>
+  <path d="M 446.0 243.0 L 456.0 243.0 L 456.0 361.0 L 462.0 361.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowOB)"/>
+  <path d="M 594.0 361.0 L 604.0 361.0 L 604.0 243.0 L 610.0 243.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowOB)"/>
+  <path d="M 742.0 243.0 L 752.0 243.0 L 752.0 125.0 L 758.0 125.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowOB)"/>
+  <path d="M 890.0 125.0 L 900.0 125.0 L 900.0 361.0 L 906.0 361.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowOB)"/>
+  <path d="M 1038.0 361.0 L 1048.0 361.0 L 1048.0 479.0 L 1054.0 479.0" fill="none" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowOB)"/>
+  <line x1="1186.0" y1="479.0" x2="1202.0" y2="479.0" stroke="#111111" stroke-width="1.8" marker-end="url(#arrowOB)"/>
+</svg>
     </div>
     </div>
     <div class="step-detail" id="io-detail">Click vào 1 ô trong sơ đồ để xem mô tả chi tiết bước đó.</div>
@@ -169,204 +251,208 @@
 <svg viewBox="0 0 1600 580" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
   <defs>
     <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+      <path d="M0,0 L10,5 L0,10 z" fill="#111111"/>
     </marker>
   </defs>
   <rect x="0" y="0" width="1600" height="580" fill="#ffffff"/>
-  <text x="800" y="28" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">Luồng A — Self-placed booking (KEC book qua EXPRESS FWD thay mặt TOPOLOGIE)</text>
+  <text x="800" y="28" text-anchor="middle" font-size="20" font-weight="bold" fill="#111111">Luồng A — Self-placed booking (KEC book qua EXPRESS FWD thay mặt TOPOLOGIE)</text>
 
-  <rect x="0" y="60" width="1600" height="110" fill="#F5F3FF"/>
-  <rect x="0" y="170" width="1600" height="110" fill="#ECFEFF"/>
-  <rect x="0" y="280" width="1600" height="110" fill="#F0FDF4"/>
-  <rect x="0" y="390" width="1600" height="110" fill="#FFFBEB"/>
+  <rect x="0" y="60" width="1600" height="110" fill="#ffffff"/>
+  <rect x="0" y="170" width="1600" height="110" fill="#f4f4f5"/>
+  <rect x="0" y="280" width="1600" height="110" fill="#ffffff"/>
+  <rect x="0" y="390" width="1600" height="110" fill="#f4f4f5"/>
   <line x1="0" y1="170" x2="1600" y2="170" stroke="#CBD5E1" stroke-width="1"/>
   <line x1="0" y1="280" x2="1600" y2="280" stroke="#CBD5E1" stroke-width="1"/>
   <line x1="0" y1="390" x2="1600" y2="390" stroke="#CBD5E1" stroke-width="1"/>
   <line x1="0" y1="500" x2="1600" y2="500" stroke="#CBD5E1" stroke-width="1"/>
 
-  <rect x="10" y="80" width="140" height="70" rx="8" fill="#7C3AED"/>
+  <rect x="10" y="80" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="120" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">TOPOLOGIE</text>
 
-  <rect x="10" y="190" width="140" height="70" rx="8" fill="#0891B2"/>
+  <rect x="10" y="190" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="230" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">KEC</text>
 
-  <rect x="10" y="300" width="140" height="70" rx="8" fill="#16A34A"/>
+  <rect x="10" y="300" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="332" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">BONDED</text>
   <text x="80" y="348" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">WH</text>
 
-  <rect x="10" y="410" width="140" height="70" rx="8" fill="#D97706"/>
+  <rect x="10" y="410" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="442" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">EXPRESS</text>
   <text x="80" y="458" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">FWD</text>
 
   <!-- s1 TOPOLOGIE col1 x160 --><g class="clickable" data-key="ex-a-topologie1">
-  <rect x="160" y="80" width="105" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
-  <text x="212" y="110" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi outbound</text>
-  <text x="212" y="124" text-anchor="middle" font-size="10.5" fill="#1e293b">request (OR)</text>
+  <rect x="160" y="80" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="212" y="110" text-anchor="middle" font-size="10.5" fill="#111111">Gửi outbound</text>
+  <text x="212" y="124" text-anchor="middle" font-size="10.5" fill="#111111">request (OR)</text>
 
   </g><!-- s2 KEC col2 x280 --><g class="clickable" data-key="ex-a-kec1">
-  <rect x="280" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="332" y="220" text-anchor="middle" font-size="10.5" fill="#1e293b">Nhận OR +</text>
-  <text x="332" y="234" text-anchor="middle" font-size="10.5" fill="#1e293b">check tồn kho</text>
+  <rect x="280" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="332" y="220" text-anchor="middle" font-size="10.5" fill="#111111">Nhận OR +</text>
+  <text x="332" y="234" text-anchor="middle" font-size="10.5" fill="#111111">check tồn kho</text>
 
   </g><!-- s3 KEC col3 x400 --><g class="clickable" data-key="ex-a-kec2">
-  <rect x="400" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="452" y="215" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi kho: phân</text>
-  <text x="452" y="229" text-anchor="middle" font-size="10.5" fill="#1e293b">chia CDS /</text>
-  <text x="452" y="243" text-anchor="middle" font-size="10.5" fill="#1e293b">VENDOR</text>
+  <rect x="400" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="452" y="215" text-anchor="middle" font-size="10.5" fill="#111111">Gửi kho: phân</text>
+  <text x="452" y="229" text-anchor="middle" font-size="10.5" fill="#111111">chia CDS /</text>
+  <text x="452" y="243" text-anchor="middle" font-size="10.5" fill="#111111">VENDOR</text>
 
   </g><!-- s4 BONDED WH col4 x520 --><g class="clickable" data-key="ex-a-wh1">
-  <rect x="520" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
-  <text x="572" y="322" text-anchor="middle" font-size="10" fill="#1e293b">Phản hồi CDS,</text>
-  <text x="572" y="335" text-anchor="middle" font-size="10" fill="#1e293b">nhận OR, pick&amp;pack</text>
-  <text x="572" y="348" text-anchor="middle" font-size="10" fill="#1e293b">+ dim weight</text>
+  <rect x="520" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="572" y="322" text-anchor="middle" font-size="10" fill="#111111">Phản hồi CDS,</text>
+  <text x="572" y="335" text-anchor="middle" font-size="10" fill="#111111">nhận OR, pick&amp;pack</text>
+  <text x="572" y="348" text-anchor="middle" font-size="10" fill="#111111">+ dim weight</text>
 
   </g><!-- s5 BONDED WH col5 x640 --><g class="clickable" data-key="ex-a-wh2">
-  <rect x="640" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
-  <text x="692" y="330" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi DO</text>
-  <text x="692" y="344" text-anchor="middle" font-size="10.5" fill="#1e293b">cho KEC</text>
+  <rect x="640" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="692" y="330" text-anchor="middle" font-size="10.5" fill="#111111">Gửi DO</text>
+  <text x="692" y="344" text-anchor="middle" font-size="10.5" fill="#111111">cho KEC</text>
 
   </g><!-- s6 KEC col6 x760 --><g class="clickable" data-key="ex-a-kec3">
-  <rect x="760" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="812" y="215" text-anchor="middle" font-size="10.5" fill="#1e293b">Book qua</text>
-  <text x="812" y="229" text-anchor="middle" font-size="10.5" fill="#1e293b">EXPRESS FWD</text>
-  <text x="812" y="243" text-anchor="middle" font-size="10.5" fill="#1e293b">(Alphatrans)</text>
+  <rect x="760" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="812" y="215" text-anchor="middle" font-size="10.5" fill="#111111">Book qua</text>
+  <text x="812" y="229" text-anchor="middle" font-size="10.5" fill="#111111">EXPRESS FWD</text>
+  <text x="812" y="243" text-anchor="middle" font-size="10.5" fill="#111111">(Alphatrans)</text>
 
   </g><!-- s7 EXPRESS FWD col7 x880 --><g class="clickable" data-key="ex-a-fwd">
-  <rect x="880" y="410" width="105" height="70" rx="8" fill="#ffffff" stroke="#D97706" stroke-width="2"/>
-  <text x="932" y="440" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi AWB +</text>
-  <text x="932" y="454" text-anchor="middle" font-size="10.5" fill="#1e293b">C.W + giá</text>
+  <rect x="880" y="410" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="932" y="440" text-anchor="middle" font-size="10.5" fill="#111111">Gửi AWB +</text>
+  <text x="932" y="454" text-anchor="middle" font-size="10.5" fill="#111111">C.W + giá</text>
 
   </g><!-- s8 KEC col8 x1000 --><g class="clickable" data-key="ex-a-kec4">
-  <rect x="1000" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="1052" y="220" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi báo giá</text>
-  <text x="1052" y="234" text-anchor="middle" font-size="10.5" fill="#1e293b">cho TOPOLOGIE</text>
+  <rect x="1000" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1052" y="220" text-anchor="middle" font-size="10.5" fill="#111111">Gửi báo giá</text>
+  <text x="1052" y="234" text-anchor="middle" font-size="10.5" fill="#111111">cho TOPOLOGIE</text>
 
   </g><!-- s9 TOPOLOGIE col9 x1120 --><g class="clickable" data-key="ex-a-topologie2">
-  <rect x="1120" y="80" width="105" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
-  <text x="1172" y="120" text-anchor="middle" font-size="11" fill="#1e293b">Confirm</text>
+  <rect x="1120" y="80" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1172" y="120" text-anchor="middle" font-size="11" fill="#111111">Confirm</text>
 
   </g><!-- s10 KEC col10 x1240 --><g class="clickable" data-key="ex-a-kec5">
-  <rect x="1240" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="1292" y="212" text-anchor="middle" font-size="10" fill="#1e293b">Lấy driver info</text>
-  <text x="1292" y="225" text-anchor="middle" font-size="10" fill="#1e293b">(KEC tự book</text>
-  <text x="1292" y="238" text-anchor="middle" font-size="10" fill="#1e293b">tài xế)</text>
+  <rect x="1240" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1292" y="212" text-anchor="middle" font-size="10" fill="#111111">Lấy driver info</text>
+  <text x="1292" y="225" text-anchor="middle" font-size="10" fill="#111111">(KEC tự book</text>
+  <text x="1292" y="238" text-anchor="middle" font-size="10" fill="#111111">tài xế)</text>
 
   </g><!-- s11 BONDED WH col11 x1360 --><g class="clickable" data-key="ex-a-wh3">
-  <rect x="1360" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
-  <text x="1412" y="320" text-anchor="middle" font-size="9.5" fill="#1e293b">Làm DO + khai</text>
-  <text x="1412" y="332" text-anchor="middle" font-size="9.5" fill="#1e293b">hải quan (COT 14h)</text>
-  <text x="1412" y="344" text-anchor="middle" font-size="9.5" fill="#1e293b">→ Truck lấy hàng</text>
+  <rect x="1360" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1412" y="320" text-anchor="middle" font-size="9.5" fill="#111111">Làm DO + khai</text>
+  <text x="1412" y="332" text-anchor="middle" font-size="9.5" fill="#111111">hải quan (COT 14h)</text>
+  <text x="1412" y="344" text-anchor="middle" font-size="9.5" fill="#111111">→ Truck lấy hàng</text>
 
   <!-- Arrows -->
-  <line x1="265" y1="115" x2="278" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="385" y1="225" x2="398" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="505" y1="225" x2="518" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="625" y1="335" x2="638" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="745" y1="335" x2="758" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="865" y1="225" x2="878" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="985" y1="445" x2="998" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="1105" y1="225" x2="1118" y2="115" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="1225" y1="115" x2="1238" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-  <line x1="1345" y1="225" x2="1358" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
-</svg></g><svg viewBox="0 0 1600 580" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+  <line x1="265" y1="115" x2="278" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="385" y1="225" x2="398" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="505" y1="225" x2="518" y2="335" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="625" y1="335" x2="638" y2="335" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="745" y1="335" x2="758" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="865" y1="225" x2="878" y2="445" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="985" y1="445" x2="998" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="1105" y1="225" x2="1118" y2="115" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="1225" y1="115" x2="1238" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="1345" y1="225" x2="1358" y2="335" stroke="#111111" stroke-width="2" marker-end="url(#arrowA)"/>
+</g>
+</svg>
+<svg viewBox="0 0 1600 580" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
   <defs>
     <marker id="arrowB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+      <path d="M0,0 L10,5 L0,10 z" fill="#111111"/>
     </marker>
   </defs>
   <rect x="0" y="0" width="1600" height="580" fill="#ffffff"/>
-  <text x="800" y="28" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">Luồng B — CNEE-nominated booking (CNEE đặt AWB, KEC điều phối nội bộ)</text>
+  <text x="800" y="28" text-anchor="middle" font-size="20" font-weight="bold" fill="#111111">Luồng B — CNEE-nominated booking (CNEE đặt AWB, KEC điều phối nội bộ)</text>
 
-  <rect x="0" y="60" width="1600" height="110" fill="#FAF5FF"/>
-  <rect x="0" y="170" width="1600" height="110" fill="#ECFEFF"/>
-  <rect x="0" y="280" width="1600" height="110" fill="#F0FDF4"/>
-  <rect x="0" y="390" width="1600" height="110" fill="#F8FAFC"/>
+  <rect x="0" y="60" width="1600" height="110" fill="#ffffff"/>
+  <rect x="0" y="170" width="1600" height="110" fill="#f4f4f5"/>
+  <rect x="0" y="280" width="1600" height="110" fill="#ffffff"/>
+  <rect x="0" y="390" width="1600" height="110" fill="#f4f4f5"/>
   <line x1="0" y1="170" x2="1600" y2="170" stroke="#CBD5E1" stroke-width="1"/>
   <line x1="0" y1="280" x2="1600" y2="280" stroke="#CBD5E1" stroke-width="1"/>
   <line x1="0" y1="390" x2="1600" y2="390" stroke="#CBD5E1" stroke-width="1"/>
   <line x1="0" y1="500" x2="1600" y2="500" stroke="#CBD5E1" stroke-width="1"/>
 
-  <rect x="10" y="80" width="140" height="70" rx="8" fill="#7C3AED"/>
+  <rect x="10" y="80" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="120" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">CNEE</text>
 
-  <rect x="10" y="190" width="140" height="70" rx="8" fill="#0891B2"/>
+  <rect x="10" y="190" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="230" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">KEC</text>
 
-  <rect x="10" y="300" width="140" height="70" rx="8" fill="#16A34A"/>
+  <rect x="10" y="300" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="332" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">BONDED</text>
   <text x="80" y="348" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">WH</text>
 
-  <rect x="10" y="410" width="140" height="70" rx="8" fill="#475569"/>
+  <rect x="10" y="410" width="140" height="70" rx="8" fill="#111111"/>
   <text x="80" y="436" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#ffffff">TRUCK DRIVER /</text>
   <text x="80" y="450" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#ffffff">CUSTOMS</text>
   <text x="80" y="464" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#ffffff">COUNTER</text>
 
   <!-- s1 CNEE col1 x160 --><g class="clickable" data-key="ex-b-cnee1">
-  <rect x="160" y="80" width="120" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
-  <text x="220" y="120" text-anchor="middle" font-size="11.5" fill="#1e293b">Đặt AWB</text>
+  <rect x="160" y="80" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="220" y="120" text-anchor="middle" font-size="11.5" fill="#111111">Đặt AWB</text>
 
   </g><!-- s2 CNEE col2 x300 --><g class="clickable" data-key="ex-b-cnee2">
-  <rect x="300" y="80" width="120" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
-  <text x="360" y="112" text-anchor="middle" font-size="10.5" fill="#1e293b">Chọn remote</text>
-  <text x="360" y="126" text-anchor="middle" font-size="10.5" fill="#1e293b">pickup + gửi</text>
-  <text x="360" y="140" text-anchor="middle" font-size="10.5" fill="#1e293b">control number</text>
+  <rect x="300" y="80" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="360" y="112" text-anchor="middle" font-size="10.5" fill="#111111">Chọn remote</text>
+  <text x="360" y="126" text-anchor="middle" font-size="10.5" fill="#111111">pickup + gửi</text>
+  <text x="360" y="140" text-anchor="middle" font-size="10.5" fill="#111111">control number</text>
 
   </g><!-- s3 KEC col3 x440 --><g class="clickable" data-key="ex-b-kec1">
-  <rect x="440" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="500" y="215" text-anchor="middle" font-size="10.5" fill="#1e293b">Check tồn kho +</text>
-  <text x="500" y="229" text-anchor="middle" font-size="10.5" fill="#1e293b">gửi kho điền</text>
-  <text x="500" y="243" text-anchor="middle" font-size="10.5" fill="#1e293b">CDS / VENDOR</text>
+  <rect x="440" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="500" y="215" text-anchor="middle" font-size="10.5" fill="#111111">Check tồn kho +</text>
+  <text x="500" y="229" text-anchor="middle" font-size="10.5" fill="#111111">gửi kho điền</text>
+  <text x="500" y="243" text-anchor="middle" font-size="10.5" fill="#111111">CDS / VENDOR</text>
 
   </g><!-- s4 BONDED WH col4 x580 --><g class="clickable" data-key="ex-b-wh1">
-  <rect x="580" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
-  <text x="640" y="330" text-anchor="middle" font-size="10.5" fill="#1e293b">Pick &amp; pack +</text>
-  <text x="640" y="344" text-anchor="middle" font-size="10.5" fill="#1e293b">đo dim weight</text>
+  <rect x="580" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="640" y="330" text-anchor="middle" font-size="10.5" fill="#111111">Pick &amp; pack +</text>
+  <text x="640" y="344" text-anchor="middle" font-size="10.5" fill="#111111">đo dim weight</text>
 
   </g><!-- s5 BONDED WH col5 x720 --><g class="clickable" data-key="ex-b-wh2">
-  <rect x="720" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
-  <text x="780" y="330" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi DO</text>
-  <text x="780" y="344" text-anchor="middle" font-size="10.5" fill="#1e293b">cho KEC</text>
+  <rect x="720" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="780" y="330" text-anchor="middle" font-size="10.5" fill="#111111">Gửi DO</text>
+  <text x="780" y="344" text-anchor="middle" font-size="10.5" fill="#111111">cho KEC</text>
 
   </g><!-- s6 KEC col6 x860 --><g class="clickable" data-key="ex-b-kec2">
-  <rect x="860" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="920" y="212" text-anchor="middle" font-size="10" fill="#1e293b">Check thông tin,</text>
-  <text x="920" y="225" text-anchor="middle" font-size="10" fill="#1e293b">dim weight +</text>
-  <text x="920" y="238" text-anchor="middle" font-size="10" fill="#1e293b">lấy driver info</text>
+  <rect x="860" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="920" y="212" text-anchor="middle" font-size="10" fill="#111111">Check thông tin,</text>
+  <text x="920" y="225" text-anchor="middle" font-size="10" fill="#111111">dim weight +</text>
+  <text x="920" y="238" text-anchor="middle" font-size="10" fill="#111111">lấy driver info</text>
 
   </g><!-- s7 KEC col7 x1000 --><g class="clickable" data-key="ex-b-kec3">
-  <rect x="1000" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
-  <text x="1060" y="218" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi booking +</text>
-  <text x="1060" y="232" text-anchor="middle" font-size="10.5" fill="#1e293b">tài xế cho</text>
-  <text x="1060" y="246" text-anchor="middle" font-size="10.5" fill="#1e293b">Bonded WH</text>
+  <rect x="1000" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1060" y="218" text-anchor="middle" font-size="10.5" fill="#111111">Gửi booking +</text>
+  <text x="1060" y="232" text-anchor="middle" font-size="10.5" fill="#111111">tài xế cho</text>
+  <text x="1060" y="246" text-anchor="middle" font-size="10.5" fill="#111111">Bonded WH</text>
 
   </g><!-- s8 BONDED WH col8 x1140 --><g class="clickable" data-key="ex-b-wh3">
-  <rect x="1140" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
-  <text x="1200" y="320" text-anchor="middle" font-size="10" fill="#1e293b">Làm DO + khai</text>
-  <text x="1200" y="333" text-anchor="middle" font-size="10" fill="#1e293b">hải quan (COT 14h,</text>
-  <text x="1200" y="346" text-anchor="middle" font-size="10" fill="#1e293b">duyệt ~1 ngày)</text>
+  <rect x="1140" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1200" y="320" text-anchor="middle" font-size="10" fill="#111111">Làm DO + khai</text>
+  <text x="1200" y="333" text-anchor="middle" font-size="10" fill="#111111">hải quan (COT 14h,</text>
+  <text x="1200" y="346" text-anchor="middle" font-size="10" fill="#111111">duyệt ~1 ngày)</text>
 
   </g><!-- s9 TRUCK col9 x1280 --><g class="clickable" data-key="ex-b-truck1">
-  <rect x="1280" y="410" width="120" height="70" rx="8" fill="#ffffff" stroke="#475569" stroke-width="2"/>
-  <text x="1340" y="436" text-anchor="middle" font-size="10.5" fill="#1e293b">Truck đến, tự</text>
-  <text x="1340" y="450" text-anchor="middle" font-size="10.5" fill="#1e293b">nộp docs tại</text>
-  <text x="1340" y="464" text-anchor="middle" font-size="10.5" fill="#1e293b">quầy hải quan</text>
+  <rect x="1280" y="410" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1340" y="436" text-anchor="middle" font-size="10.5" fill="#111111">Truck đến, tự</text>
+  <text x="1340" y="450" text-anchor="middle" font-size="10.5" fill="#111111">nộp docs tại</text>
+  <text x="1340" y="464" text-anchor="middle" font-size="10.5" fill="#111111">quầy hải quan</text>
 
   </g><!-- s10 TRUCK col10 x1420 --><g class="clickable" data-key="ex-b-truck2">
-  <rect x="1420" y="410" width="120" height="70" rx="8" fill="#ffffff" stroke="#475569" stroke-width="2"/>
-  <text x="1480" y="440" text-anchor="middle" font-size="10.5" fill="#1e293b">Chờ cắt seal,</text>
-  <text x="1480" y="454" text-anchor="middle" font-size="10.5" fill="#1e293b">truck rời kho</text>
+  <rect x="1420" y="410" width="120" height="70" rx="8" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+  <text x="1480" y="440" text-anchor="middle" font-size="10.5" fill="#111111">Chờ cắt seal,</text>
+  <text x="1480" y="454" text-anchor="middle" font-size="10.5" fill="#111111">truck rời kho</text>
 
   <!-- Arrows -->
-  <line x1="280" y1="115" x2="298" y2="115" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="420" y1="115" x2="438" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="560" y1="225" x2="578" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="700" y1="335" x2="718" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="840" y1="335" x2="858" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="980" y1="225" x2="998" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="1120" y1="225" x2="1138" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="1260" y1="335" x2="1278" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-  <line x1="1400" y1="445" x2="1418" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
-</svg></g>    </div>
+  <line x1="280" y1="115" x2="298" y2="115" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="420" y1="115" x2="438" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="560" y1="225" x2="578" y2="335" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="700" y1="335" x2="718" y2="335" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="840" y1="335" x2="858" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="980" y1="225" x2="998" y2="225" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="1120" y1="225" x2="1138" y2="335" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="1260" y1="335" x2="1278" y2="445" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="1400" y1="445" x2="1418" y2="445" stroke="#111111" stroke-width="2" marker-end="url(#arrowB)"/>
+</g>
+</svg>
+    </div>
     <div class="step-detail" id="ex-detail">Click vào 1 ô trong sơ đồ để xem mô tả chi tiết bước đó.</div>
     <div class="notes-grid">
       <div class="box2"><h4>SLA / CONTROL POINTS</h4><ul>
