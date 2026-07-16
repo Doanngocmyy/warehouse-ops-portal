@@ -17,6 +17,8 @@
     const words = String(text).split(" ").filter(Boolean);
     const lines = [];
     let cur = "";
+    // First pass: wrap ALL words into lines (no early exit), so nothing
+    // is silently dropped no matter how long the text is.
     for (const w of words) {
       const test = cur ? cur + " " + w : w;
       if (font.widthOfTextAtSize(test, size) <= maxWidth || !cur) {
@@ -25,11 +27,18 @@
         lines.push(cur);
         cur = w;
       }
-      if (lines.length >= maxLines - 1) break;
     }
     if (cur) lines.push(cur);
-    // if still words left un-pushed (loop broke early), append remainder to last line
-    return lines.slice(0, maxLines);
+    if (lines.length <= maxLines) return lines;
+    // Second pass: only now, if it truly doesn't fit in maxLines, truncate
+    // the last line and mark it with an ellipsis instead of dropping words.
+    const truncated = lines.slice(0, maxLines);
+    let last = truncated[maxLines - 1];
+    while (last.length > 0 && font.widthOfTextAtSize(last + "...", size) > maxWidth) {
+      last = last.slice(0, -1);
+    }
+    truncated[maxLines - 1] = last + "...";
+    return truncated;
   }
 
   /* ---------- PER-EAN LABEL (Single + Mix-per-row) ---------- */
@@ -67,12 +76,12 @@
     P.drawVLine(page, subDivX, yCartonBot, yHeaderBot, 1.0);
     P.drawCenteredText(page, font, "Carton No.", (xA0 + subDivX) / 2, cartonMidY, 13, black);
     P.drawCenteredText(page, font, String(opts.cartonNo), (subDivX + xA1) / 2, cartonMidY, 18, black);
-    P.drawLeftText(page, font, "Ref No.", xA1 + 6, yHeaderBot - 12, 9, black);
-    const refLines = wrapLines(font, opts.refNo || "", 7.5, xC1 - (xA1 + 6) - 4, 2);
-    let ry = yHeaderBot - 26;
+    P.drawLeftText(page, font, "Ref No.", xA1 + 6, yHeaderBot - 11, 8.5, black);
+    const refLines = wrapLines(font, opts.refNo || "", 7, xC1 - (xA1 + 6) - 4, 3);
+    let ry = yHeaderBot - 23;
     for (const ln of refLines) {
-      page.drawText(ln, { x: xA1 + 6, y: ry, size: 7.5, font: font, color: black });
-      ry -= 10;
+      page.drawText(ln, { x: xA1 + 6, y: ry, size: 7, font: font, color: black });
+      ry -= 9;
     }
 
     // column header row
@@ -102,7 +111,7 @@
   // Matches "test mix label.pdf": header, Carton No/Ref row (single line),
   // #SKU/Total Qty/Barcode header, N sku rows (barcode col = N/A),
   // Carton ID/Batch# + CTN Qty + QR footer row.
-  // pageW/pageH allow the "grow to A4" mode; fontScale allows the "shrink" mode.
+  // pageW/pageH allow the "grow label height" mode; fontScale allows the "shrink" mode.
   function drawMixSummaryLabel(page, font, opts) {
     const W = opts.pageW || P.LABEL_W, H = opts.pageH || P.LABEL_H;
     const scale = opts.fontScale || 1;
