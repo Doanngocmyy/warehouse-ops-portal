@@ -6,10 +6,15 @@
  * Output: 1 combined "carton summary" label per carton, listing
  * every SKU packed inside it (Carton ID = colP + "-" + totalQty).
  *
- * NEW: auto shrink font to fit standard 6x4in label up to
+ * Auto shrink font to fit standard 6x4in label up to
  * SHRINK_MAX_ROWS SKU rows; beyond that, grow the label's HEIGHT
  * only as much as needed (width stays 6in, no A4 sheet switch) up to
  * MAX_LABEL_H, falling back to font-shrink only if still too tall.
+ *
+ * Output pages are sorted ascending by Carton No. (top -> bottom of
+ * the PDF) across ALL groups, and a Carton No. sequence check logs
+ * [WARNING] lines for any missing or duplicate/overlapping carton
+ * numbers before export (port of "PDF in order.ipynb").
  * ========================================================== */
 (function () {
   const U = WOPUtils;
@@ -86,9 +91,12 @@
     if (current) groups.push(current);
     log("[INFO] Detected groups: " + groups.length);
 
-    const { pdfDoc, font } = await WOPPdf.createDoc();
     let totalLabels = 0;
     const layoutCounts = { normal: 0, shrink: 0, grow_label: 0, grow_label_shrink: 0 };
+    // Collect label draw-jobs first (instead of writing pages immediately)
+    // so the whole document can be re-sorted by Carton No. before export.
+    const pendingLabels = [];
+    const cartonAssignments = [];
 
     for (const g of groups) {
       let cartonFrom, cartonTo;
@@ -136,10 +144,11 @@
       layoutCounts[layout.mode]++;
 
       for (let cartonNo = cartonFrom; cartonNo <= cartonTo; cartonNo++) {
-        const page = pdfDoc.addPage([layout.pageW, layout.pageH]);
-        WOPLabels.drawMixSummaryLabel(page, font, {
-          pageW: layout.pageW, pageH: layout.pageH, fontScale: layout.fontScale, rowHeight: layout.rowHeight,
-          cartonNo, refNo: REF_NO, rows: skuLines, cartonId: cartonIdGenerated, ctnQty: ctnQtyVal,
+        cartonAssignments.push({ cartonNo: cartonNo, groupId: g.startRow });
+        pendingLabels.push({
+          cartonNo: cartonNo, pageW: layout.pageW, pageH: layout.pageH,
+          fontScale: layout.fontScale, rowHeight: layout.rowHeight,
+          rows: skuLines, cartonId: cartonIdGenerated, ctnQty: ctnQtyVal,
         });
         totalLabels++;
       }
@@ -148,6 +157,23 @@
     log("[INFO] Layout used — normal: " + layoutCounts.normal + " | shrink: " + layoutCounts.shrink + " | grow-label: " + layoutCounts.grow_label + " | grow-label+shrink: " + layoutCounts.grow_label_shrink);
     log("[INFO] Total labels: " + totalLabels + " | Skipped/warnings: " + skipped.length);
     if (!totalLabels) throw new Error("Không có label nào được tạo — kiểm tra lại marker I=1/MIX, range J/K, và Carton ID cột P.");
+
+    // Carton No. sequence check — warn on missing numbers, and on the same
+    // physical carton number being claimed by two different groups/rows.
+    U.checkCartonSequence(cartonAssignments, log, "Carton No.");
+
+    // Sort ALL pages ascending by Carton No. (top -> bottom of the PDF),
+    // regardless of which group/Excel row they came from.
+    pendingLabels.sort((a, b) => a.cartonNo - b.cartonNo);
+
+    const { pdfDoc, font } = await WOPPdf.createDoc();
+    for (const item of pendingLabels) {
+      const page = pdfDoc.addPage([item.pageW, item.pageH]);
+      WOPLabels.drawMixSummaryLabel(page, font, {
+        pageW: item.pageW, pageH: item.pageH, fontScale: item.fontScale, rowHeight: item.rowHeight,
+        cartonNo: item.cartonNo, refNo: REF_NO, rows: item.rows, cartonId: item.cartonId, ctnQty: item.ctnQty,
+      });
+    }
 
     const bytes = await pdfDoc.save();
     const files = [{ name: "ASN_Mix_Carton_Summary_Labels.pdf", blob: new Blob([bytes], { type: "application/pdf" }), count: totalLabels }];
