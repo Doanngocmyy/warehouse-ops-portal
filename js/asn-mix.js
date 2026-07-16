@@ -7,8 +7,9 @@
  * every SKU packed inside it (Carton ID = colP + "-" + totalQty).
  *
  * NEW: auto shrink font to fit standard 6x4in label up to
- * SHRINK_MAX_ROWS SKU rows; beyond that, auto-switch the page to
- * A4 at normal font size instead of shrinking further.
+ * SHRINK_MAX_ROWS SKU rows; beyond that, grow the label's HEIGHT
+ * only as much as needed (width stays 6in, no A4 sheet switch) up to
+ * MAX_LABEL_H, falling back to font-shrink only if still too tall.
  * ========================================================== */
 (function () {
   const U = WOPUtils;
@@ -18,6 +19,7 @@
   const BASE_ROW_H = 30;
   const BASE_BAND_FIXED = 42 + 34 + 30 + 26 + 60; // header+carton+colHeader+footerHeader+footerValueMin (scale=1)
   const USABLE_H = WOPPdf.LABEL_H - 22; // minus margins*2
+  const MAX_USABLE_H = WOPPdf.MAX_LABEL_H - 22;
 
   function isMissing(v) { return U.isMissing(v); }
 
@@ -32,12 +34,15 @@
       scale = Math.max(scale, MIN_FONT_SCALE);
       return { pageW: WOPPdf.LABEL_W, pageH: WOPPdf.LABEL_H, fontScale: scale, rowHeight: BASE_ROW_H, mode: "shrink" };
     }
-    // too many SKUs for the small label even after shrinking -> grow to A4
-    const usableA4 = WOPPdf.A4_H - 22;
-    const neededA4 = BASE_BAND_FIXED + BASE_ROW_H * nRows;
-    let scale = 1;
-    if (neededA4 > usableA4) scale = Math.max(usableA4 / neededA4, MIN_FONT_SCALE);
-    return { pageW: WOPPdf.A4_W, pageH: WOPPdf.A4_H, fontScale: scale, rowHeight: BASE_ROW_H, mode: "grow_a4" };
+    // too many SKUs for the standard label -> grow label HEIGHT only,
+    // just enough to fit at full font size (no A4 switch, no shrink yet)
+    if (neededAtScale1 <= MAX_USABLE_H) {
+      const pageH = neededAtScale1 + 22;
+      return { pageW: WOPPdf.LABEL_W, pageH: pageH, fontScale: 1, rowHeight: BASE_ROW_H, mode: "grow_label" };
+    }
+    // even the max label height isn't enough -> use max height + shrink font
+    const scale = Math.max(MAX_USABLE_H / neededAtScale1, MIN_FONT_SCALE);
+    return { pageW: WOPPdf.LABEL_W, pageH: WOPPdf.MAX_LABEL_H, fontScale: scale, rowHeight: BASE_ROW_H, mode: "grow_label_shrink" };
   }
 
   async function generate({ rows, refNoOverride, shrinkMaxRows, log }) {
@@ -83,7 +88,7 @@
 
     const { pdfDoc, font } = await WOPPdf.createDoc();
     let totalLabels = 0;
-    const layoutCounts = { normal: 0, shrink: 0, grow_a4: 0 };
+    const layoutCounts = { normal: 0, shrink: 0, grow_label: 0, grow_label_shrink: 0 };
 
     for (const g of groups) {
       let cartonFrom, cartonTo;
@@ -140,7 +145,7 @@
       }
     }
 
-    log("[INFO] Layout used — normal: " + layoutCounts.normal + " | shrink: " + layoutCounts.shrink + " | grow-to-A4: " + layoutCounts.grow_a4);
+    log("[INFO] Layout used — normal: " + layoutCounts.normal + " | shrink: " + layoutCounts.shrink + " | grow-label: " + layoutCounts.grow_label + " | grow-label+shrink: " + layoutCounts.grow_label_shrink);
     log("[INFO] Total labels: " + totalLabels + " | Skipped/warnings: " + skipped.length);
     if (!totalLabels) throw new Error("Không có label nào được tạo — kiểm tra lại marker I=1/MIX, range J/K, và Carton ID cột P.");
 

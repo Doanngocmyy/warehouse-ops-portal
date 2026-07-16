@@ -1,12 +1,14 @@
 /* ==========================================================
  * pdf-engine.js — shared pdf-lib label canvas helpers
- * Page size: 432 x 288 pt (6x4 in) for standard labels,
- * or A4 (595 x 842 pt) portrait for the "grow" mix summary layout.
+ * Page size: 432 x 288 pt (6x4 in) for standard labels.
+ * When a Mix carton summary has too many SKU rows to fit, the label
+ * height grows (width stays fixed) up to MAX_LABEL_H instead of
+ * switching to an A4 sheet layout — keeps the "tem" (label) look.
  * All text uses built-in Helvetica-Bold (ASCII-only content).
  * ========================================================== */
 (function () {
   const LABEL_W = 432, LABEL_H = 288;
-  const A4_W = 595.28, A4_H = 841.89;
+  const MAX_LABEL_H = 720; // 10in cap for the "grow" mix-summary layout
 
   async function createDoc() {
     const pdfDoc = await PDFLib.PDFDocument.create();
@@ -42,7 +44,7 @@
   }
 
   window.WOPPdf = {
-    LABEL_W: LABEL_W, LABEL_H: LABEL_H, A4_W: A4_W, A4_H: A4_H,
+    LABEL_W: LABEL_W, LABEL_H: LABEL_H, MAX_LABEL_H: MAX_LABEL_H,
     createDoc: createDoc, fitText: fitText,
     drawCenteredText: drawCenteredText, drawLeftText: drawLeftText,
     drawRect: drawRect, drawHLine: drawHLine, drawVLine: drawVLine,
