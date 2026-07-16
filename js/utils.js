@@ -81,6 +81,58 @@
     return result;
   }
 
+  // Check a list of {cartonNo, groupId} assignments for missing/duplicate carton
+  // numbers and print [INFO]/[WARNING] lines via the provided log() callback.
+  // "groupId" identifies which source row/group claimed that carton number —
+  // the same carton legitimately appearing more than once under the SAME
+  // groupId (e.g. several EAN lines inside one carton) is fine; the same
+  // carton claimed by TWO DIFFERENT groupIds is a real data conflict.
+  function checkCartonSequence(assignments, log, label) {
+    label = label || "Carton No.";
+    if (!assignments || !assignments.length) {
+      log("[INFO] " + label + " check: no carton numbers to check.");
+      return;
+    }
+    const byCarton = new Map();
+    for (const a of assignments) {
+      if (!byCarton.has(a.cartonNo)) byCarton.set(a.cartonNo, new Set());
+      byCarton.get(a.cartonNo).add(a.groupId);
+    }
+    const allCartons = Array.from(byCarton.keys()).sort(function (x, y) { return x - y; });
+    const minNo = allCartons[0], maxNo = allCartons[allCartons.length - 1];
+
+    const missing = [];
+    for (let n = minNo; n <= maxNo; n++) { if (!byCarton.has(n)) missing.push(n); }
+
+    const duplicates = [];
+    byCarton.forEach(function (groupSet, cartonNo) {
+      if (groupSet.size > 1) duplicates.push({ cartonNo: cartonNo, groups: Array.from(groupSet) });
+    });
+    duplicates.sort(function (a, b) { return a.cartonNo - b.cartonNo; });
+
+    log("[INFO] " + label + " sequence check — range " + minNo + " → " + maxNo + " | unique: " + allCartons.length);
+
+    const MAX_SHOW = 50;
+    if (missing.length) {
+      const shown = missing.slice(0, MAX_SHOW).join(", ");
+      const more = missing.length > MAX_SHOW ? " (+" + (missing.length - MAX_SHOW) + " more)" : "";
+      log("[WARNING] Thiếu " + label + " (" + missing.length + "): " + shown + more);
+    } else {
+      log("[INFO] Không thiếu " + label + ".");
+    }
+
+    if (duplicates.length) {
+      log("[WARNING] Trùng / chồng " + label + " phát hiện (" + duplicates.length + "):");
+      const MAX_DUP = 30;
+      duplicates.slice(0, MAX_DUP).forEach(function (d) {
+        log("   - " + label + " " + d.cartonNo + " được gán bởi " + d.groups.length + " dòng/nhóm khác nhau: " + d.groups.join(", "));
+      });
+      if (duplicates.length > MAX_DUP) log("   ... (+" + (duplicates.length - MAX_DUP) + " more)");
+    } else {
+      log("[INFO] Không trùng " + label + ".");
+    }
+  }
+
   async function readWorkbookFromFile(file) {
     const buf = await file.arrayBuffer();
     return XLSX.read(buf, { type: "array", cellDates: false });
@@ -145,6 +197,7 @@
     cleanText: cleanText, safeAscii: safeAscii, safeFilename: safeFilename,
     isMissing: isMissing, parseIntSafe: parseIntSafe,
     mixMarker: mixMarker, groupMarker: groupMarker, distributeInnerCartons: distributeInnerCartons,
+    checkCartonSequence: checkCartonSequence,
     readWorkbookFromFile: readWorkbookFromFile, sheetToRows: sheetToRows,
     downloadBlob: downloadBlob, csvFromRows: csvFromRows, drawQr: drawQr,
   };

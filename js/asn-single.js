@@ -5,6 +5,11 @@
  *   J=Carton start  K=Carton end  L=MIX marker
  * MIX marker: following blank-carton rows share the same carton
  * group, but every row still becomes its own per-EAN single label.
+ *
+ * Output pages are sorted ascending by Carton No. (top -> bottom of
+ * the PDF), and a Carton No. sequence check logs [WARNING] lines for
+ * any missing or duplicate/conflicting carton numbers before export
+ * (port of "PDF in order.ipynb").
  * ========================================================== */
 (function () {
   const U = WOPUtils;
@@ -101,11 +106,23 @@
       i++;
     }
 
-    records.sort((a, b) => (a.groupSort - b.groupSort) || (a.cartonNo - b.cartonNo) || (a.excelRow - b.excelRow) || (a.innerSeq - b.innerSeq));
+    // Sort output ascending by Carton No. (top -> bottom of the PDF); ties
+    // broken by original group/row order for a stable, predictable order.
+    records.sort((a, b) => (a.cartonNo - b.cartonNo) || (a.groupSort - b.groupSort) || (a.excelRow - b.excelRow) || (a.innerSeq - b.innerSeq));
 
     log("[INFO] Rows scanned: " + rowsScanned + " | Normal: " + normalGroups + " | MIX groups: " + mixGroups);
     log("[INFO] Total labels: " + records.length + " | Skipped: " + skipped.length);
     if (!records.length) throw new Error("Không có label nào được tạo — kiểm tra lại dữ liệu Excel.");
+
+    // Carton No. sequence check — warn on missing numbers, and on the same
+    // carton number being claimed by two different source rows/groups.
+    const cartonAssignments = [];
+    const seenPairs = new Set();
+    for (const r of records) {
+      const key = r.cartonNo + "|" + r.groupSort;
+      if (!seenPairs.has(key)) { seenPairs.add(key); cartonAssignments.push({ cartonNo: r.cartonNo, groupId: r.groupSort }); }
+    }
+    U.checkCartonSequence(cartonAssignments, log, "Carton No.");
 
     const { pdfDoc, font } = await WOPPdf.createDoc();
     for (const rec of records) {
