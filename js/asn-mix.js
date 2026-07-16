@@ -50,7 +50,7 @@
     const skipped = [];
     const groups = [];
     let current = null;
-    const startIdx = 5;
+    const startIdx = 4;
 
     function isGroupStart(row) { return U.groupMarker(row[8]) !== ""; }
 
