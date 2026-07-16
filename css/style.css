@@ -49,6 +49,12 @@ tr.sla-row td.cell { background:#fafafa; }
 .express-svg-card svg { display:block; margin:0 auto; max-width:100%; height:auto; cursor:default; }
 .express-svg-card .clickable { cursor:pointer; }
 
+/* ---- Inbound/Outbound + Express swimlane SVG diagrams ---- */
+#io-diagram svg, #ex-diagram svg { display:block; margin:0 auto 22px; max-width:100%; height:auto; cursor:default; }
+#io-diagram svg:last-child, #ex-diagram svg:last-child { margin-bottom:0; }
+#io-diagram .clickable, #ex-diagram .clickable { cursor:pointer; }
+#io-diagram .clickable:hover rect, #ex-diagram .clickable:hover rect { fill:#f4f4f5; }
+
 /* ---- Upload panels ---- */
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 @media (max-width:820px) { .grid2 { grid-template-columns:1fr; } }
