@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warehouse Ops Portal — SOP &amp; Pre-inbound Tools</title>
+<link rel="stylesheet" href="css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div>
+    <h1>Warehouse Ops Portal</h1>
+    <div class="sub">SOP kho + Express (bonded warehouse) — Pre-inbound / Inbound / Outbound</div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="preinbound">Pre-inbound</button>
+  <button data-tab="inbound">Inbound</button>
+  <button data-tab="outbound">Outbound</button>
+</nav>
+
+<main>
+
+<!-- ============ OVERVIEW ============ -->
+<section id="section-overview" class="section active">
+  <div class="card">
+    <h2>Overview — SOP cho người mới</h2>
+    <p class="desc">Hai flowchart dưới đây tóm tắt toàn bộ vận hành kho: (1) SOP Kho — luồng Inbound &amp; Outbound tổng quát, (2) SOP Express — xuất hàng qua UPS/FedEx/DHL cho kho ngoại quan (bonded warehouse). Click vào từng ô để xem mô tả chi tiết; dùng nút "Xuất ảnh" để tải về JPG/PNG dùng trong tài liệu/đào tạo.</p>
+  </div>
+
+  <div class="card">
+    <h3>1. SOP Kho — Inbound &amp; Outbound Process Flow</h3>
+    <div class="diagram-toolbar"><button class="btn" id="io-export">⬇ Xuất ảnh (PNG)</button></div>
+    <div class="diagram-wrap">
+    <div id="io-diagram">
+      <table class="flow">
+        <caption style="caption-side:top; text-align:left; font-weight:700; padding:8px; background:#111827; color:#fff;">INBOUND PROCESS</caption>
+        <tr><th>STEP</th><th>CUSTOMER</th><th>KEC</th><th>WH (WAREHOUSE)</th><th>FACTORY (VN DOMESTIC + CN CROSS BORDER)</th></tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">1</span>PRE-INBOUND<br><span style="font-weight:400;color:#64748b;">Pre-alert &amp; Packing List</span></td>
+          <td class="cell"><div class="box purple" data-key="io-pre-inbound">(Cross-border CN)<br>TOPOLOGIE Customer sends<br>Packing List (PL)</div></td>
+          <td class="cell"></td>
+          <td class="cell"></td>
+          <td class="cell"><div class="box amber" data-key="io-pre-inbound">Factory sends<br>Packing List (PL)</div></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">2</span>ASN CREATION<br><span style="font-weight:400;color:#64748b;">Pre-inbound</span></td>
+          <td class="cell"></td>
+          <td class="cell">
+            <div class="box cyan" data-key="io-asn-creation">Create ASN<br>+ Upload ASN to FOMS</div><br>
+            <span class="cyl">FOMS ASN</span>
+          </td>
+          <td class="cell"></td>
+          <td class="cell"></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">3</span>D-1 (BEFORE ARRIVAL)<br><span style="font-weight:400;color:#64748b;">Arrival Notice &amp; Document Submission</span></td>
+          <td class="cell"></td>
+          <td class="cell">
+            <div class="box cyan" data-key="io-d1-kec">Review documents<br>&amp; driver info</div><br>↓<br>
+            <div class="box cyan" data-key="io-d1-forward">Forward documents<br>to WH</div>
+          </td>
+          <td class="cell"><div class="box green" data-key="io-d1-wh">WH prepares<br>inbound clearance</div></td>
+          <td class="cell">
+            <div class="box amber" data-key="io-d1-factory">
+              Notify KEC about upcoming arrival (D-1)<br>+ Send documents + Driver information
+              <div style="display:flex; gap:10px; margin-top:6px; text-align:left;">
+                <div style="flex:1;"><b>Domestic (VN)</b><ul><li>CI</li><li>PL</li><li>TKHQ (Barcode)</li></ul></div>
+                <div style="flex:1;"><b>Cross-border (CN)</b><ul><li>CI</li><li>PL</li><li>AN</li><li>EDO</li><li>BL (Bill of Lading)</li></ul></div>
+              </div>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">4</span>ARRIVAL AT WAREHOUSE<br><span style="font-weight:400;color:#64748b;">Handover to WH</span></td>
+          <td class="cell"></td><td class="cell"></td>
+          <td class="cell"><div class="box green" data-key="io-arrival">Truck arrives<br>at Warehouse</div></td>
+          <td class="cell"></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">5</span>INBOUND PROCESSING<br><span style="font-weight:400;color:#64748b;">SLA D+1</span></td>
+          <td class="cell"></td><td class="cell"></td>
+          <td class="cell" colspan="2">
+            <div class="box green" data-key="io-processing" style="width:100%;">
+              Unloading → Counting → Checking → Put-away → Inventory Updated → <b>Inbound Done</b>
+            </div>
+          </td>
+        </tr>
+        <tr><td colspan="5" style="background:#111827; color:#fff; font-weight:700; padding:8px;">OUTBOUND PROCESS</td></tr>
+        <tr><th>STEP</th><th>CUSTOMER</th><th>KEC</th><th>WH (WAREHOUSE)</th><th>FACTORY (VN DOMESTIC + CN CROSS BORDER)</th></tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">1</span>OUTBOUND REQUEST</td>
+          <td class="cell"><div class="box purple" data-key="ob-request">Submit Outbound<br>Request (OR)</div></td>
+          <td class="cell"></td><td class="cell"></td><td class="cell"></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">2</span>KEC PRE-CHECK &amp; REQUEST TO WH</td>
+          <td class="cell"></td>
+          <td class="cell" colspan="2">
+            <div class="box cyan" data-key="ob-kec-check" style="text-align:left;">
+              <ul><li>Check inventory</li><li>Check xả lẻ (split shipment)</li><li>Check VAS requirement</li><li>Prepare / send Outbound Request file to WH</li></ul>
+            </div>
+          </td>
+          <td class="cell"></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">3</span>WH ALLOCATION &amp; CUSTOMS PLANNING</td>
+          <td class="cell"></td><td class="cell"></td>
+          <td class="cell"><div class="box green" data-key="ob-wh-plan" style="text-align:left;">
+            <ul><li>Check available stock</li><li>Fill Customs Declaration No.</li><li>Identify Factory source (VN/CN)</li><li>Allocate quantity</li><li>Confirm CO / NO-CO applicability</li><li>Complete OR file &amp; feedback to KEC</li></ul>
+          </div></td>
+          <td class="cell"></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">4</span>KEC CONFIRMATION &amp; SYSTEM</td>
+          <td class="cell"><div class="box purple" data-key="ob-customer-confirm">Customer confirms<br>CO</div></td>
+          <td class="cell">
+            <div class="box cyan" data-key="ob-kec-confirm" style="text-align:left;">
+              <ul><li>Review OR file from WH</li><li>Send to Customer for confirm CO</li><li>If confirmed: Upload OR to FOMS → Trigger WH execution</li></ul>
+            </div><br><span class="cyl">FOMS OR</span>
+          </td>
+          <td class="cell"></td><td class="cell"></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">5</span>WAREHOUSE EXECUTION (SLA)</td>
+          <td class="cell"></td><td class="cell"></td>
+          <td class="cell"><div class="box green" data-key="ob-execution">Pick → VAS (if any) → Labeling → Pack → DO Preparation → Submit to Customs</div></td>
+          <td class="cell"><div class="box amber" data-key="ob-sla"><b>SLA OUTBOUND</b><br>Day 1: DO Declaration + Customs Submission (COT before 14:00)<br>Day 2: Pickup Arrangement</div></td>
+        </tr>
+        <tr>
+          <td class="steplabel"><span class="stepno">6</span>OUTBOUND DONE<br><span style="font-weight:400;color:#64748b;">ETD</span></td>
+          <td class="cell"></td><td class="cell"></td><td class="cell"></td>
+          <td class="cell"><div class="box slate" data-key="ob-done">ETD +2</div></td>
+        </tr>
+      </table>
+    </div>
+    </div>
+    <div class="step-detail" id="io-detail">Click vào 1 ô trong sơ đồ để xem mô tả chi tiết bước đó.</div>
+
+    <div class="notes-grid">
+      <div class="box2"><h4>NOTES – DOCUMENTS</h4><ul>
+        <li>CI: Commercial Invoice</li><li>PL: Packing List</li><li>TKHQ: Customs Declaration (Barcode)</li><li>AN: Arrival Notice</li>
+        <li>EDO: Electronic Delivery Order</li><li>BL: Bill of Lading</li><li>CO: Certificate of Origin</li><li>NO-CO: Non-Certificate of Origin</li>
+      </ul></div>
+      <div class="box2"><h4>SLA SUMMARY</h4>
+        <b>INBOUND — SLA D+1</b> (từ lúc arrival đến khi inventory updated)<br><br>
+        <b>OUTBOUND — ETD +2</b> (1 ngày DO &amp; customs + 1 ngày pickup)</div>
+      <div class="box2"><h4>CONTROL POINTS</h4><ul>
+        <li>Tất cả chứng từ phải đầy đủ &amp; hợp lệ trước khi WH thông quan</li>
+        <li>COT cut-off: trước 14:00 hằng ngày</li>
+        <li>Mọi OR phải được upload lên FOMS trước khi thực thi</li>
+      </ul></div>
+      <div class="box2"><h4>ABBREVIATIONS</h4>
+        WH: Warehouse · ASN: Advanced Shipping Notice · OR: Outbound Request · VAS: Value Added Services · DO: Delivery Order · ETD: Estimated Time of Departure</div>
+    </div>
+  </div>
+
+  <div class="card express-svg-card">
+    <h3>2. SOP Express — Xuất hàng EXPRESS (UPS/FedEx/DHL) cho kho ngoại quan</h3>
+    <div class="diagram-toolbar"><button class="btn" id="ex-export">⬇ Xuất ảnh (PNG, 2 luồng)</button></div>
+    <div class="diagram-wrap" id="ex-diagram">
+<svg viewBox="0 0 1600 580" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+  <defs>
+    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1600" height="580" fill="#ffffff"/>
+  <text x="800" y="28" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">Luồng A — Self-placed booking (KEC book qua EXPRESS FWD thay mặt TOPOLOGIE)</text>
+
+  <rect x="0" y="60" width="1600" height="110" fill="#F5F3FF"/>
+  <rect x="0" y="170" width="1600" height="110" fill="#ECFEFF"/>
+  <rect x="0" y="280" width="1600" height="110" fill="#F0FDF4"/>
+  <rect x="0" y="390" width="1600" height="110" fill="#FFFBEB"/>
+  <line x1="0" y1="170" x2="1600" y2="170" stroke="#CBD5E1" stroke-width="1"/>
+  <line x1="0" y1="280" x2="1600" y2="280" stroke="#CBD5E1" stroke-width="1"/>
+  <line x1="0" y1="390" x2="1600" y2="390" stroke="#CBD5E1" stroke-width="1"/>
+  <line x1="0" y1="500" x2="1600" y2="500" stroke="#CBD5E1" stroke-width="1"/>
+
+  <rect x="10" y="80" width="140" height="70" rx="8" fill="#7C3AED"/>
+  <text x="80" y="120" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">TOPOLOGIE</text>
+
+  <rect x="10" y="190" width="140" height="70" rx="8" fill="#0891B2"/>
+  <text x="80" y="230" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">KEC</text>
+
+  <rect x="10" y="300" width="140" height="70" rx="8" fill="#16A34A"/>
+  <text x="80" y="332" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">BONDED</text>
+  <text x="80" y="348" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">WH</text>
+
+  <rect x="10" y="410" width="140" height="70" rx="8" fill="#D97706"/>
+  <text x="80" y="442" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">EXPRESS</text>
+  <text x="80" y="458" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">FWD</text>
+
+  <!-- s1 TOPOLOGIE col1 x160 --><g class="clickable" data-key="ex-a-topologie1">
+  <rect x="160" y="80" width="105" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
+  <text x="212" y="110" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi outbound</text>
+  <text x="212" y="124" text-anchor="middle" font-size="10.5" fill="#1e293b">request (OR)</text>
+
+  </g><!-- s2 KEC col2 x280 --><g class="clickable" data-key="ex-a-kec1">
+  <rect x="280" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="332" y="220" text-anchor="middle" font-size="10.5" fill="#1e293b">Nhận OR +</text>
+  <text x="332" y="234" text-anchor="middle" font-size="10.5" fill="#1e293b">check tồn kho</text>
+
+  </g><!-- s3 KEC col3 x400 --><g class="clickable" data-key="ex-a-kec2">
+  <rect x="400" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="452" y="215" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi kho: phân</text>
+  <text x="452" y="229" text-anchor="middle" font-size="10.5" fill="#1e293b">chia CDS /</text>
+  <text x="452" y="243" text-anchor="middle" font-size="10.5" fill="#1e293b">VENDOR</text>
+
+  </g><!-- s4 BONDED WH col4 x520 --><g class="clickable" data-key="ex-a-wh1">
+  <rect x="520" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
+  <text x="572" y="322" text-anchor="middle" font-size="10" fill="#1e293b">Phản hồi CDS,</text>
+  <text x="572" y="335" text-anchor="middle" font-size="10" fill="#1e293b">nhận OR, pick&amp;pack</text>
+  <text x="572" y="348" text-anchor="middle" font-size="10" fill="#1e293b">+ dim weight</text>
+
+  </g><!-- s5 BONDED WH col5 x640 --><g class="clickable" data-key="ex-a-wh2">
+  <rect x="640" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
+  <text x="692" y="330" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi DO</text>
+  <text x="692" y="344" text-anchor="middle" font-size="10.5" fill="#1e293b">cho KEC</text>
+
+  </g><!-- s6 KEC col6 x760 --><g class="clickable" data-key="ex-a-kec3">
+  <rect x="760" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="812" y="215" text-anchor="middle" font-size="10.5" fill="#1e293b">Book qua</text>
+  <text x="812" y="229" text-anchor="middle" font-size="10.5" fill="#1e293b">EXPRESS FWD</text>
+  <text x="812" y="243" text-anchor="middle" font-size="10.5" fill="#1e293b">(Alphatrans)</text>
+
+  </g><!-- s7 EXPRESS FWD col7 x880 --><g class="clickable" data-key="ex-a-fwd">
+  <rect x="880" y="410" width="105" height="70" rx="8" fill="#ffffff" stroke="#D97706" stroke-width="2"/>
+  <text x="932" y="440" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi AWB +</text>
+  <text x="932" y="454" text-anchor="middle" font-size="10.5" fill="#1e293b">C.W + giá</text>
+
+  </g><!-- s8 KEC col8 x1000 --><g class="clickable" data-key="ex-a-kec4">
+  <rect x="1000" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="1052" y="220" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi báo giá</text>
+  <text x="1052" y="234" text-anchor="middle" font-size="10.5" fill="#1e293b">cho TOPOLOGIE</text>
+
+  </g><!-- s9 TOPOLOGIE col9 x1120 --><g class="clickable" data-key="ex-a-topologie2">
+  <rect x="1120" y="80" width="105" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
+  <text x="1172" y="120" text-anchor="middle" font-size="11" fill="#1e293b">Confirm</text>
+
+  </g><!-- s10 KEC col10 x1240 --><g class="clickable" data-key="ex-a-kec5">
+  <rect x="1240" y="190" width="105" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="1292" y="212" text-anchor="middle" font-size="10" fill="#1e293b">Lấy driver info</text>
+  <text x="1292" y="225" text-anchor="middle" font-size="10" fill="#1e293b">(KEC tự book</text>
+  <text x="1292" y="238" text-anchor="middle" font-size="10" fill="#1e293b">tài xế)</text>
+
+  </g><!-- s11 BONDED WH col11 x1360 --><g class="clickable" data-key="ex-a-wh3">
+  <rect x="1360" y="300" width="105" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
+  <text x="1412" y="320" text-anchor="middle" font-size="9.5" fill="#1e293b">Làm DO + khai</text>
+  <text x="1412" y="332" text-anchor="middle" font-size="9.5" fill="#1e293b">hải quan (COT 14h)</text>
+  <text x="1412" y="344" text-anchor="middle" font-size="9.5" fill="#1e293b">→ Truck lấy hàng</text>
+
+  <!-- Arrows -->
+  <line x1="265" y1="115" x2="278" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="385" y1="225" x2="398" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="505" y1="225" x2="518" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="625" y1="335" x2="638" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="745" y1="335" x2="758" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="865" y1="225" x2="878" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="985" y1="445" x2="998" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="1105" y1="225" x2="1118" y2="115" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="1225" y1="115" x2="1238" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+  <line x1="1345" y1="225" x2="1358" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowA)"/>
+</svg></g><svg viewBox="0 0 1600 580" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+  <defs>
+    <marker id="arrowB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1600" height="580" fill="#ffffff"/>
+  <text x="800" y="28" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">Luồng B — CNEE-nominated booking (CNEE đặt AWB, KEC điều phối nội bộ)</text>
+
+  <rect x="0" y="60" width="1600" height="110" fill="#FAF5FF"/>
+  <rect x="0" y="170" width="1600" height="110" fill="#ECFEFF"/>
+  <rect x="0" y="280" width="1600" height="110" fill="#F0FDF4"/>
+  <rect x="0" y="390" width="1600" height="110" fill="#F8FAFC"/>
+  <line x1="0" y1="170" x2="1600" y2="170" stroke="#CBD5E1" stroke-width="1"/>
+  <line x1="0" y1="280" x2="1600" y2="280" stroke="#CBD5E1" stroke-width="1"/>
+  <line x1="0" y1="390" x2="1600" y2="390" stroke="#CBD5E1" stroke-width="1"/>
+  <line x1="0" y1="500" x2="1600" y2="500" stroke="#CBD5E1" stroke-width="1"/>
+
+  <rect x="10" y="80" width="140" height="70" rx="8" fill="#7C3AED"/>
+  <text x="80" y="120" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">CNEE</text>
+
+  <rect x="10" y="190" width="140" height="70" rx="8" fill="#0891B2"/>
+  <text x="80" y="230" text-anchor="middle" font-size="13" font-weight="bold" fill="#ffffff">KEC</text>
+
+  <rect x="10" y="300" width="140" height="70" rx="8" fill="#16A34A"/>
+  <text x="80" y="332" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">BONDED</text>
+  <text x="80" y="348" text-anchor="middle" font-size="12" font-weight="bold" fill="#ffffff">WH</text>
+
+  <rect x="10" y="410" width="140" height="70" rx="8" fill="#475569"/>
+  <text x="80" y="436" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#ffffff">TRUCK DRIVER /</text>
+  <text x="80" y="450" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#ffffff">CUSTOMS</text>
+  <text x="80" y="464" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#ffffff">COUNTER</text>
+
+  <!-- s1 CNEE col1 x160 --><g class="clickable" data-key="ex-b-cnee1">
+  <rect x="160" y="80" width="120" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
+  <text x="220" y="120" text-anchor="middle" font-size="11.5" fill="#1e293b">Đặt AWB</text>
+
+  </g><!-- s2 CNEE col2 x300 --><g class="clickable" data-key="ex-b-cnee2">
+  <rect x="300" y="80" width="120" height="70" rx="8" fill="#ffffff" stroke="#7C3AED" stroke-width="2"/>
+  <text x="360" y="112" text-anchor="middle" font-size="10.5" fill="#1e293b">Chọn remote</text>
+  <text x="360" y="126" text-anchor="middle" font-size="10.5" fill="#1e293b">pickup + gửi</text>
+  <text x="360" y="140" text-anchor="middle" font-size="10.5" fill="#1e293b">control number</text>
+
+  </g><!-- s3 KEC col3 x440 --><g class="clickable" data-key="ex-b-kec1">
+  <rect x="440" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="500" y="215" text-anchor="middle" font-size="10.5" fill="#1e293b">Check tồn kho +</text>
+  <text x="500" y="229" text-anchor="middle" font-size="10.5" fill="#1e293b">gửi kho điền</text>
+  <text x="500" y="243" text-anchor="middle" font-size="10.5" fill="#1e293b">CDS / VENDOR</text>
+
+  </g><!-- s4 BONDED WH col4 x580 --><g class="clickable" data-key="ex-b-wh1">
+  <rect x="580" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
+  <text x="640" y="330" text-anchor="middle" font-size="10.5" fill="#1e293b">Pick &amp; pack +</text>
+  <text x="640" y="344" text-anchor="middle" font-size="10.5" fill="#1e293b">đo dim weight</text>
+
+  </g><!-- s5 BONDED WH col5 x720 --><g class="clickable" data-key="ex-b-wh2">
+  <rect x="720" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
+  <text x="780" y="330" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi DO</text>
+  <text x="780" y="344" text-anchor="middle" font-size="10.5" fill="#1e293b">cho KEC</text>
+
+  </g><!-- s6 KEC col6 x860 --><g class="clickable" data-key="ex-b-kec2">
+  <rect x="860" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="920" y="212" text-anchor="middle" font-size="10" fill="#1e293b">Check thông tin,</text>
+  <text x="920" y="225" text-anchor="middle" font-size="10" fill="#1e293b">dim weight +</text>
+  <text x="920" y="238" text-anchor="middle" font-size="10" fill="#1e293b">lấy driver info</text>
+
+  </g><!-- s7 KEC col7 x1000 --><g class="clickable" data-key="ex-b-kec3">
+  <rect x="1000" y="190" width="120" height="70" rx="8" fill="#ffffff" stroke="#0891B2" stroke-width="2"/>
+  <text x="1060" y="218" text-anchor="middle" font-size="10.5" fill="#1e293b">Gửi booking +</text>
+  <text x="1060" y="232" text-anchor="middle" font-size="10.5" fill="#1e293b">tài xế cho</text>
+  <text x="1060" y="246" text-anchor="middle" font-size="10.5" fill="#1e293b">Bonded WH</text>
+
+  </g><!-- s8 BONDED WH col8 x1140 --><g class="clickable" data-key="ex-b-wh3">
+  <rect x="1140" y="300" width="120" height="70" rx="8" fill="#ffffff" stroke="#16A34A" stroke-width="2"/>
+  <text x="1200" y="320" text-anchor="middle" font-size="10" fill="#1e293b">Làm DO + khai</text>
+  <text x="1200" y="333" text-anchor="middle" font-size="10" fill="#1e293b">hải quan (COT 14h,</text>
+  <text x="1200" y="346" text-anchor="middle" font-size="10" fill="#1e293b">duyệt ~1 ngày)</text>
+
+  </g><!-- s9 TRUCK col9 x1280 --><g class="clickable" data-key="ex-b-truck1">
+  <rect x="1280" y="410" width="120" height="70" rx="8" fill="#ffffff" stroke="#475569" stroke-width="2"/>
+  <text x="1340" y="436" text-anchor="middle" font-size="10.5" fill="#1e293b">Truck đến, tự</text>
+  <text x="1340" y="450" text-anchor="middle" font-size="10.5" fill="#1e293b">nộp docs tại</text>
+  <text x="1340" y="464" text-anchor="middle" font-size="10.5" fill="#1e293b">quầy hải quan</text>
+
+  </g><!-- s10 TRUCK col10 x1420 --><g class="clickable" data-key="ex-b-truck2">
+  <rect x="1420" y="410" width="120" height="70" rx="8" fill="#ffffff" stroke="#475569" stroke-width="2"/>
+  <text x="1480" y="440" text-anchor="middle" font-size="10.5" fill="#1e293b">Chờ cắt seal,</text>
+  <text x="1480" y="454" text-anchor="middle" font-size="10.5" fill="#1e293b">truck rời kho</text>
+
+  <!-- Arrows -->
+  <line x1="280" y1="115" x2="298" y2="115" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="420" y1="115" x2="438" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="560" y1="225" x2="578" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="700" y1="335" x2="718" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="840" y1="335" x2="858" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="980" y1="225" x2="998" y2="225" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="1120" y1="225" x2="1138" y2="335" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="1260" y1="335" x2="1278" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+  <line x1="1400" y1="445" x2="1418" y2="445" stroke="#334155" stroke-width="2" marker-end="url(#arrowB)"/>
+</svg></g>    </div>
+    <div class="step-detail" id="ex-detail">Click vào 1 ô trong sơ đồ để xem mô tả chi tiết bước đó.</div>
+    <div class="notes-grid">
+      <div class="box2"><h4>SLA / CONTROL POINTS</h4><ul>
+        <li>COT khai hải quan: trước 14:00 hằng ngày</li>
+        <li>Luồng B (CNEE-nominated): hải quan duyệt khoảng ~1 ngày sau khi nộp docs tại quầy</li>
+        <li>Driver info bắt buộc phải có trước khi WH làm DO + khai hải quan</li>
+      </ul></div>
+      <div class="box2"><h4>ABBREVIATIONS</h4>
+        AWB: Air Waybill · C.W: Chargeable Weight · CDS: Customs Declaration Sheet · DO: Delivery Order · COT: Cut-Off Time · CNEE: Consignee</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PRE-INBOUND ============ -->
+<section id="section-preinbound" class="section">
+  <div class="card">
+    <h2>Pre-inbound — ASN Label Generator</h2>
+    <p class="desc">Tạo label ASN trực tiếp trong trình duyệt (không gửi data ra ngoài). "ASN Single" = mỗi EAN 1 label (đúng format mẫu hiện tại). "ASN Mix" = label tổng hợp theo carton (nhiều SKU/label) — tự động shrink chữ hoặc phóng to trang khi số SKU trong 1 carton vượt ngưỡng.</p>
+    <div class="subtabs">
+      <button data-sub="asn-single" class="active">ASN Single (theo từng EAN)</button>
+      <button data-sub="asn-mix">ASN Mix (label tổng hợp Carton)</button>
+    </div>
+
+    <div class="subsection active" id="sub-asn-single">
+      <div class="grid2">
+        <div class="panel">
+          <h4>1. Upload file Excel (sheet "Single")</h4>
+          <p class="desc" style="margin-bottom:8px;">Cột cố định: B=SKU, C=EAN, H=Qty/box, I=Carton qty, J=Carton start, K=Carton end, L=MIX marker. Dữ liệu bắt đầu từ dòng 6.</p>
+          <input type="file" id="singleFileInput" accept=".xlsx,.xls">
+          <div class="status" id="singleStatus">Chưa upload file.</div>
+          <div style="margin-top:10px;"><label class="small">Ref No. (để trống = lấy ô A1 trong sheet)</label><br>
+            <input type="text" id="singleRefNo" placeholder="VD: TP-JO-60 / V_TPL2612(04)#60" style="width:100%; margin-top:4px;"></div>
+        </div>
+        <div class="panel">
+          <h4>2. Tạo label</h4>
+          <button class="btn" id="singleGenBtn" disabled>Generate ASN Single Labels</button>
+          <div class="log-box" id="singleLog"></div>
+          <div class="result-files" id="singleResults"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="subsection" id="sub-asn-mix">
+      <div class="grid2">
+        <div class="panel">
+          <h4>1. Upload file Excel (sheet "Mix")</h4>
+          <p class="desc" style="margin-bottom:8px;">Cột cố định: C=SKU/EAN, H=Qty, I=group marker (1 hoặc "MIX"), J=Carton start, K=Carton end, P=Carton ID base. Carton ID in ra = cột P + "-" + tổng Qty của carton.</p>
+          <input type="file" id="mixFileInput" accept=".xlsx,.xls">
+          <div class="status" id="mixStatus">Chưa upload file.</div>
+          <div style="margin-top:10px;"><label class="small">Ref No. (để trống = lấy ô A1 trong sheet)</label><br>
+            <input type="text" id="mixRefNo" placeholder="VD: TP-QF-59(TG)GL-31032026" style="width:100%; margin-top:4px;"></div>
+          <div style="margin-top:10px;"><label class="small">Ngưỡng shrink (số dòng SKU tối đa trước khi phóng to sang A4)</label><br>
+            <input type="number" id="mixShrinkThreshold" value="5" min="2" max="20" style="width:100%; margin-top:4px;"></div>
+        </div>
+        <div class="panel">
+          <h4>2. Tạo label</h4>
+          <button class="btn" id="mixGenBtn" disabled>Generate ASN Mix Carton Labels</button>
+          <div class="log-box" id="mixLog"></div>
+          <div class="result-files" id="mixResults"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INBOUND (placeholder template) ============ -->
+<section id="section-inbound" class="section">
+  <div class="card">
+    <h2>Inbound</h2>
+    <p class="desc">Template — nội dung hướng dẫn sử dụng FOMS cho bước Inbound sẽ được bổ sung tại đây.</p>
+    <div class="placeholder-card">
+      <h3 style="color:#334155;">🚧 Đang chờ nội dung</h3>
+      <p>Phần này để trống theo yêu cầu — sẽ hướng dẫn cách sử dụng FOMS cho Inbound (review ASN, nhận hàng, put-away, cập nhật tồn kho...).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ OUTBOUND (VAS integration) ============ -->
+<section id="section-outbound" class="section">
+  <div class="card">
+    <h2>Outbound — VAS (Value Added Services)</h2>
+    <p class="desc">Công cụ tạo tem COO (Country of Origin) cho Outbound — CN Retail, CN Tmall, KR, SG — đã được build &amp; publish riêng (repo/site độc lập).</p>
+    <div class="outbound-hero card" style="background:#f0fdf4; border:1px solid #bbf7d0;">
+      <div class="txt">
+        <h3 style="margin-top:0;">VAS Label Generator</h3>
+        <p style="margin:0 0 10px; color:#166534;">100% client-side — Master Label Data &amp; EAN list không rời khỏi trình duyệt của bạn, kể cả khi site public.</p>
+      </div>
+      <a class="vas-link-btn" href="https://doanngocmyy.github.io/vas-label-generator/" target="_blank" rel="noopener">Mở VAS Label Generator ↗</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- Sheet picker modal -->
+<div class="modal-overlay" id="sheetModalOverlay">
+  <div class="modal-box">
+    <h4>Chọn sheet</h4>
+    <select id="sheetSelect"></select>
+    <div class="modal-actions">
+      <button class="btn secondary" id="sheetModalCancel">Huỷ</button>
+      <button class="btn" id="sheetModalConfirm">Xác nhận</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/utils.js"></script>
+<script src="js/pdf-engine.js"></script>
+<script src="js/label-templates.js"></script>
+<script src="js/asn-single.js"></script>
+<script src="js/asn-mix.js"></script>
+<script src="js/flowcharts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
