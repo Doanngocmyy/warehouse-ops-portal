@@ -136,4 +136,44 @@
       };
     },
   });
+
+  // ---- PDF In Order (merge N label PDFs + sort by Carton No.) ----
+  (function wirePdfOrder() {
+    const fileInput = document.getElementById("pdfOrderFileInput");
+    if (!fileInput) return;
+    const statusEl = document.getElementById("pdfOrderStatus");
+    const genBtn = document.getElementById("pdfOrderGenBtn");
+    const logEl = document.getElementById("pdfOrderLog");
+    const resultsEl = document.getElementById("pdfOrderResults");
+    let currentFiles = null;
+
+    fileInput.addEventListener("change", function () {
+      currentFiles = (fileInput.files && fileInput.files.length) ? Array.from(fileInput.files) : null;
+      if (!currentFiles) { statusEl.textContent = "Chưa chọn file."; genBtn.disabled = true; return; }
+      statusEl.textContent = "Đã chọn " + currentFiles.length + " file PDF. Sẵn sàng gộp & sắp xếp.";
+      genBtn.disabled = false;
+    });
+
+    genBtn.addEventListener("click", async function () {
+      if (!currentFiles) return;
+      genBtn.disabled = true;
+      logEl.textContent = "";
+      resultsEl.innerHTML = "";
+      const log = function (msg) { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+      try {
+        const out = await WOPPdfOrder.generate({ files: currentFiles, log: log });
+        log("✅ Hoàn tất.");
+        out.files.forEach(function (f) {
+          const a = document.createElement("a");
+          a.className = "file-chip"; a.href = "#"; a.textContent = "⬇ " + f.name + " (" + f.count + ")";
+          a.addEventListener("click", function (e) { e.preventDefault(); WOPUtils.downloadBlob(f.blob, f.name); });
+          resultsEl.appendChild(a);
+        });
+      } catch (e) {
+        logEl.textContent += "❌ Lỗi: " + e.message + "\n";
+      } finally {
+        genBtn.disabled = false;
+      }
+    });
+  })();
 })();
