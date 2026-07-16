@@ -29,7 +29,10 @@
   WOPFlowcharts.initClickToDetail(document.getElementById("ex-diagram"), exPanel);
 
   document.getElementById("io-export").addEventListener("click", function () {
-    WOPFlowcharts.exportHtmlAsPng(document.getElementById("io-diagram"), "SOP_Inbound_Outbound.png");
+    const svgs = document.getElementById("io-diagram").querySelectorAll("svg");
+    svgs.forEach(function (svg, idx) {
+      WOPFlowcharts.exportSvgAsPng(svg, "SOP_Kho_" + (idx === 0 ? "Inbound" : "Outbound") + ".png");
+    });
   });
   document.getElementById("ex-export").addEventListener("click", function () {
     const svgs = document.getElementById("ex-diagram").querySelectorAll("svg");
