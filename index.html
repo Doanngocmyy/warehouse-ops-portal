@@ -7,6 +7,8 @@
 <link rel="stylesheet" href="css/style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>if (window["pdfjsLib"]) { pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; }</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 </head>
@@ -494,7 +496,7 @@
 <section id="section-preinbound" class="section">
   <div class="card">
     <h2>Pre-inbound — ASN Label Generator</h2>
-    <p class="desc">Tạo label ASN trực tiếp trong trình duyệt (không gửi data ra ngoài). "ASN Single" = mỗi EAN 1 label (đúng format mẫu hiện tại). "ASN Mix" = label tổng hợp theo carton (nhiều SKU/label) — tự động shrink chữ hoặc phóng to trang khi số SKU trong 1 carton vượt ngưỡng.</p>
+    <p class="desc">Tạo label ASN trực tiếp trong trình duyệt (không gửi data ra ngoài). "ASN Single" = mỗi EAN 1 label (đúng format mẫu hiện tại). "ASN Mix" = label tổng hợp theo carton (nhiều SKU/label) — tự động shrink chữ hoặc phóng to trang khi số SKU trong 1 carton vượt ngưỡng. "PDF In Order" = gộp nhiều PDF label (Single + Mix, hoặc bất kỳ) thành 1 file, tự sắp xếp lại theo Carton No. và cảnh báo nếu thiếu/trùng số — không cần tạo Single/Mix tách riêng nữa, có thể gộp chung vào đây.</p>
     <div class="panel" style="background:#fffbeb; border-color:#fde68a; margin-bottom:16px;">
       <strong>📎 Template mẫu (Single + Mix):</strong> file Excel mẫu, tô sẵn màu — <span style="color:#9c0006; font-weight:700;">Đỏ = bắt buộc (MUST)</span>, <span style="color:#006100; font-weight:700;">Xanh lá = không bắt buộc (OPTIONAL)</span>, <span style="color:#1f4e78; font-weight:700;">Xanh dương = tự động tính (AUTO)</span>. Chỉ cần mã EAN/Item code — SKU có thể để trống.
       <br><a class="btn" style="display:inline-block; margin-top:8px; text-decoration:none;" href="templates/ASN_Template_Single_Mix.xlsx" download>⬇ Tải Template ASN (Single + Mix).xlsx</a>
@@ -502,6 +504,7 @@
     <div class="subtabs">
       <button data-sub="asn-single" class="active">ASN Single (theo từng EAN)</button>
       <button data-sub="asn-mix">ASN Mix (label tổng hợp Carton)</button>
+      <button data-sub="pdf-order">PDF In Order (Gộp + Sắp xếp Carton)</button>
     </div>
 
     <div class="subsection active" id="sub-asn-single">
@@ -540,6 +543,24 @@
           <button class="btn" id="mixGenBtn" disabled>Generate ASN Mix Carton Labels</button>
           <div class="log-box" id="mixLog"></div>
           <div class="result-files" id="mixResults"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="subsection" id="sub-pdf-order">
+      <p class="desc" style="margin-top:0;">Gộp 1 hoặc nhiều file PDF label đã tạo (vd: file ASN Single + file ASN Mix, hoặc bất kỳ PDF label nào cùng format) thành <b>1 PDF duy nhất</b>, tự động sắp xếp lại toàn bộ trang theo <b>Carton No.</b> tăng dần (đọc trực tiếp từ dòng chữ "Carton No." in trên mỗi trang) — đồng thời cảnh báo nếu có carton bị <b>thiếu số</b> hoặc <b>trùng/chồng số</b>. Không cần phân biệt file nào là Single hay Mix.</p>
+      <div class="grid2">
+        <div class="panel">
+          <h4>1. Upload PDF (chọn được nhiều file cùng lúc)</h4>
+          <p class="desc" style="margin-bottom:8px;">Mỗi trang PDF phải có dòng chữ "Carton No. &lt;số&gt;" (đúng format label hiện tại của Single/Mix). Chọn nhiều file cùng lúc để gộp — hệ thống sẽ đọc hết rồi sắp xếp chung theo Carton No.</p>
+          <input type="file" id="pdfOrderFileInput" accept=".pdf" multiple>
+          <div class="status" id="pdfOrderStatus">Chưa chọn file.</div>
+        </div>
+        <div class="panel">
+          <h4>2. Gộp &amp; sắp xếp</h4>
+          <button class="btn" id="pdfOrderGenBtn" disabled>Gộp &amp; Sắp xếp theo Carton No.</button>
+          <div class="log-box" id="pdfOrderLog"></div>
+          <div class="result-files" id="pdfOrderResults"></div>
         </div>
       </div>
     </div>
@@ -667,6 +688,7 @@
 <script src="js/label-templates.js"></script>
 <script src="js/asn-single.js"></script>
 <script src="js/asn-mix.js"></script>
+<script src="js/pdf-order.js"></script>
 <script src="js/flowcharts.js"></script>
 <script src="js/app.js"></script>
 </body>
