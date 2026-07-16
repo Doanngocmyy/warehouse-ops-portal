@@ -4,14 +4,15 @@
  * ========================================================== */
 (function () {
   const DETAILS = {
-    "io-pre-inbound": "Pre-inbound: khách hàng (case cross-border CN, TOPOLOGIE) hoặc Factory (case domestic VN) gửi Packing List (PL) trước cho KEC để chuẩn bị tạo ASN.",
-    "io-asn-creation": "KEC tạo ASN dựa trên PL nhận được, upload ASN lên hệ thống FOMS. FOMS lưu ASN để đối chiếu khi hàng thực tế về kho.",
+    "io-pre-inbound": "Pre-inbound: Factory (domestic VN hoặc cross-border) gửi Packing List (PL) trước cho KEC để chuẩn bị tạo ASN — bước này không có khách hàng tham gia trực tiếp.",
+    "io-asn-creation": "KEC tạo ASN, sau đó upload Inbound Request (IR) lên hệ thống FOMS để lưu lại, đối chiếu khi hàng thực tế về kho.",
     "io-d1-factory": "D-1: Factory báo trước cho KEC lịch hàng sắp về (D-1), gửi kèm bộ chứng từ và thông tin tài xế. Domestic (VN) cần CI/PL/TKHQ(Barcode); Cross-border (CN) cần CI/PL/AN/EDO/BL.",
     "io-d1-kec": "KEC review chứng từ + thông tin tài xế nhận được từ Factory, kiểm tra đầy đủ trước khi forward.",
     "io-d1-forward": "KEC forward bộ chứng từ đã review sang WH để WH chuẩn bị thủ tục thông quan/nhập kho.",
-    "io-d1-wh": "WH dựa trên chứng từ nhận được, chuẩn bị thủ tục inbound clearance trước khi xe hàng tới.",
+    "io-d1-wh": "WH dựa trên chứng từ nhận được, nộp/submit bộ chứng từ cho nhân viên hải quan trước khi xe hàng tới.",
     "io-arrival": "Xe tải đến kho — bàn giao hàng hoá cho WH, bắt đầu tính SLA Inbound D+1.",
-    "io-processing": "SLA Inbound D+1: Unloading → Counting → Checking → Put-away → Inventory Updated, sau đó đánh dấu Inbound Done.",
+    "io-sla": "Inbound SLA: D+1. Gồm: Unloading → Counting → Checking → Put-away → Inventory Updated.",
+    "io-done": "Inbound Done — hàng đã được xử lý xong và cập nhật tồn kho.",
     "ob-request": "Customer submit Outbound Request (OR) — yêu cầu xuất hàng ra khỏi kho.",
     "ob-kec-check": "KEC nhận OR: check tồn kho, check UOM để quyết định loại outbound (nguyên kiện/lẻ...), check có yêu cầu VAS không, và gợi ý convert UOM nếu cần.",
     "ob-wh-plan": "WH điền các thông tin còn thiếu vào OR: CDS (Customs Declaration Sheet) và Vendor.",
