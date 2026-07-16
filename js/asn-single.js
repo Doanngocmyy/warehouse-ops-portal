@@ -43,7 +43,7 @@
 
     const records = [];
     const skipped = [];
-    let i = 5, normalGroups = 0, mixGroups = 0, rowsScanned = 0;
+    let i = 4, normalGroups = 0, mixGroups = 0, rowsScanned = 0;
 
     while (i < rows.length) {
       const row = rows[i] || [];
