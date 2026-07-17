@@ -176,4 +176,59 @@
       }
     });
   })();
+
+  // ---- Outbound: Detect Outbound Type & Suggest Convert UOM ----
+  (function wireOutboundUom() {
+    const invInput = document.getElementById("outboundInventoryInput");
+    if (!invInput) return;
+    const orderInput = document.getElementById("outboundOrderInput");
+    const bundleInput = document.getElementById("outboundBundleInput");
+    const statusEl = document.getElementById("outboundUomStatus");
+    const genBtn = document.getElementById("outboundUomGenBtn");
+    const logEl = document.getElementById("outboundUomLog");
+    const resultsEl = document.getElementById("outboundUomResults");
+
+    function refreshReady() {
+      const ready = invInput.files.length && orderInput.files.length;
+      genBtn.disabled = !ready;
+      if (ready) {
+        let msg = "Đã chọn: " + invInput.files[0].name + " + " + orderInput.files[0].name;
+        if (bundleInput.files.length) msg += " + " + bundleInput.files[0].name + " (bundle)";
+        msg += ". Sẵn sàng chạy.";
+        statusEl.textContent = msg;
+      } else {
+        statusEl.textContent = "Cần chọn cả 2 file: Tồn kho realtime + Order outbound.";
+      }
+    }
+    invInput.addEventListener("change", refreshReady);
+    orderInput.addEventListener("change", refreshReady);
+    bundleInput.addEventListener("change", refreshReady);
+
+    genBtn.addEventListener("click", async function () {
+      if (!invInput.files.length || !orderInput.files.length) return;
+      genBtn.disabled = true;
+      logEl.textContent = "";
+      resultsEl.innerHTML = "";
+      const log = function (msg) { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+      try {
+        const out = await WOPOutboundUom.generate({
+          inventoryFile: invInput.files[0],
+          orderFile: orderInput.files[0],
+          bundleFile: bundleInput.files.length ? bundleInput.files[0] : null,
+          log: log,
+        });
+        log("✅ Hoàn tất.");
+        out.files.forEach(function (f) {
+          const a = document.createElement("a");
+          a.className = "file-chip"; a.href = "#"; a.textContent = "⬇ " + f.name + " (" + f.count + ")";
+          a.addEventListener("click", function (e) { e.preventDefault(); WOPUtils.downloadBlob(f.blob, f.name); });
+          resultsEl.appendChild(a);
+        });
+      } catch (e) {
+        logEl.textContent += "❌ Lỗi: " + e.message + "\n";
+      } finally {
+        genBtn.disabled = false;
+      }
+    });
+  })();
 })();
