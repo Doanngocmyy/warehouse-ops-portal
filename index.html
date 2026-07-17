@@ -505,6 +505,7 @@
       <button data-sub="asn-single" class="active">ASN Single (theo từng EAN)</button>
       <button data-sub="asn-mix">ASN Mix (label tổng hợp Carton)</button>
       <button data-sub="pdf-order">PDF In Order (Gộp + Sắp xếp Carton)</button>
+      <button data-sub="ami-uom">AMI UOM Update — Chuẩn bị file</button>
     </div>
 
     <div class="subsection active" id="sub-asn-single">
@@ -561,6 +562,27 @@
           <button class="btn" id="pdfOrderGenBtn" disabled>Gộp &amp; Sắp xếp theo Carton No.</button>
           <div class="log-box" id="pdfOrderLog"></div>
           <div class="result-files" id="pdfOrderResults"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="subsection" id="sub-ami-uom">
+      <p class="desc" style="margin-top:0;">Chuẩn bị file input để cập nhật UOM (quy cách đóng carton) cho SKU mới trên <b>AMI WMS</b> trước khi Inbound — tool tự dò &amp; làm sạch cột SKU/ĐVT từ file nguồn, xuất ra file chuẩn để chạy script cập nhật.</p>
+      <div class="panel" style="background:#fef2f2; border-color:#fecaca; margin-bottom:16px;">
+        <strong>⚠️ Tool này chỉ chuẩn bị file — KHÔNG tự đăng nhập/cập nhật AMI.</strong> Việc ghi UOM lên AMI WMS (ami.partner.vnfai.com) vẫn cần chạy script Python (Selenium) riêng trên máy bạn, trỏ vào file .xlsx tải xuống từ đây. Lý do: trang web tĩnh này không thể điều khiển DOM của 1 website khác (khác origin, trình duyệt chặn), và càng không nên chứa sẵn mật khẩu đăng nhập AMI trong code public trên GitHub.
+      </div>
+      <div class="grid2">
+        <div class="panel">
+          <h4>1. Upload file nguồn (IR / bất kỳ file có cột SKU + ĐVT)</h4>
+          <p class="desc" style="margin-bottom:8px;">Tool tự dò dòng header (không cần đúng vị trí cố định) và cột chứa "Mã SKU đối tác" + "ĐVT"/UOM/Qty. Chấp nhận nhiều định dạng ĐVT: <code>120</code>, <code>120 - CARTON_120PCS</code>, <code>CARTON_120PCS</code>...</p>
+          <input type="file" id="amiUomFileInput" accept=".xlsx,.xls">
+          <div class="status" id="amiUomStatus">Chưa upload file.</div>
+        </div>
+        <div class="panel">
+          <h4>2. Tạo file chuẩn cho script cập nhật AMI</h4>
+          <button class="btn" id="amiUomGenBtn" disabled>Tạo file AMI_UOM_Update_Input.xlsx</button>
+          <div class="log-box" id="amiUomLog"></div>
+          <div class="result-files" id="amiUomResults"></div>
         </div>
       </div>
     </div>
@@ -722,6 +744,7 @@
 <script src="js/asn-mix.js"></script>
 <script src="js/pdf-order.js"></script>
 <script src="js/outbound-uom.js"></script>
+<script src="js/ami-uom-prep.js"></script>
 <script src="js/flowcharts.js"></script>
 <script src="js/app.js"></script>
 </body>
