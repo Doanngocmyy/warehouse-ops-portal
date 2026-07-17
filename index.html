@@ -582,21 +582,53 @@
 <!-- ============ OUTBOUND (VAS integration) ============ -->
 <section id="section-outbound" class="section">
   <div class="card">
-    <h2>Outbound — VAS (Value Added Services)</h2>
-    <p class="desc">Công cụ tạo tem COO (Country of Origin) cho Outbound — CN Retail, CN Tmall, KR, SG — đã được build &amp; publish riêng (repo/site độc lập).</p>
-    <div class="outbound-hero card" style="background:#f0fdf4; border:1px solid #bbf7d0;">
-      <div class="txt">
-        <h3 style="margin-top:0;">VAS Label Generator</h3>
-        <p style="margin:0 0 10px; color:#166534;">100% client-side — Master Label Data &amp; EAN list không rời khỏi trình duyệt của bạn, kể cả khi site public.</p>
-      </div>
-      <a class="vas-link-btn" href="https://doanngocmyy.github.io/vas-label-generator/" target="_blank" rel="noopener">Mở VAS Label Generator ↗</a>
+    <h2>Outbound</h2>
+    <p class="desc">Detect Outbound Type (CARTON hay PCS cho từng dòng order, dựa theo tồn khả dụng realtime) và Suggest Convert UOM (gợi ý mở bao nhiêu carton khi PCS lẻ không đủ — "xả lẻ"). Chạy 100% client-side, file Order/Tồn kho không rời khỏi trình duyệt.</p>
+    <div class="subtabs">
+      <button data-sub="outbound-uom" class="active">Detect Outbound Type &amp; Suggest Convert UOM</button>
+      <button data-sub="outbound-vas">VAS / Carton Label Tools</button>
     </div>
-    <div class="outbound-hero card" style="background:#eff6ff; border:1px solid #bfdbfe; margin-top:14px;">
-      <div class="txt">
-        <h3 style="margin-top:0;">Carton Label Generator</h3>
-        <p style="margin:0 0 10px; color:#1e40af;">Tool ngoài (Streamlit) hỗ trợ tạo label cho carton — dùng cho Outbound.</p>
+
+    <div class="subsection active" id="sub-outbound-uom">
+      <p class="desc" style="margin-top:0;">Upload 2 file: (1) <b>Tồn kho realtime</b> — export "Tồn kho theo thời gian thực" (cột bắt buộc: Mã SKU đối tác, ĐVT, Khả dụng, Tên sản phẩm, Mã sản phẩm), và (2) <b>Order outbound</b> — export Outbound Request (cột bắt buộc: SKU Code, Requested Qty, Order Number). File Bundle là tuỳ chọn — chỉ cần nếu order có SKU dạng combo/bundle.</p>
+      <div class="grid2">
+        <div class="panel">
+          <h4>1. Upload file</h4>
+          <label class="small">Tồn kho theo thời gian thực (.xlsx)</label><br>
+          <input type="file" id="outboundInventoryInput" accept=".xlsx,.xls" style="margin:6px 0 12px;">
+          <br>
+          <label class="small">Order outbound (.xlsx)</label><br>
+          <input type="file" id="outboundOrderInput" accept=".xlsx,.xls" style="margin:6px 0 12px;">
+          <br>
+          <label class="small">Bundle SKU list (tuỳ chọn, .xlsx)</label><br>
+          <input type="file" id="outboundBundleInput" accept=".xlsx,.xls" style="margin:6px 0 12px;">
+          <div class="status" id="outboundUomStatus">Cần chọn cả 2 file: Tồn kho realtime + Order outbound.</div>
+        </div>
+        <div class="panel">
+          <h4>2. Chạy detect &amp; suggest</h4>
+          <button class="btn" id="outboundUomGenBtn" disabled>Detect Outbound Type + Suggest Convert UOM</button>
+          <div class="log-box" id="outboundUomLog"></div>
+          <div class="result-files" id="outboundUomResults"></div>
+        </div>
       </div>
-      <a class="vas-link-btn" style="background:#2563eb;" href="https://carton-label-generator.streamlit.app/" target="_blank" rel="noopener">Mở Carton Label Generator ↗</a>
+    </div>
+
+    <div class="subsection" id="sub-outbound-vas">
+      <p class="desc">Công cụ tạo tem COO (Country of Origin) cho Outbound — CN Retail, CN Tmall, KR, SG — đã được build &amp; publish riêng (repo/site độc lập).</p>
+      <div class="outbound-hero card" style="background:#f0fdf4; border:1px solid #bbf7d0;">
+        <div class="txt">
+          <h3 style="margin-top:0;">VAS Label Generator</h3>
+          <p style="margin:0 0 10px; color:#166534;">100% client-side — Master Label Data &amp; EAN list không rời khỏi trình duyệt của bạn, kể cả khi site public.</p>
+        </div>
+        <a class="vas-link-btn" href="https://doanngocmyy.github.io/vas-label-generator/" target="_blank" rel="noopener">Mở VAS Label Generator ↗</a>
+      </div>
+      <div class="outbound-hero card" style="background:#eff6ff; border:1px solid #bfdbfe; margin-top:14px;">
+        <div class="txt">
+          <h3 style="margin-top:0;">Carton Label Generator</h3>
+          <p style="margin:0 0 10px; color:#1e40af;">Tool ngoài (Streamlit) hỗ trợ tạo label cho carton — dùng cho Outbound.</p>
+        </div>
+        <a class="vas-link-btn" style="background:#2563eb;" href="https://carton-label-generator.streamlit.app/" target="_blank" rel="noopener">Mở Carton Label Generator ↗</a>
+      </div>
     </div>
   </div>
 </section>
@@ -689,6 +721,7 @@
 <script src="js/asn-single.js"></script>
 <script src="js/asn-mix.js"></script>
 <script src="js/pdf-order.js"></script>
+<script src="js/outbound-uom.js"></script>
 <script src="js/flowcharts.js"></script>
 <script src="js/app.js"></script>
 </body>
