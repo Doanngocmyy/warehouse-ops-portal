@@ -231,4 +231,46 @@
       }
     });
   })();
+
+  // ---- Pre-inbound: AMI UOM Update — chuẩn bị file (không tự login/update AMI) ----
+  (function wireAmiUomPrep() {
+    const fileInput = document.getElementById("amiUomFileInput");
+    if (!fileInput) return;
+    const statusEl = document.getElementById("amiUomStatus");
+    const genBtn = document.getElementById("amiUomGenBtn");
+    const logEl = document.getElementById("amiUomLog");
+    const resultsEl = document.getElementById("amiUomResults");
+
+    fileInput.addEventListener("change", function () {
+      if (fileInput.files.length) {
+        statusEl.textContent = "Đã chọn: " + fileInput.files[0].name + ". Sẵn sàng chạy.";
+        genBtn.disabled = false;
+      } else {
+        statusEl.textContent = "Chưa upload file.";
+        genBtn.disabled = true;
+      }
+    });
+
+    genBtn.addEventListener("click", async function () {
+      if (!fileInput.files.length) return;
+      genBtn.disabled = true;
+      logEl.textContent = "";
+      resultsEl.innerHTML = "";
+      const log = function (msg) { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+      try {
+        const out = await WOPAmiUomPrep.generate({ file: fileInput.files[0], log: log });
+        log("✅ Hoàn tất.");
+        out.files.forEach(function (f) {
+          const a = document.createElement("a");
+          a.className = "file-chip"; a.href = "#"; a.textContent = "⬇ " + f.name + " (" + f.count + ")";
+          a.addEventListener("click", function (e) { e.preventDefault(); WOPUtils.downloadBlob(f.blob, f.name); });
+          resultsEl.appendChild(a);
+        });
+      } catch (e) {
+        logEl.textContent += "❌ Lỗi: " + e.message + "\n";
+      } finally {
+        genBtn.disabled = false;
+      }
+    });
+  })();
 })();
