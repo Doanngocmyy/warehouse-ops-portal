@@ -90,3 +90,15 @@ label.small { font-size:12px; color:var(--muted); }
 .outbound-hero { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
 .outbound-hero .txt { flex:1; min-width:240px; }
 a.vas-link-btn { display:inline-block; background:var(--green); color:#fff; padding:12px 22px; border-radius:8px; text-decoration:none; font-weight:700; font-size:14px; }
+
+/* ---- OCR scan (Pre-inbound) ---- */
+.ocr-dropzone { border:2px dashed var(--line); border-radius:10px; padding:22px 14px; text-align:center; cursor:pointer; background:#f8fafc; transition:border-color .15s, background .15s; }
+.ocr-dropzone:hover, .ocr-dropzone:focus { border-color:var(--purple); outline:none; }
+.ocr-dropzone.dragover { border-color:var(--purple); background:#f5f3ff; }
+.ocr-dropzone-hint { font-size:12.5px; color:var(--muted); }
+.ocr-thumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.ocr-thumb { position:relative; width:72px; height:72px; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.ocr-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+.ocr-thumb-remove { position:absolute; top:2px; right:2px; background:rgba(15,23,42,.75); color:#fff; border:none; border-radius:50%; width:18px; height:18px; font-size:10px; line-height:1; cursor:pointer; padding:0; }
+.ocr-result { width:100%; box-sizing:border-box; margin-top:8px; padding:10px; border:1px solid var(--line); border-radius:8px; font-family:monospace; font-size:12.5px; resize:vertical; white-space:pre-wrap; }
+
