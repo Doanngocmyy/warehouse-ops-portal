@@ -415,12 +415,12 @@ class Parser:
 # ── DIM mapper ─────────────────────────────────────────────────────────────
 class DimMapper:
     _ALIASES: Dict[str, List[str]] = {
-        "ref":    ["lo","lot","reference_code","reference","ref","job","shipment"],
-        "pkg":    ["tracking","package_code","package","pkg","carton_code"],
+        "ref":    ["lo","lot","lohang","reference_code","reference","ref","job","shipment"],
+        "pkg":    ["tracking","package_code","package","pkg","carton_code","carton","kien","makien"],
         "length": ["dai","length","l","len"],
         "width":  ["rong","width","w","wid"],
         "height": ["cao","height","h","hei","high"],
-        "weight": ["kg","weight","wt","gross","gw"],
+        "weight": ["kg","weight","wt","gross","gw","nang"],
         "cbm":    ["cbm","volume","vol","cubic","m3"],
     }
 
@@ -478,11 +478,37 @@ class DimMapper:
             return re.sub(r'[^a-z0-9]', '', strip_accents(s).lower())
         nc = {norm(c): c for c in cols}
         mapping: Dict[str, str] = {}
+        claimed: set = set()
         for field_name, aliases in self._ALIASES.items():
+            found = None
+            # 1) exact normalized match first (original, safest behaviour)
             for alias in aliases:
-                if norm(alias) in nc:
-                    mapping[field_name] = nc[norm(alias)]
+                a = norm(alias)
+                if a in nc and nc[a] not in claimed:
+                    found = nc[a]
                     break
+            # 2) fallback: alias appears anywhere inside the column name — needed
+            #    for real-world templates like "Lô Hàng (QRcode ở giữa)" or
+            #    "Mã Kiện (Barcode ở trên hoặc dưới)" where headers are full
+            #    descriptive phrases, not the bare alias token. Skip 1-char
+            #    aliases here (l/w/h) since substring matching on a single
+            #    letter is too prone to false positives.
+            if found is None:
+                for alias in aliases:
+                    a = norm(alias)
+                    if len(a) < 2:
+                        continue
+                    for key, orig_col in nc.items():
+                        if orig_col in claimed:
+                            continue
+                        if a in key:
+                            found = orig_col
+                            break
+                    if found:
+                        break
+            if found:
+                mapping[field_name] = found
+                claimed.add(found)
         if "ref" not in mapping or "pkg" not in mapping:
             return None
         return mapping
