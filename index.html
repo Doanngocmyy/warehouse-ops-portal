@@ -11,6 +11,7 @@
 <script>if (window["pdfjsLib"]) { pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; }</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/7.0.0/tesseract.min.js"></script>
 </head>
 <body>
 
@@ -505,6 +506,7 @@
       <button data-sub="asn-single" class="active">ASN Single (theo từng EAN)</button>
       <button data-sub="asn-mix">ASN Mix (label tổng hợp Carton)</button>
       <button data-sub="pdf-order">PDF In Order (Gộp + Sắp xếp Carton)</button>
+      <button data-sub="ocr-scan">OCR Ảnh (Scan/Paste)</button>
     </div>
 
     <div class="subsection active" id="sub-asn-single">
@@ -561,6 +563,40 @@
           <button class="btn" id="pdfOrderGenBtn" disabled>Gộp &amp; Sắp xếp theo Carton No.</button>
           <div class="log-box" id="pdfOrderLog"></div>
           <div class="result-files" id="pdfOrderResults"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="subsection" id="sub-ocr-scan">
+      <p class="desc" style="margin-top:0;">Kéo-thả ảnh, bấm để chọn file, hoặc dán ảnh vừa chụp màn hình bằng <b>Ctrl+V</b> ngay vào khung bên dưới để nhận diện chữ (OCR). Chạy 100% trong trình duyệt bằng Tesseract.js — ảnh không gửi ra ngoài/không lưu server. Có thể thả/dán nhiều ảnh liên tiếp, kết quả sẽ được nối lại thành 1 khối để copy nguyên cụm (giống ChatGPT).</p>
+      <div class="grid2">
+        <div class="panel">
+          <h4>1. Đưa ảnh vào</h4>
+          <label class="small">Ngôn ngữ nhận diện</label><br>
+          <select id="ocrLang" style="width:100%; margin:4px 0 10px;">
+            <option value="vie+eng" selected>Tiếng Việt + English (khuyên dùng)</option>
+            <option value="eng">Chỉ English</option>
+            <option value="vie">Chỉ Tiếng Việt</option>
+          </select>
+          <div class="ocr-dropzone" id="ocrDropzone" tabindex="0">
+            <div class="ocr-dropzone-hint">📋 Kéo-thả ảnh vào đây, bấm để chọn file, hoặc <b>click vào khung này rồi Ctrl+V</b> ảnh vừa chụp/copy</div>
+            <input type="file" id="ocrFileInput" accept="image/*" multiple style="display:none;">
+          </div>
+          <div class="status" id="ocrStatus">Chưa có ảnh nào.</div>
+          <div class="ocr-thumbs" id="ocrThumbs"></div>
+        </div>
+        <div class="panel">
+          <h4>2. Nhận diện &amp; kết quả</h4>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn" id="ocrRunBtn" disabled>Chạy OCR</button>
+            <button class="btn secondary" id="ocrClearBtn">Xoá hết ảnh</button>
+          </div>
+          <div class="log-box" id="ocrLog"></div>
+          <div style="margin-top:10px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
+            <label class="small">Kết quả (có thể sửa trước khi copy)</label>
+            <button class="btn secondary" id="ocrCopyBtn" style="padding:4px 10px; font-size:12px;" disabled>📋 Copy toàn bộ</button>
+          </div>
+          <textarea id="ocrResultText" class="ocr-result" rows="12" placeholder="Kết quả OCR sẽ hiện ở đây..."></textarea>
         </div>
       </div>
     </div>
@@ -629,21 +665,6 @@
         </div>
         <a class="vas-link-btn" style="background:#2563eb;" href="https://carton-label-generator.streamlit.app/" target="_blank" rel="noopener">Mở CNDC Carton Label Generator ↗</a>
       </div>
-      <div class="outbound-hero card" style="background:#fefce8; border:1px solid #fde68a; margin-top:14px;">
-        <div class="txt">
-          <h3 style="margin-top:0;">PL OCR — Packing List OCR to Excel</h3>
-          <p style="margin:0 0 10px; color:#854d0e;">OCR toàn bộ PDF Packing List trong 1 lô hàng, tự parse No/Product Name/SKU/Barcode/Qty theo từng carton, tra cứu DIM (Length/Width/Height/Weight/CBM) và HS Code (theo SKU, fallback theo barcode/EAN nếu không khớp SKU), đối chiếu declared vs calculated quantity, xuất 1 file Excel chuẩn gồm 2 sheet: <b>All_Items</b> (merge theo carton, có Origin/HS Code lặp theo item) và <b>Match_Status</b> (trạng thái đối soát từng carton, tô màu MATCHED/MISMATCH). Chạy local bằng Jupyter/Python — PDF không upload lên server nào.</p>
-        </div>
-        <a class="vas-link-btn" style="background:#ca8a04;" href="./tools/pl-ocr-grouping/OCR_Packing%20List.ipynb" download>Tải OCR_Packing List.ipynb ↓</a>
-      </div>
-      <div class="outbound-hero card" style="background:#fefce8; border:1px solid #fde68a; margin-top:14px;">
-        <div class="txt">
-          <h3 style="margin-top:0;">PL Grouping — Factory / Port / Store</h3>
-          <p style="margin:0 0 10px; color:#854d0e;">Từ file Excel PL Total (output của PL OCR ở trên), tự động tách thành nhiều file con — giữ nguyên format/merge/màu của bản gốc: theo <b>Factory</b> (CN, POP, SBGEAR, QIFENG, JION — nhận diện theo suffix cuối reference_code hoặc tên PDF, không chắc → REVIEW), CN theo <b>Port</b> (PVG, SZX, TFU, PEK), và CN theo <b>Store</b> (9 cửa hàng retail, fuzzy-match text "Receiver Company" trong PDF, confidence thấp → REVIEW thay vì đoán bừa). Carton number đánh lại theo từng file con, package_code giữ nguyên để trace ngược. Kèm file PL_SPLIT_CONTROL.csv và báo cáo đối soát tự động (carton/qty từng cấp phải khớp tổng).</p>
-        </div>
-        <a class="vas-link-btn" style="background:#ca8a04;" href="./tools/pl-ocr-grouping/pl_group_export.py" download>Tải pl_group_export.py ↓</a>
-      </div>
-      <p class="desc" style="margin-top:14px; font-size:12.5px;"><i>Cách dùng: đặt 2 file cùng 1 thư mục, mở OCR_Packing List.ipynb bằng Jupyter, sửa PL_FOLDER / OUTPUT_XLSX / DIM_WEIGHT_FILE / MASTER_DATA_FILE ở đầu file cho đúng đường dẫn, rồi Run All — cell đầu OCR ra PL_Total.xlsx, cell sau tự tách vào thư mục PL_SPLIT_OUTPUT/.</i></p>
     </div>
   </div>
 </section>
@@ -738,6 +759,7 @@
 <script src="js/pdf-order.js"></script>
 <script src="js/outbound-uom.js"></script>
 <script src="js/flowcharts.js"></script>
+<script src="js/ocr-scan.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
