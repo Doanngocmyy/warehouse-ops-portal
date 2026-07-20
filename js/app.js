@@ -22,6 +22,9 @@
     });
   });
 
+  // ---- Pre-inbound: OCR ảnh (drag/drop, paste, file) ----
+  if (window.WOPOcrScan) WOPOcrScan.init();
+
   // ---- flowchart interactivity ----
   const ioPanel = document.getElementById("io-detail");
   const exPanel = document.getElementById("ex-detail");
