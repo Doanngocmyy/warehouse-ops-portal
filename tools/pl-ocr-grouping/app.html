@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PL OCR + Grouping — Warehouse Ops Portal</title>
+<link rel="stylesheet" href="../../css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.js"></script>
+<style>
+  .pl-wrap { max-width:1000px; margin:0 auto; padding:20px 16px 60px; }
+  .back-link { font-size:12.5px; color:#64748b; text-decoration:none; }
+  .back-link:hover { text-decoration:underline; }
+  .field-row { margin-bottom:14px; }
+  .field-row label.small { display:block; margin-bottom:4px; }
+  .adv-toggle { font-size:12px; color:#7C3AED; cursor:pointer; background:none; border:none; padding:0; margin-top:6px; text-decoration:underline; }
+  .adv-box { display:none; margin-top:10px; padding-top:10px; border-top:1px dashed #e2e8f0; }
+  .adv-box.show { display:block; }
+  .adv-box .field-row { margin-bottom:10px; }
+  .adv-box input[type=text] { width:100%; padding:6px 8px; border:1px solid #e2e8f0; border-radius:6px; font-size:12.5px; }
+  .file-list-mini { font-size:11.5px; color:#64748b; margin-top:4px; max-height:70px; overflow-y:auto; }
+  .checkline { font-size:12.5px; color:#475569; margin-top:8px; }
+  .checkline input { margin-right:6px; }
+  .stage-badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; margin-left:8px; vertical-align:middle; }
+  .stage-badge.idle { background:#f1f5f9; color:#64748b; }
+  .stage-badge.busy { background:#fef3c7; color:#92400e; }
+  .stage-badge.ok { background:#dcfce7; color:#166534; }
+  .stage-badge.err { background:#fee2e2; color:#991b1b; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div>
+    <h1>PL OCR + Grouping</h1>
+    <div class="sub">Packing List OCR → Excel, rồi tự tách theo Factory / Port / Store — chạy 100% trong trình duyệt</div>
+  </div>
+  <a class="back-link" href="../../index.html">← Về Warehouse Ops Portal</a>
+</header>
+
+<div class="pl-wrap">
+
+  <div class="card">
+    <h2>Chạy trực tiếp trên trình duyệt <span id="stageBadge" class="stage-badge idle">Sẵn sàng</span></h2>
+    <p class="desc">
+      Toàn bộ logic OCR (pdfplumber) + tra DIM/HS Code + tách nhóm chạy bằng Python thật ngay trong trình duyệt của bạn
+      (qua Pyodide/WebAssembly) — PDF, file DIM, Master Data <b>không upload lên server nào</b>. Lần chạy đầu tiên sẽ tải
+      runtime Python (~15–25MB) nên có thể mất khoảng 20–40 giây; các lần sau nhanh hơn nhờ cache trình duyệt.
+    </p>
+
+    <div class="grid2">
+      <div class="panel">
+        <h4>1. PDF Packing List</h4>
+        <label class="small">Chọn cả thư mục chứa PDF (khuyên dùng)</label><br>
+        <input type="file" id="pdfFolderInput" webkitdirectory multiple>
+        <div class="status" style="margin-top:10px;">— hoặc —</div>
+        <label class="small">Upload 1 file .zip chứa các PDF</label><br>
+        <input type="file" id="pdfZipInput" accept=".zip">
+        <div class="file-list-mini" id="pdfFileList"></div>
+        <label class="checkline"><input type="checkbox" id="recursiveCheck"> Quét cả thư mục con (subfolder)</label>
+      </div>
+      <div class="panel">
+        <h4>2. File DIM / khối lượng &amp; Master Data</h4>
+        <label class="small">DIM / Weight (.xlsx)</label><br>
+        <input type="file" id="dimInput" accept=".xlsx,.xls">
+        <br><br>
+        <label class="small">Master Data — SKU + HS Code (.xlsx)</label><br>
+        <input type="file" id="masterInput" accept=".xlsx,.xls">
+
+        <button type="button" class="adv-toggle" id="advToggle">Tuỳ chọn nâng cao (chỉ định sheet) ▾</button>
+        <div class="adv-box" id="advBox">
+          <div class="field-row">
+            <label class="small">Tên sheet DIM (để trống = tự dò)</label>
+            <input type="text" id="dimSheetInput" placeholder="vd: Sheet1">
+          </div>
+          <div class="field-row">
+            <label class="small">Tên sheet Master Data (để trống = tự dò)</label>
+            <input type="text" id="masterSheetInput" placeholder="để trống nếu không chắc">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;">
+      <button class="btn" id="runBtn" disabled>Chạy OCR + Tách nhóm</button>
+      <span class="status" id="mainStatus">Cần chọn: PDF (thư mục hoặc zip) + file DIM + Master Data.</span>
+    </div>
+
+    <div class="log-box" id="logBox" style="display:none;"></div>
+    <div class="result-files" id="resultFiles"></div>
+  </div>
+
+  <div class="card">
+    <h3>Cách dùng</h3>
+    <p class="desc" style="margin:0;">
+      1) Chọn thư mục chứa toàn bộ PDF Packing List của 1 lô hàng (hoặc zip lại rồi upload file zip).<br>
+      2) Chọn file DIM/khối lượng và file Master Data (SKU ↔ HS Code) tương ứng lô đó.<br>
+      3) Bấm "Chạy OCR + Tách nhóm" — log xử lý hiện trực tiếp bên dưới.<br>
+      4) Xong sẽ có 1 nút tải về 1 file .zip gồm: <code>PL_Total.xlsx</code> (2 sheet All_Items + Match_Status),
+      cùng thư mục <code>PL_SPLIT_OUTPUT/</code> (tách theo Factory / CN Port / CN Store, kèm
+      <code>PL_SPLIT_CONTROL.csv</code> và báo cáo đối soát).<br>
+      Logic OCR/tách nhóm giữ nguyên 100% so với bản Jupyter notebook gốc đã test — trang này chỉ là lớp giao diện
+      chạy cùng logic đó ngay trong trình duyệt.
+    </p>
+  </div>
+
+</div>
+
+<script>
+const pdfFolderInput   = document.getElementById('pdfFolderInput');
+const pdfZipInput      = document.getElementById('pdfZipInput');
+const pdfFileList      = document.getElementById('pdfFileList');
+const dimInput         = document.getElementById('dimInput');
+const masterInput      = document.getElementById('masterInput');
+const dimSheetInput    = document.getElementById('dimSheetInput');
+const masterSheetInput = document.getElementById('masterSheetInput');
+const recursiveCheck   = document.getElementById('recursiveCheck');
+const advToggle        = document.getElementById('advToggle');
+const advBox           = document.getElementById('advBox');
+const runBtn           = document.getElementById('runBtn');
+const mainStatus       = document.getElementById('mainStatus');
+const logBox           = document.getElementById('logBox');
+const resultFiles      = document.getElementById('resultFiles');
+const stageBadge       = document.getElementById('stageBadge');
+
+let selectedPdfEntries = null; // [{path, file}], path = relative path under the PDF folder
+
+advToggle.addEventListener('click', () => {
+  advBox.classList.toggle('show');
+  advToggle.textContent = advBox.classList.contains('show')
+    ? 'Tuỳ chọn nâng cao (chỉ định sheet) ▴'
+    : 'Tuỳ chọn nâng cao (chỉ định sheet) ▾';
+});
+
+function setStage(mode, text) {
+  stageBadge.className = 'stage-badge ' + mode;
+  stageBadge.textContent = text;
+}
+
+function updateFileListUI() {
+  if (!selectedPdfEntries || !selectedPdfEntries.length) {
+    pdfFileList.textContent = '';
+  } else {
+    pdfFileList.textContent = selectedPdfEntries.length + ' PDF: ' +
+      selectedPdfEntries.slice(0, 6).map(e => e.path).join(', ') +
+      (selectedPdfEntries.length > 6 ? ` … (+${selectedPdfEntries.length - 6})` : '');
+  }
+  checkReady();
+}
+
+function checkReady() {
+  const ready = selectedPdfEntries && selectedPdfEntries.length > 0 && dimInput.files[0] && masterInput.files[0];
+  runBtn.disabled = !ready;
+  if (ready) {
+    mainStatus.textContent = `Sẵn sàng: ${selectedPdfEntries.length} PDF + DIM + Master Data.`;
+  } else {
+    mainStatus.textContent = 'Cần chọn: PDF (thư mục hoặc zip) + file DIM + Master Data.';
+  }
+}
+
+pdfFolderInput.addEventListener('change', () => {
+  const files = Array.from(pdfFolderInput.files || []).filter(f => /\.pdf$/i.test(f.name));
+  selectedPdfEntries = files.map(f => {
+    // webkitRelativePath = "SelectedFolder/sub/x.pdf" -> strip the top-level folder segment
+    const rel = f.webkitRelativePath || f.name;
+    const parts = rel.split('/');
+    const stripped = parts.length > 1 ? parts.slice(1).join('/') : rel;
+    return { path: stripped, file: f };
+  });
+  pdfZipInput.value = '';
+  updateFileListUI();
+});
+
+pdfZipInput.addEventListener('change', async () => {
+  const zipFile = pdfZipInput.files[0];
+  if (!zipFile) return;
+  mainStatus.textContent = 'Đang đọc file zip...';
+  try {
+    const zip = await JSZip.loadAsync(zipFile);
+    const entries = [];
+    zip.forEach((relPath, entry) => {
+      if (!entry.dir && /\.pdf$/i.test(entry.name)) entries.push(entry);
+    });
+    // If every pdf shares the same first path segment, strip it (common "zip a folder" case)
+    const firstSegs = new Set(entries.map(e => e.name.split('/')[0]));
+    const stripTop = entries.every(e => e.name.includes('/')) && firstSegs.size === 1;
+    const withBytes = [];
+    for (const entry of entries) {
+      const buf = await entry.async('arraybuffer');
+      const parts = entry.name.split('/');
+      const path = stripTop ? parts.slice(1).join('/') : entry.name;
+      withBytes.push({ path, bytes: new Uint8Array(buf) });
+    }
+    selectedPdfEntries = withBytes.map(e => ({ path: e.path, bytes: e.bytes }));
+    pdfFolderInput.value = '';
+    updateFileListUI();
+  } catch (e) {
+    mainStatus.textContent = 'Lỗi đọc zip: ' + e.message;
+  }
+});
+
+dimInput.addEventListener('change', checkReady);
+masterInput.addEventListener('change', checkReady);
+
+function log(msg) {
+  logBox.style.display = 'block';
+  logBox.textContent += msg;
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+function pyStrLiteral(s) {
+  if (!s) return 'None';
+  return JSON.stringify(s);
+}
+
+let pyodideInstance = null;
+let depsInstalled = false;
+
+async function ensurePyodideReady() {
+  if (pyodideInstance && depsInstalled) return pyodideInstance;
+  setStage('busy', 'Đang tải Python runtime...');
+  log('Đang tải Pyodide (Python runtime trong trình duyệt)...\n');
+  if (!pyodideInstance) {
+    pyodideInstance = await loadPyodide();
+  }
+  log('Pyodide đã sẵn sàng. Đang cài pandas / openpyxl / pdfplumber...\n');
+  await pyodideInstance.loadPackage(['micropip', 'pandas']);
+  await pyodideInstance.runPythonAsync(`
+import micropip
+await micropip.install("openpyxl")
+await micropip.install("pdfminer.six")
+await micropip.install("pdfplumber", deps=False)
+`);
+  depsInstalled = true;
+  log('Đã cài xong thư viện xử lý PDF/Excel.\n');
+  return pyodideInstance;
+}
+
+async function readAsUint8(file) {
+  const buf = await file.arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+function removeTreeIfExists(pyodide, path) {
+  let stat;
+  try { stat = pyodide.FS.stat(path); } catch (e) { return; }
+  if (pyodide.FS.isDir(stat.mode)) {
+    const items = pyodide.FS.readdir(path).filter(x => x !== '.' && x !== '..');
+    for (const name of items) removeTreeIfExists(pyodide, path + '/' + name);
+    pyodide.FS.rmdir(path);
+  } else {
+    pyodide.FS.unlink(path);
+  }
+}
+
+async function writeIntoVirtualFs(pyodide, path, bytes) {
+  const parts = path.split('/');
+  if (parts.length > 1) {
+    const dir = '/work/pdfs/' + parts.slice(0, -1).join('/');
+    pyodide.FS.mkdirTree(dir);
+  }
+  pyodide.FS.writeFile('/work/pdfs/' + path, bytes);
+}
+
+async function runPipeline() {
+  runBtn.disabled = true;
+  resultFiles.innerHTML = '';
+  logBox.textContent = '';
+  logBox.style.display = 'block';
+
+  try {
+    const pyodide = await ensurePyodideReady();
+
+    setStage('busy', 'Đang chuẩn bị dữ liệu...');
+    log('Đang ghi PDF vào bộ nhớ ảo...\n');
+
+    // Reset /work each run (recursive — plain rmdir only works on empty dirs)
+    removeTreeIfExists(pyodide, '/work');
+    pyodide.FS.mkdirTree('/work/pdfs');
+
+    for (const entry of selectedPdfEntries) {
+      const bytes = entry.bytes ? entry.bytes : await readAsUint8(entry.file);
+      await writeIntoVirtualFs(pyodide, entry.path, bytes);
+    }
+
+    const dimBytes = await readAsUint8(dimInput.files[0]);
+    pyodide.FS.writeFile('/work/dim.xlsx', dimBytes);
+    const masterBytes = await readAsUint8(masterInput.files[0]);
+    pyodide.FS.writeFile('/work/master.xlsx', masterBytes);
+
+    // pl_group_export.py must be importable
+    const groupExportSrc = await (await fetch('pl_group_export.py')).text();
+    pyodide.FS.writeFile('/pl_group_export.py', groupExportSrc);
+    await pyodide.runPythonAsync('import sys\nif "/" not in sys.path: sys.path.insert(0, "/")');
+
+    let coreSrc = await (await fetch('pl_ocr_core.py')).text();
+    coreSrc = coreSrc
+      .replace('__DIM_WEIGHT_SHEET__', pyStrLiteral(dimSheetInput.value.trim()))
+      .replace('__MASTER_DATA_SHEET__', pyStrLiteral(masterSheetInput.value.trim()))
+      .replace('__RECURSIVE__', recursiveCheck.checked ? 'True' : 'False');
+
+    pyodide.setStdout({ batched: (s) => log(s + '\n') });
+    pyodide.setStderr({ batched: (s) => log(s + '\n') });
+
+    setStage('busy', 'Đang chạy OCR + tách nhóm...');
+    log('\n----- Bắt đầu chạy pipeline -----\n');
+
+    await pyodide.runPythonAsync(coreSrc);
+
+    log('\n----- Hoàn tất, đang đóng gói kết quả -----\n');
+    setStage('busy', 'Đang đóng gói file kết quả...');
+
+    const zip = new JSZip();
+    const totalBytes = pyodide.FS.readFile('/work/PL_Total.xlsx');
+    zip.file('PL_Total.xlsx', totalBytes);
+
+    function addDirRecursive(fsPath, zipFolder) {
+      const items = pyodide.FS.readdir(fsPath).filter(x => x !== '.' && x !== '..');
+      for (const name of items) {
+        const full = fsPath + '/' + name;
+        const stat = pyodide.FS.stat(full);
+        if (pyodide.FS.isDir(stat.mode)) {
+          addDirRecursive(full, zipFolder.folder(name));
+        } else {
+          zipFolder.file(name, pyodide.FS.readFile(full));
+        }
+      }
+    }
+    addDirRecursive('/work/pdfs/PL_SPLIT_OUTPUT', zip.folder('PL_SPLIT_OUTPUT'));
+
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.className = 'file-chip';
+    a.download = 'PL_OCR_Grouping_Result.zip';
+    a.textContent = '⬇ Tải PL_OCR_Grouping_Result.zip';
+    resultFiles.appendChild(a);
+
+    setStage('ok', 'Hoàn tất');
+    log('\nHoàn tất — bấm nút bên dưới để tải kết quả.\n');
+    mainStatus.textContent = 'Xong! Kiểm tra log ở trên và tải file zip kết quả.';
+
+  } catch (e) {
+    setStage('err', 'Lỗi');
+    log('\n!!!! LỖI: ' + (e && e.message ? e.message : String(e)) + '\n');
+    mainStatus.textContent = 'Có lỗi xảy ra — xem chi tiết trong log phía trên.';
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+runBtn.addEventListener('click', runPipeline);
+</script>
+
+</body>
+</html>
