@@ -289,11 +289,15 @@ async function runPipeline() {
     pyodide.FS.writeFile('/work/master.xlsx', masterBytes);
 
     // pl_group_export.py must be importable
-    const groupExportSrc = await (await fetch('pl_group_export.py')).text();
+    // cache: 'no-store' + timestamp query param — these Python source files
+    // are updated over time; without forcing a fresh fetch, the browser (or
+    // an intermediate CDN cache) can silently serve a stale pre-fix copy.
+    const _cacheBust = Date.now();
+    const groupExportSrc = await (await fetch('pl_group_export.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     pyodide.FS.writeFile('/pl_group_export.py', groupExportSrc);
     await pyodide.runPythonAsync('import sys\nif "/" not in sys.path: sys.path.insert(0, "/")');
 
-    let coreSrc = await (await fetch('pl_ocr_core.py')).text();
+    let coreSrc = await (await fetch('pl_ocr_core.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     coreSrc = coreSrc
       .replace('__DIM_WEIGHT_SHEET__', pyStrLiteral(dimSheetInput.value.trim()))
       .replace('__MASTER_DATA_SHEET__', pyStrLiteral(masterSheetInput.value.trim()))
