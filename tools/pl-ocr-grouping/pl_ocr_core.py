@@ -130,6 +130,31 @@ def normalize_sku_key(text: str) -> str:
     text = re.sub(r"\s+-", "-", text)
     return re.sub(r"[^A-Z0-9]", "", text.upper())
 
+_INVISIBLE_CHARS_RE = re.compile('[ ​‌‍⁠﻿\xad]')
+
+def sanitize_ocr_cell(s: str) -> str:
+    """Strip invisible/zero-width unicode artifacts (NBSP, zero-width space,
+    soft hyphen, BOM, ...) that PDF text extraction sometimes inserts inside
+    otherwise-contiguous codes. Left uncleaned, these can silently break the
+    barcode/SKU regexes or leave a stray character inside a code that should
+    read as one unbroken token."""
+    if s is None:
+        return s
+    return _INVISIBLE_CHARS_RE.sub('', str(s))
+
+def dequarantine_code(value: str, label: str, context: str = "") -> str:
+    """SKU/product codes and EAN/barcodes never legitimately contain blanks —
+    if OCR produced one anyway (stray space from a misread character), strip
+    it and log a warning so the anomaly is visible for a quick sanity check,
+    rather than silently mismatching or silently 'fixing' with no trace."""
+    if not value:
+        return value
+    cleaned = re.sub(r'\s+', '', value)
+    if cleaned != value:
+        log.warning(f"{label} contained unexpected blank(s), auto-fixed: "
+                     f"{value!r} -> {cleaned!r}" + (f" ({context})" if context else ""))
+    return cleaned
+
 def split_leading_no(product_name: str, current_no: str = "") -> Tuple[str, str]:
     """Split cases like '1 10mm Rope Loop' into No='1', Product Name='10mm Rope Loop'."""
     name = re.sub(r"\s+", " ", str(product_name or "")).strip()
@@ -193,7 +218,7 @@ def parse_item_cells(cells: List[str]) -> Optional[Item]:
     merged: List[str] = []
     i = 0
     while i < len(cells):
-        cell = str(cells[i]).strip()
+        cell = sanitize_ocr_cell(str(cells[i]).strip())
         if cell.endswith('-') and RE_PROD_CODE.fullmatch(cell) and i + 1 < len(cells):
             merged.append(cell + str(cells[i + 1]).strip())
             i += 2
@@ -258,12 +283,14 @@ def parse_item_cells(cells: List[str]) -> Optional[Item]:
 
     product_name = re.sub(r'\s+', ' ', ' '.join(name_parts)).strip()
     line_no, product_name = split_leading_no(product_name, line_no)
+    prod_code = dequarantine_code(prod_code, "SKU/product_code", "table row")
+    barcode   = dequarantine_code(barcode, "EAN/barcode", "table row")
     return Item(no=line_no, product_name=product_name, product_code=prod_code,
                 barcode=barcode, unit=unit or "PCS", quantity=quantity,
                 parse_method="table")
 
 def parse_item_text(accumulated: str) -> Optional[Item]:
-    text = join_split_product_code(accumulated)
+    text = join_split_product_code(sanitize_ocr_cell(accumulated))
     m_term = RE_TERMINAL.search(text)
     if not m_term:
         return None
@@ -297,6 +324,8 @@ def parse_item_text(accumulated: str) -> Optional[Item]:
     if not (barcode or prod_code) or quantity == 0:
         return None
     line_no, product_name = split_leading_no(product_name, line_no)
+    prod_code = dequarantine_code(prod_code, "SKU/product_code", "text line")
+    barcode   = dequarantine_code(barcode, "EAN/barcode", "text line")
     return Item(no=line_no, product_name=product_name, product_code=prod_code,
                 barcode=barcode, unit=unit, quantity=quantity,
                 parse_method="text")
@@ -417,9 +446,9 @@ class DimMapper:
     _ALIASES: Dict[str, List[str]] = {
         "ref":    ["lo","lot","lohang","reference_code","reference","ref","job","shipment"],
         "pkg":    ["tracking","package_code","package","pkg","carton_code","carton","kien","makien"],
-        "length": ["dai","length","l","len"],
-        "width":  ["rong","width","w","wid"],
-        "height": ["cao","height","h","hei","high"],
+        "length": ["dai","length","l","len","d","chieudai"],
+        "width":  ["rong","width","w","wid","r","chieurong"],
+        "height": ["cao","height","h","hei","high","c","chieucao"],
         "weight": ["kg","weight","wt","gross","gw","nang"],
         "cbm":    ["cbm","volume","vol","cubic","m3"],
     }
