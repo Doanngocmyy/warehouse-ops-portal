@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Topologie Packing List Extractor — v8
+Topologie Packing List Extractor — v9
 Output: 2 sheets — Packing List (matches the official PL template layout,
 plain black grid, no bold/no color fill) + Match_Status (internal QC log,
 color-coded on purpose so mismatches stay easy to spot).
@@ -12,9 +12,14 @@ Dimensions L/W/H, Weight, CBM, Origin Country, Origin Country's HTSCODE,
 Shipping Mark, PORT, 中国标签名称) with a plain black-bordered grid
 (no bold, no blue/red/green fills) instead of the old merged-diagnostic
 style. PORT is auto-filled for CN-factory cartons using the same
-store/port rule already used for the CN split (pl_group_export.py);
-PO No. / Invoice No. / Shipping Mark / 中国标签名称 are intentionally left
-blank — fill them in manually, same as before.
+store/port rule already used for the CN split (pl_group_export.py).
+v9: Shipping Mark is now auto-filled with the source PDF's filename (no
+.pdf extension) — no manual typing needed. CNEE / Notify Party for non-CN
+factories can now be typed once on the app.html page (MANUAL_CONSIGNEE /
+MANUAL_NOTIFY_PARTY) instead of edited by hand in every exported file; CN
+shipments keep auto-filling from STORE_MASTER regardless of what's typed
+there. PO No. / Invoice No. / 中国标签名称 are still intentionally left
+blank — fill them in manually.
 """
 from __future__ import annotations
 import re, sys, logging, unicodedata
@@ -49,6 +54,11 @@ DIM_WEIGHT_SHEET = __DIM_WEIGHT_SHEET__
 MASTER_DATA_FILE = Path("/work/master.xlsx")
 MASTER_DATA_SHEET = __MASTER_DATA_SHEET__
 RECURSIVE = __RECURSIVE__
+# v9: optional manual CNEE / Notify Party, typed in on the app.html page —
+# only used for non-CN factories (CN always auto-fills from STORE_MASTER).
+# None / "" when the user left the field blank.
+MANUAL_CONSIGNEE = __MANUAL_CONSIGNEE__
+MANUAL_NOTIFY_PARTY = __MANUAL_NOTIFY_PARTY__
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -985,8 +995,15 @@ _MANUAL_FILL_NOTE = "(Ngoài CN — vui lòng tự điền chính xác / non-CN:
 
 
 def _resolve_consignee(is_cn: bool) -> str:
+    """CN: always the fixed CONSIGNEE_BLOCK. Non-CN: use whatever the user
+    typed into the "CNEE / Consignee" box on the app.html page (MANUAL_
+    CONSIGNEE) — filled in once on the page instead of editing the exported
+    file by hand every time. Falls back to a manual-fill note only if that
+    box was left empty."""
     if is_cn:
         return CONSIGNEE_BLOCK
+    if MANUAL_CONSIGNEE:
+        return "CONSIGNEE:\n" + MANUAL_CONSIGNEE
     return "CONSIGNEE:\n" + _MANUAL_FILL_NOTE
 
 
@@ -995,11 +1012,14 @@ def _resolve_notify_party(packages: List[Package], is_cn: bool) -> str:
     this file belongs to the exact same known CN store (e.g. a
     04_CN_BY_STORE split file) — never guessed/blended when a file mixes
     stores (e.g. PL_Total, a factory file, or a CN-by-port file with several
-    stores sharing one port). For non-CN factories, leave blank with a note
-    reminding to fill it in manually — this tool has no address data for
-    other countries. Ambiguous CN cases are left blank without the note
-    (still CN, just needs the specific store filled in)."""
+    stores sharing one port). For non-CN factories, use whatever the user
+    typed into the "NOTIFY PARTY / Delivery Address" box on the app.html
+    page (MANUAL_NOTIFY_PARTY); falls back to a manual-fill note if left
+    empty. Ambiguous CN cases are left blank without the note (still CN,
+    just needs the specific store filled in)."""
     if not is_cn:
+        if MANUAL_NOTIFY_PARTY:
+            return "NOTIFY PARTY:\nDELIVERY ADDRESS:\n" + MANUAL_NOTIFY_PARTY
         return "NOTIFY PARTY:\nDELIVERY ADDRESS:\n" + _MANUAL_FILL_NOTE
     stores = {p.store for p in packages if p.store and p.store != "REVIEW"}
     if len(stores) != 1:
@@ -1037,7 +1057,7 @@ def write_workbook(output_path: Path, packages: List[Package]):
                 pkg.global_carton_num, pkg.package_code,
                 pkg.length, pkg.width, pkg.height,
                 pkg.weight, pkg.cbm,
-                origin, "", "",                          # Origin / HTS / Shipping Mark (manual)
+                origin, "", pkg.reference_code,           # HTS (manual) / Shipping Mark = PDF filename, no .pdf
                 pkg.port, "",                             # PORT (auto for CN) / 中国标签名称 (manual)
             ])
             row_idx += 1
@@ -1051,7 +1071,7 @@ def write_workbook(output_path: Path, packages: List[Package]):
                     pkg.global_carton_num, pkg.package_code,
                     pkg.length, pkg.width, pkg.height,
                     pkg.weight, pkg.cbm,
-                    origin, item.hs_code, "",                          # Shipping Mark (manual)
+                    origin, item.hs_code, pkg.reference_code,           # Shipping Mark = PDF filename, no .pdf
                     pkg.port, "",                                       # PORT / 中国标签名称
                 ])
                 row_idx += 1
