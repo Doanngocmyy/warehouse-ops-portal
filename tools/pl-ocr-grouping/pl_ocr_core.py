@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """
-Topologie Packing List Extractor — v7
-Output: 2 sheets — All_Items (merged carton cells) + Match_Status
-Updates: No/Product Name split, robust HS Code lookup, revised Origin logic, Origin/HS Code repeated per item, no blue fill on content cells
+Topologie Packing List Extractor — v8
+Output: 2 sheets — Packing List (matches the official PL template layout,
+plain black grid, no bold/no color fill) + Match_Status (internal QC log,
+color-coded on purpose so mismatches stay easy to spot).
+Updates: No/Product Name split, robust HS Code lookup, revised Origin logic,
+Origin/HS Code repeated per item, Packing List sheet now mirrors the real
+PL template columns 1:1 (Item#, PO No., Invoice No., Product Name in
+English, SKU#, BarCode/UPC, UOM, Quantity, Carton#, Packaging code, Carton
+Dimensions L/W/H, Weight, CBM, Origin Country, Origin Country's HTSCODE,
+Shipping Mark, PORT, 中国标签名称) with a plain black-bordered grid
+(no bold, no blue/red/green fills) instead of the old merged-diagnostic
+style. PORT is auto-filled for CN-factory cartons using the same
+store/port rule already used for the CN split (pl_group_export.py);
+PO No. / Invoice No. / Shipping Mark / 中国标签名称 are intentionally left
+blank — fill them in manually, same as before.
 """
 from __future__ import annotations
 import re, sys, logging, unicodedata
@@ -25,7 +37,10 @@ log = logging.getLogger(__name__)
 # =========================================================
 # 1) CONFIG — filled in by app.html from browser uploads (Pyodide virtual FS).
 #    Only this block differs from the original notebook; everything below is
-#    byte-for-byte identical to the tested OCR_Packing List.ipynb / v7 logic.
+#    byte-for-byte identical to the tested OCR_Packing List.ipynb / v7 logic,
+#    except the Package dataclass (2 new optional fields) and the Excel
+#    writer section (Packing List sheet layout), which are the parts this
+#    revision (v8) intentionally changes.
 # =========================================================
 PL_FOLDER = Path("/work/pdfs")
 OUTPUT_XLSX = Path("/work/PL_Total.xlsx")
@@ -125,12 +140,12 @@ def normalize_sku_key(text: str) -> str:
     """Robust key for SKU/EAN lookup: remove hidden chars, spaces and punctuation."""
     text = clean_excel_key(text) if 'clean_excel_key' in globals() else str(text or '').strip()
     text = unicodedata.normalize("NFKC", text)
-    text = text.replace("\ufffe", "-").replace("￾", "-").replace("­", "-")
+    text = text.replace("￾", "-").replace("￾", "-").replace("­", "-")
     text = re.sub(r"-\s+", "-", text)
     text = re.sub(r"\s+-", "-", text)
     return re.sub(r"[^A-Z0-9]", "", text.upper())
 
-_INVISIBLE_CHARS_RE = re.compile('[ ​‌‍⁠﻿\xad]')
+_INVISIBLE_CHARS_RE = re.compile('[ ​‌‍⁠﻿\xad]')
 
 def sanitize_ocr_cell(s: str) -> str:
     """Strip invisible/zero-width unicode artifacts (NBSP, zero-width space,
@@ -194,6 +209,11 @@ class Package:
     cbm:     Optional[float] = None
     dim_matched: bool = False
     hs_code: str = ""
+    # v8: CN store/port classification, filled in by classify_packages_for_port()
+    # (same rule as pl_group_export.py's CN split — "quy luật chia port/store").
+    # Stays "" for non-CN-factory packages; fill manually if needed.
+    port: str = ""
+    store: str = ""
 
     @property
     def calc_qty(self) -> int:
@@ -669,6 +689,37 @@ def assign_global_numbers(packages: List[Package]):
         pkg.global_carton_num = f"{i}/{total}"
     log.info(f"Carton numbers: 1/{total} ... {total}/{total}")
 
+# ── v8: CN store/port classification (same rule as pl_group_export.py) ─────
+def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recursive: bool):
+    """Fill pkg.port / pkg.store for every CN-factory package, using the exact
+    same detect_factory() + match_store() rule already used to split CN
+    shipments by store/port (pl_group_export.py) — "quy luật chia port và
+    store" the warehouse team already uses. Non-CN-factory packages (POP,
+    SBGEAR, QIFENG, JION, or unclassifiable) are left with port="" / store=""
+    (blank) — fill in manually if needed, same as PO No. / Invoice No."""
+    try:
+        import pl_group_export as pge
+    except ImportError:
+        log.warning("pl_group_export not importable — PORT column will stay blank for all packages.")
+        return
+    cache: Dict[str, str] = {}
+    n_cn = n_matched = 0
+    for pkg in packages:
+        factory = pge.detect_factory(pkg.reference_code, pkg.source_file)
+        if factory != "CN":
+            continue
+        n_cn += 1
+        signal = pge._collect_cn_signal(pkg, pdf_folder, recursive, cache)
+        store, confidence, suggestion = pge.match_store(signal)
+        if store in pge.STORE_MASTER:
+            pkg.store = store
+            pkg.port = str(pge.STORE_MASTER[store]["port"])
+            n_matched += 1
+        else:
+            pkg.store = "REVIEW"
+            pkg.port = ""
+    log.info(f"CN store/port classification: {n_matched}/{n_cn} CN package(s) matched to a store+port.")
+
 # ── Status ─────────────────────────────────────────────────────────────────
 def overall_status(pkg: Package) -> Tuple[str, str]:
     decl = pkg.declared_total_qty
@@ -684,11 +735,14 @@ def overall_status(pkg: Package) -> Tuple[str, str]:
     return "MATCHED", ""
 
 # ── Excel styles ───────────────────────────────────────────────────────────
-HDR_FILL   = PatternFill("solid", fgColor="1F4E79")
-HDR_FONT   = Font(bold=True, color="FFFFFF", size=10)
-ALT_FILL   = PatternFill()
-PKG_FILL   = PatternFill()
-PKG_FONT   = Font(bold=True, size=9)
+# v8: the "Packing List" sheet (the customer-facing deliverable) is now a
+# plain black-grid table — no bold, no header fill, no red/green/yellow
+# status colors — matching the real PL template exactly. The Match_Status
+# sheet is an internal QC log only (never sent to the customer), so it keeps
+# its color-coding on purpose: that's what makes mismatches jump out.
+THIN_BLACK = Side(style="thin", color="000000")
+PLAIN_BORDER = Border(left=THIN_BLACK, right=THIN_BLACK, top=THIN_BLACK, bottom=THIN_BLACK)
+PLAIN_FONT = Font(bold=False, size=10)
 
 STATUS_FILL = {
     "MATCHED":             PatternFill("solid", fgColor="C6EFCE"),
@@ -698,129 +752,361 @@ STATUS_FILL = {
     "CRITICAL_ZERO_ITEMS": PatternFill("solid", fgColor="FF4444"),
 }
 CRIT_FONT = Font(bold=True, color="FFFFFF", size=10)
+MS_HDR_FILL = PatternFill("solid", fgColor="1F4E79")
+MS_HDR_FONT = Font(bold=True, color="FFFFFF", size=10)
 
-_THICK = Side(style="medium", color="1F4E79")
-_THIN  = Side(style="thin",   color="B0BEC5")
+# Packing List column layout (1-based), matching the real PL template. The
+# item table itself starts at row 14 (rows 1-11 = document header block,
+# rows 12-13 = the bilingual table header) — same row numbers as the real
+# template, so this sheet lines up with it exactly:
+#  A Item#            B PO No.           C Invoice No.
+#  D Product Name in English             E SKU#            F BarCode/UPC
+#  G UOM              H Quantity         I Carton#         J Packaging code
+#  K/L/M Carton Dimensions (Length/Width/Height, cm)
+#  N Weight (KG)      O CBM
+#  P Origin Country   Q Origin Country's HTSCODE            R Shipping Mark
+#  S PORT             T 中国标签名称
+PL_HEADERS_EN = [
+    "Item#", "PO No.", "Invoice No.", "Product Name\nin English", "SKU#",
+    "BarCode/UPC", "UOM", "Quantity", "Carton#", "Packaging code",
+    "Carton Dimensions (cm)\n(Length*Weight*Height)", "", "",
+    "Weight (KG)", "CBM", "Origin Country", "Origin Country's HTSCODE",
+    "Shipping Mark", "PORT", "中国标签名称",
+]
+PL_HEADERS_CN = [
+    "项目", "PO 编码", "Invoice 编码", "货品名称", "SKU编码",
+    "条形码", "单位", "数量", "箱号", "包装条形码",
+    "箱子尺寸", "", "",
+    "", "", "原产国", "原产国",
+    "", "", "",
+]
+NCOLS = 20
+TABLE_HDR_ROW1 = 12  # English header row (matches the real template exactly)
+TABLE_HDR_ROW2 = 13  # Chinese header row
+FIRST_ITEM_ROW = 14
+# Package/carton-level columns — same physical carton, so merged across all
+# item rows of that carton (matches the real template exactly): Carton#,
+# Packaging code, L/W/H, Weight, CBM. Everything else (incl. Origin Country,
+# HTS Code, Shipping Mark, PORT) is left un-merged / repeated per row, same
+# as the template.
+_MERGE_COLS = [9, 10, 11, 12, 13, 14, 15]  # I,J,K,L,M,N,O
 
-# Carton-level columns (1-based): 7=Carton#  8=seq  9=pkg_code
-# 10=L 11=W 12=H 13=Wt 14=CBM  17=ref  18=src
-# 15=Origin and 16=HS Code are item-level, so they are NOT merged.
-_MERGE_COLS = list(range(7, 15)) + [17, 18]
+# v8: document header block (rows 1-11) — SHIPPER / CONSIGNEE are the same
+# entity on every CN shipment (confirmed against 2 real PL samples), so they
+# are filled in automatically. WPIC Purchase Order#, Seller's EIN#, Date,
+# Invoice#, Remark (SO#) and Trade term vary per shipment and are NOT in the
+# OCR/DIM/Master data, so they stay blank — fill in manually, same as before.
+SHIPPER_BLOCK = (
+    "SHIPPER:\n"
+    "TOPOLOGIE GLOBAL LIMITED\n"
+    "RM G, 9/F, King Palace Plaza\n"
+    "55 King Yip Street, Kwun Tong, Hong Kong\n"
+    "EMAIL: supplychainhk@topologie.com\n"
+    "TEL: 852 3955 9963"
+)
+CONSIGNEE_BLOCK = (
+    "CONSIGNEE:\n"
+    "WORKING UNIT SHANGHAI TRADING CO LTD\n"
+    "Room 301, No. 47, Branch Lane 51, Lane 2000, Beizhai Road, Minhang District,\n"
+    "Shanghai, China\n"
+    "13817762730"
+)
 
-def _hdr(ws, headers):
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.fill = HDR_FILL
-        cell.font = HDR_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 28
+# Column widths / row heights copied from the real PL template so this sheet
+# looks identical when opened in Excel.
+PL_COL_WIDTHS = {
+    "A": 16.875, "B": 14.25, "C": 13, "D": 27.8125, "E": 25.8125, "F": 17.5,
+    "G": 10, "H": 14.25, "I": 11.8125, "J": 23.1875, "K": 8.3125, "L": 8.0625,
+    "M": 6.9375, "N": 9.6875, "O": 13, "P": 15.1875, "Q": 17.0625, "R": 27.125,
+    "S": 9, "T": 25.75,
+}
+PL_ROW_HEIGHTS = {1: 33.75, 2: 31.9, 3: 21, 4: 100.9, 5: 158.65, 6: 21.4,
+                   7: 21.4, 8: 15, 9: 15, 10: 15, 11: 15, 12: 37.15, 13: 15.75}
 
-def _auto_w(ws, cap=55):
+
+def _style_cell(cell, *, bold=False, align="center", wrap=True, size=10):
+    cell.font = Font(bold=bold, size=size)
+    cell.border = PLAIN_BORDER
+    cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+
+
+_NO_SIDE = Side(style=None)
+
+
+def _hdr_border(*, top=False, bottom=False, left=False, right=False):
+    return Border(top=THIN_BLACK if top else _NO_SIDE,
+                   bottom=THIN_BLACK if bottom else _NO_SIDE,
+                   left=THIN_BLACK if left else _NO_SIDE,
+                   right=THIN_BLACK if right else _NO_SIDE)
+
+
+def _style_text(cell, *, bold=False, align="center", wrap=True, size=10):
+    """Font + alignment only — border is handled separately by
+    _write_pl_doc_header's border pass (see below), so header borders match
+    the real template's box exactly instead of a blanket grid."""
+    cell.font = Font(bold=bold, size=size)
+    cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+
+
+def _write_pl_doc_header(ws, notify_party_text: str, is_cn: bool = True):
+    """Rows 1-11: PACKING LIST title, WPIC PO# / Date, Seller's EIN# /
+    Invoice#, Shipper / Remark(SO#), Consignee / Notify Party, Trade term,
+    then the Package/Quantity/Weight/CBM total block.
+
+    Border layout copied cell-by-cell from the real template (checked
+    against 3 real PL files): a single box around columns A:Q for rows 2-6
+    (a horizontal divider between every field row, one vertical divider
+    between the K/L columns splitting left field / right field), the
+    "Trade term" row (6) only boxed on the left side (A:K) — matches the
+    template exactly. Row 1 (title) and rows 7-11 (blank spacer + the
+    Package/Qty/Weight/CBM total labels) only keep the K/L divider line
+    continuing down, nothing else. Columns R/S/T are outside the header
+    block in the real template and are left completely untouched (no
+    border, no fill) — that's what was over-applied last time."""
+    for letter, width in PL_COL_WIDTHS.items():
+        ws.column_dimensions[letter].width = width
+    for r, h in PL_ROW_HEIGHTS.items():
+        ws.row_dimensions[r].height = h
+
+    ws.cell(row=1, column=1, value="PACKING LIST（装箱单）")
+    ws.merge_cells("A1:Q1")
+    _style_text(ws.cell(row=1, column=1), bold=True, align="center", size=16)
+
+    ws.cell(row=2, column=1, value="WPIC Purchase Order#/箱单编号：")
+    ws.merge_cells("A2:D2")
+    ws.cell(row=2, column=12, value=" 日期/Date：")
+    ws.merge_cells("L2:M2")
+    ws.merge_cells("N2:Q2")
+
+    ws.cell(row=3, column=1, value="Seller's EIN#：")
+    ws.merge_cells("A3:B3")
+    ws.cell(row=3, column=12, value="Invoice#:")
+    ws.merge_cells("L3:M3")
+    ws.merge_cells("N3:Q3")
+
+    ws.cell(row=4, column=1, value=SHIPPER_BLOCK)
+    ws.merge_cells("A4:E4")
+    ws.cell(row=4, column=12, value="Remark (SO#):")
+    ws.merge_cells("L4:M4")
+    ws.merge_cells("N4:Q4")
+
+    ws.cell(row=5, column=1, value=_resolve_consignee(is_cn))
+    ws.merge_cells("A5:E5")
+    ws.cell(row=5, column=12, value=notify_party_text or "NOTIFY PARTY:\nDELIVERY ADDRESS:")
+    ws.merge_cells("L5:Q5")
+
+    ws.cell(row=6, column=1, value="成交方式/Trade term：")
+    ws.merge_cells("A6:E6")
+
+    ws.cell(row=8, column=1, value="Package Total: ")
+    ws.cell(row=9, column=1, value="Quantity Total:")
+    ws.cell(row=10, column=1, value="Gross Weight (KG):")
+    ws.cell(row=11, column=1, value="CBM")
+    # column B values (formulas referencing the TOTAL row) are filled in by
+    # write_workbook() once the item table's TOTAL row number is known.
+
+    # ── Font / alignment (all of A:Q, rows 1-11 — text only, no border) ────
+    bold_label_cells = {"A1", "A2", "L2", "A3", "L3", "L4", "A6",
+                         "A8", "A9", "A10", "A11"}
+    for r in range(1, 7):
+        for c in range(1, 18):  # A..Q only — R:T are outside the header box
+            cell = ws.cell(row=r, column=c)
+            align = "left" if r in (4, 5) and c in (1, 12) else "center"
+            _style_text(cell, bold=(cell.coordinate in bold_label_cells or r == 1),
+                        align=align, wrap=True, size=16 if r == 1 else 10)
+    for r in (8, 9, 10, 11):
+        _style_text(ws.cell(row=r, column=1), bold=True, align="left", wrap=False)
+
+    # ── Border (matches the real template's box exactly) ───────────────────
+    # Row 1: no border at all (floating title).
+    ws.cell(row=1, column=1).border = Border()
+    # Rows 2-5: full A:Q box, horizontal divider under every row, one
+    # vertical divider between K (col 11) and L (col 12).
+    for r in (2, 3, 4, 5):
+        for c in range(1, 18):
+            ws.cell(row=r, column=c).border = _hdr_border(
+                top=True, bottom=True, left=(c == 1), right=(c == 17 or c == 11))
+        ws.cell(row=r, column=12).border = _hdr_border(top=True, bottom=True, left=True)
+    # Row 6 (Trade term): only the left half (A:K) is boxed — matches the
+    # template, where the right/Notify-Party box stops at row 5.
+    for c in range(1, 12):  # A..K
+        ws.cell(row=6, column=c).border = _hdr_border(top=True, left=(c == 1), right=(c == 11))
+    # Rows 7-11: blank spacer + totals — only the K/L divider continues.
+    for r in range(7, 12):
+        ws.cell(row=r, column=11).border = _hdr_border(right=True)
+        ws.cell(row=r, column=12).border = _hdr_border(left=True)
+
+
+def _write_pl_table_header(ws):
+    for c, val in enumerate(PL_HEADERS_EN, start=1):
+        ws.cell(row=TABLE_HDR_ROW1, column=c, value=val or None)
+    for c, val in enumerate(PL_HEADERS_CN, start=1):
+        ws.cell(row=TABLE_HDR_ROW2, column=c, value=val or None)
+    ws.merge_cells(start_row=TABLE_HDR_ROW1, start_column=11, end_row=TABLE_HDR_ROW1, end_column=13)
+    ws.merge_cells(start_row=TABLE_HDR_ROW2, start_column=11, end_row=TABLE_HDR_ROW2, end_column=13)
+    for r in (TABLE_HDR_ROW1, TABLE_HDR_ROW2):
+        for c in range(1, NCOLS + 1):
+            _style_cell(ws.cell(row=r, column=c), bold=False, align="center", wrap=True)
+
+
+def _auto_w(ws, cap=40):
     for col in ws.columns:
         letter = get_column_letter(col[0].column)
         w = max((len(str(c.value)) if c.value else 0) for c in col)
-        ws.column_dimensions[letter].width = min(w + 4, cap)
+        ws.column_dimensions[letter].width = min(w + 3, cap)
 
-def _apply_pkg_merge(ws, start_row: int, end_row: int, dim_matched: bool):
-    """Merge carton-level columns across all item rows of one package."""
+
+def _apply_pl_merge(ws, start_row: int, end_row: int):
+    """Merge the carton-level columns across all item rows of one package —
+    plain style, no fill, no bold (matches the requested no-color grid)."""
     if end_row <= start_row:
-        # Single item — just style, no merge needed
-        for col in _MERGE_COLS:
-            cell = ws.cell(row=start_row, column=col)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            if not dim_matched and col in range(10, 15):
-                cell.fill = STATUS_FILL["MISMATCH_DIM"]
-            else:
-                cell.fill = PKG_FILL
-            cell.font = PKG_FONT
         return
     for col in _MERGE_COLS:
         letter = get_column_letter(col)
         ws.merge_cells(f"{letter}{start_row}:{letter}{end_row}")
-        cell = ws.cell(row=start_row, column=col)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        if not dim_matched and col in range(10, 15):
-            cell.fill = STATUS_FILL["MISMATCH_DIM"]
-        else:
-            cell.fill = PKG_FILL
-        cell.font = PKG_FONT
 
-def _border_bottom(ws, row: int, ncols: int):
-    """Thick bottom border = visual separator between packages."""
-    for c in range(1, ncols + 1):
-        cell = ws.cell(row=row, column=c)
-        existing = cell.border
-        cell.border = Border(
-            left=existing.left, right=existing.right, top=existing.top,
-            bottom=_THICK)
+
+def _is_all_cn_factory(packages: List[Package]) -> bool:
+    """True only if every package in this file is factory=CN (the known CN
+    retail network this template's hardcoded CONSIGNEE / STORE_MASTER data
+    applies to). Non-CN factories (POP/SBGEAR/QIFENG/JION/REVIEW) go to
+    different countries/consignees this tool has no data for — CNEE and
+    NOTIFY PARTY must stay blank and be filled in manually for those."""
+    if not packages:
+        return False
+    try:
+        import pl_group_export as pge
+    except ImportError:
+        return False
+    return all(pge.detect_factory(p.reference_code, p.source_file) == "CN" for p in packages)
+
+
+_MANUAL_FILL_NOTE = "(Ngoài CN — vui lòng tự điền chính xác / non-CN: fill in manually)"
+
+
+def _resolve_consignee(is_cn: bool) -> str:
+    if is_cn:
+        return CONSIGNEE_BLOCK
+    return "CONSIGNEE:\n" + _MANUAL_FILL_NOTE
+
+
+def _resolve_notify_party(packages: List[Package], is_cn: bool) -> str:
+    """Auto-fill Notify Party / Delivery Address ONLY when every package in
+    this file belongs to the exact same known CN store (e.g. a
+    04_CN_BY_STORE split file) — never guessed/blended when a file mixes
+    stores (e.g. PL_Total, a factory file, or a CN-by-port file with several
+    stores sharing one port). For non-CN factories, leave blank with a note
+    reminding to fill it in manually — this tool has no address data for
+    other countries. Ambiguous CN cases are left blank without the note
+    (still CN, just needs the specific store filled in)."""
+    if not is_cn:
+        return "NOTIFY PARTY:\nDELIVERY ADDRESS:\n" + _MANUAL_FILL_NOTE
+    stores = {p.store for p in packages if p.store and p.store != "REVIEW"}
+    if len(stores) != 1:
+        return ""
+    try:
+        import pl_group_export as pge
+    except ImportError:
+        return ""
+    return pge.notify_party_block(next(iter(stores)))
+
 
 # ── Workbook writer ────────────────────────────────────────────────────────
 def write_workbook(output_path: Path, packages: List[Package]):
     wb = Workbook()
     wb.remove(wb.active)
-    NCOLS = 18
 
-    # ── All_Items ──────────────────────────────────────────────────────────
-    ws1 = wb.create_sheet("All_Items")
-    _hdr(ws1, [
-        "No", "Product Name", "product_code", "barcode", "unit", "quantity",
-        "Carton number", "pdf_package_seq", "package_code",
-        "Length", "Width", "Height", "Weight", "CBM",
-        "Origin", "HS Code", "reference_code", "source_file",
-    ])
+    # ── Packing List (customer-facing, plain black grid) ────────────────────
+    ws1 = wb.create_sheet("Packing List")
+    is_cn = _is_all_cn_factory(packages)
+    notify_party_text = _resolve_notify_party(packages, is_cn)
+    _write_pl_doc_header(ws1, notify_party_text, is_cn)
+    _write_pl_table_header(ws1)
 
-    row_idx = 2
+    row_idx = FIRST_ITEM_ROW
+    item_no = 0
     for pkg in packages:
         origin    = pkg.origin
         pkg_start = row_idx
 
         if not pkg.items:
+            item_no += 1
             ws1.append([
-                "", "", "", "", "", "",
-                pkg.global_carton_num, pkg.pdf_package_seq, pkg.package_code,
-                pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
-                origin, pkg.hs_code, pkg.reference_code, pkg.source_file,
+                item_no, "", "",                      # Item# / PO No. / Invoice No. (manual)
+                "", "", "", "", "",                     # Product/SKU/Barcode/UOM/Qty (no items)
+                pkg.global_carton_num, pkg.package_code,
+                pkg.length, pkg.width, pkg.height,
+                pkg.weight, pkg.cbm,
+                origin, "", "",                          # Origin / HTS / Shipping Mark (manual)
+                pkg.port, "",                             # PORT (auto for CN) / 中国标签名称 (manual)
             ])
             row_idx += 1
         else:
-            for i, item in enumerate(pkg.items):
-                first = (i == 0)
+            for item in pkg.items:
+                item_no += 1
                 ws1.append([
-                    item.no, item.product_name, item.product_code, item.barcode,
+                    item_no, "", "",                                  # Item# / PO No. / Invoice No.
+                    item.product_name, item.product_code, item.barcode,
                     item.unit, item.quantity,
-                    pkg.global_carton_num if first else "",
-                    pkg.pdf_package_seq   if first else "",
-                    pkg.package_code      if first else "",
-                    pkg.length  if first else "",
-                    pkg.width   if first else "",
-                    pkg.height  if first else "",
-                    pkg.weight  if first else "",
-                    pkg.cbm     if first else "",
-                    origin,
-                    item.hs_code,
-                    pkg.reference_code if first else "",
-                    pkg.source_file    if first else "",
+                    pkg.global_carton_num, pkg.package_code,
+                    pkg.length, pkg.width, pkg.height,
+                    pkg.weight, pkg.cbm,
+                    origin, item.hs_code, "",                          # Shipping Mark (manual)
+                    pkg.port, "",                                       # PORT / 中国标签名称
                 ])
-                # Keep content cells unfilled as requested.
                 row_idx += 1
 
         end_row = row_idx - 1
-        _apply_pkg_merge(ws1, pkg_start, end_row, pkg.dim_matched)
-        _border_bottom(ws1, end_row, NCOLS)
+        for r in range(pkg_start, end_row + 1):
+            align_by_col = {4: "left"}  # Product Name left-aligned, rest centered
+            for c in range(1, NCOLS + 1):
+                _style_cell(ws1.cell(row=r, column=c), bold=False,
+                            align=align_by_col.get(c, "center"), wrap=True)
+        _apply_pl_merge(ws1, pkg_start, end_row)
 
-    for r in range(2, row_idx):
-        ws1.row_dimensions[r].height = 18
-    _auto_w(ws1)
-    ws1.freeze_panes = "A2"
+    # ── TOTAL row ────────────────────────────────────────────────────────────
+    total_qty = sum(p.calc_qty for p in packages)
+    total_cartons = len(packages)
+    total_weight = sum(p.weight for p in packages if p.weight is not None)
+    total_cbm = sum(p.cbm for p in packages if p.cbm is not None)
+    total_row = row_idx
+    ws1.cell(row=total_row, column=1, value="TOTAL")
+    ws1.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=7)
+    ws1.cell(row=total_row, column=8, value=total_qty)
+    ws1.cell(row=total_row, column=9, value=f"{total_cartons} Cartons")
+    ws1.cell(row=total_row, column=14, value=round(total_weight, 3) if total_weight else 0)
+    ws1.cell(row=total_row, column=15, value=round(total_cbm, 6) if total_cbm else 0)
+    for c in range(1, NCOLS + 1):
+        _style_cell(ws1.cell(row=total_row, column=c), bold=False, align="center", wrap=True)
 
-    # ── Match_Status ───────────────────────────────────────────────────────
+    # Rows 8-11 (Package/Quantity/Weight/CBM totals, above the table) — live
+    # formulas referencing the TOTAL row, same as the real template.
+    ws1.cell(row=8, column=2, value=f"={get_column_letter(9)}{total_row}")
+    ws1.cell(row=9, column=2, value=f"={get_column_letter(8)}{total_row}")
+    ws1.cell(row=10, column=2, value=f"={get_column_letter(14)}{total_row}")
+    ws1.cell(row=11, column=2, value=f"={get_column_letter(15)}{total_row}")
+    for r in (8, 9, 10, 11):
+        _style_text(ws1.cell(row=r, column=2), bold=False, align="left", wrap=False)
+
+    for r in range(FIRST_ITEM_ROW, total_row + 1):
+        ws1.row_dimensions[r].height = ws1.row_dimensions[r].height or 18
+    for letter, width in PL_COL_WIDTHS.items():
+        ws1.column_dimensions[letter].width = width
+    ws1.freeze_panes = f"A{FIRST_ITEM_ROW}"
+
+    # ── Match_Status (internal QC only — keeps color-coding on purpose) ─────
     ws2 = wb.create_sheet("Match_Status")
-    _hdr(ws2, [
+    ws2.append([
         "source_file", "reference_code", "package_code",
         "pdf_package_seq", "Carton number",
         "item_count", "calculated_total_qty", "declared_total_qty",
         "qty_match", "dim_match", "overall_status", "remark",
     ])
+    for cell in ws2[1]:
+        cell.fill = MS_HDR_FILL
+        cell.font = MS_HDR_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws2.row_dimensions[1].height = 28
     for i, pkg in enumerate(packages, start=2):
         decl = pkg.declared_total_qty
         calc = pkg.calc_qty
@@ -944,6 +1230,10 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
         pkg.hs_code = ", ".join(sorted(set(pkg_hs_codes))) if pkg_hs_codes else ""
     log.info(f"HS Code matched: {hs_matched}/{hs_total}")
 
+    # v8: CN store/port classification — fills pkg.port for the Packing List
+    # sheet's PORT column, using the exact same rule as the CN split step.
+    classify_packages_for_port(packages, pl_folder, recursive)
+
     counts: Dict[str, int] = defaultdict(int)
     for pkg in packages:
         counts[overall_status(pkg)[0]] += 1
@@ -978,7 +1268,7 @@ from pl_group_export import export_grouped_pl
 
 if not packages:
     raise RuntimeError(
-        "`packages` is empty \u2014 the OCR pipeline above found no PDFs or produced "
+        "`packages` is empty — the OCR pipeline above found no PDFs or produced "
         "no packages. Fix PL_FOLDER / the PDFs first, then re-run the cell above "
         "before running this split step."
     )
@@ -995,11 +1285,11 @@ try:
         recursive=RECURSIVE,
     )
 except RuntimeError as e:
-    print("XXXX SPLIT FAILED \u2014 reconciliation mismatch, nothing was silently swallowed XXXX")
+    print("XXXX SPLIT FAILED — reconciliation mismatch, nothing was silently swallowed XXXX")
     print(e)
     raise
 except PermissionError as e:
-    print("XXXX SPLIT FAILED \u2014 a target .xlsx is locked/open in Excel XXXX")
+    print("XXXX SPLIT FAILED — a target .xlsx is locked/open in Excel XXXX")
     print(e)
     raise
 else:

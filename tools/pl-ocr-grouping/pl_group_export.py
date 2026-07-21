@@ -30,6 +30,14 @@ Design notes
   close, the package is marked REVIEW (store=REVIEW, port=REVIEW) and is
   EXCLUDED from the 03_CN_BY_PORT / 04_CN_BY_STORE files (it is still fully
   visible in PL_SPLIT_CONTROL.csv and in the validation report).
+* v8: STORE_MASTER now also carries the full Notify Party / Delivery Address
+  block (receiver company, full street address, contact name + phone) for
+  each of the 9 CN retail stores, supplied directly by the warehouse team.
+  notify_party_block() formats that into the exact "NOTIFY PARTY: / DELIVERY
+  ADDRESS: / ..." text used on the real PL template, so pl_ocr_core.py's
+  Packing List sheet can auto-fill Notify Party ONLY when every package in
+  that file belongs to the same single store (e.g. the 04_CN_BY_STORE
+  split) — never guessed/blended when a file mixes stores.
 """
 from __future__ import annotations
 
@@ -133,46 +141,73 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "port": "TFU",
         "receiver": "Topologie CN - Chengdu Taikooli",
         "aliases": ["Chengdu", "Chengdu Taikooli", "Taikoo Li Chengdu", "M060"],
+        "address": "Shop M060, Taikoo Li Chengdu, 8 Zhongshamao Street, Jinjiang District, Chengdu City, Sichuan, CN 610021",
+        "contact_name": "June",
+        "contact_phone": "18084829907",
     },
     "SHENZHEN": {
         "port": "SZX",
         "receiver": "CN - Shenzhen Mixc City (Shop T228)",
         "aliases": ["Shenzhen", "Shenzhen MixC", "Mixc City", "T228"],
+        "address": "Shop T228, Tower 3, Vientiane City (MixC), No. 1881 Baoan South Road, Luohu District, Shenzhen, Guangdong, CN 518000",
+        "contact_name": "Ben",
+        "contact_phone": "18565775002",
     },
     "GUANGZHOU": {
         "port": "SZX",
         "receiver": "Topologie CN - Guangzhou Central Parc",
         "aliases": ["Guangzhou", "Guangzhou Central Parc", "Guangzhou Parc Central", "B262-1"],
+        "address": "Shop B262-1, B2/F, Parc Central, No.218 Tianhe Road, Tianhe District, Guangzhou City, Guangdong, CN 510620",
+        "contact_name": "Zhang Xiaojie",
+        "contact_phone": "13662343374",
     },
     "HANGZHOU": {
         "port": "PVG",
         "receiver": "Topologie CN - Hangzhou Mixc",
         "aliases": ["Hangzhou", "Hangzhou MixC", "B1C03"],
+        "address": "B1C03, Hangzhou MixC Mall, 701 Fuchun Rd, Jianggan District, Hangzhou, Zhejiang, CN 310008",
+        "contact_name": "Su Su",
+        "contact_phone": "15606539115",
     },
     "IAPM": {
         "port": "PVG",
         "receiver": "Topologie CN - Iapm",
         "aliases": ["IAPM", "IAPM Mall", "L4-426"],
+        "address": "L4-426, IAPM Mall, 999 Huaihai Rd (M), Xuhui District, Shanghai, Shanghai, CN 200020",
+        "contact_name": "Shi Wei Yi",
+        "contact_phone": "13621647004",
     },
     "KERRY": {
         "port": "PVG",
         "receiver": "Topologie CN - Kerry Center flagship",
         "aliases": ["Kerry", "Kerry Center", "Kerry Centre", "NB1-23B"],
+        "address": "NB1-23B shop, B1 floor, Jing'an Kerry Centre, Jing'an District, Shanghai, Shanghai, CN 200040",
+        "contact_name": "Ning Ning",
+        "contact_phone": "17602197790",
     },
     "SHANGHAI_TAIKOOLI": {
         "port": "PVG",
         "receiver": "CN - Shanghai Taikooli (Shop B1-07b)",
         "aliases": ["Shanghai Taikooli", "Shanghai Taikoo Li", "B1-07b", "S-B1-07b"],
+        "address": "Shop S-B1-07b, B/F, No.1-9, 500 Dongyu Road, Pudong, Shanghai, Shanghai, CN 200127",
+        "contact_name": "Bobo Shi",
+        "contact_phone": "13621647004",
     },
     "SHANGHAI_HONGQIAO": {
         "port": "PVG",
         "receiver": "CN - Shanghai Hongqiao Airport",
         "aliases": ["Shanghai Hongqiao", "Hongqiao Airport", "D60-6"],
+        "address": "Shop D60-6, Shanghai Hongqiao International Airport Terminal 2 (Departure Restricted Area), Changning District, Shanghai, Shanghai, China 200335",
+        "contact_name": "Bobo Shi",
+        "contact_phone": "13621647004",
     },
     "CHINA_WORLD": {
         "port": "PEK",
         "receiver": "China World NB1026",
         "aliases": ["China World", "China World Mall", "NB1026"],
+        "address": "Shop NB1026, B1 Floor, China World Mall, No. 1 Jianguomenwai Avenue, Chaoyang District, Beijing, Beijing, China 100004",
+        "contact_name": "Bobo Shi",
+        "contact_phone": "+86 13621647004",
     },
 }
 
@@ -190,6 +225,24 @@ PORT_FILE_MAP = {
     "PEK": "PL_CN_PORT_PEK.xlsx",
 }
 STORE_FILE_MAP = {k: f"PL_CN_STORE_{k}.xlsx" for k in STORE_MASTER}
+
+
+def notify_party_block(store_key: str) -> str:
+    """Format the exact 'NOTIFY PARTY: / DELIVERY ADDRESS: / ...' text block
+    used on the real PL template, from STORE_MASTER's contact info. Returns
+    "" if store_key isn't a known store (caller should leave the cell blank
+    in that case rather than guessing)."""
+    info = STORE_MASTER.get(store_key)
+    if not info:
+        return ""
+    lines = ["NOTIFY PARTY:", "DELIVERY ADDRESS:", str(info.get("receiver", "")), str(info.get("address", ""))]
+    contact = str(info.get("contact_name", "") or "")
+    phone = str(info.get("contact_phone", "") or "")
+    if contact:
+        lines.append(contact)
+    if phone:
+        lines.append(f"Tel: {phone}")
+    return "\n".join(lines)
 
 
 def _build_alias_lookup() -> List[Tuple[str, str]]:
