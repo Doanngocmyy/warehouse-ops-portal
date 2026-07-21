@@ -26,6 +26,8 @@
   .stage-badge.busy { background:#fef3c7; color:#92400e; }
   .stage-badge.ok { background:#dcfce7; color:#166534; }
   .stage-badge.err { background:#fee2e2; color:#991b1b; }
+  .manual-panel { margin-top:16px; }
+  .manual-panel textarea { width:100%; padding:6px 8px; border:1px solid #e2e8f0; border-radius:6px; font-size:12.5px; font-family:inherit; resize:vertical; }
 </style>
 </head>
 <body>
@@ -81,6 +83,24 @@
       </div>
     </div>
 
+    <div class="panel manual-panel">
+      <h4>3. (Tuỳ chọn) CNEE &amp; NOTIFY PARTY — chỉ cho lô KHÔNG phải CN</h4>
+      <p class="desc" style="margin:4px 0 10px;">
+        Lô CN (factory=CN) luôn tự động điền Consignee/Notify Party theo đúng cửa hàng — không cần đụng vào phần này.
+        Với các nước/factory khác (POP, SBGEAR, QIFENG, JION...), gõ vào 2 ô dưới đây <b>1 lần</b> trước khi bấm chạy —
+        tool sẽ tự điền thẳng vào file kết quả, khỏi phải sửa tay lại trong Excel mỗi lần. Để trống thì file sẽ có ghi
+        chú nhắc điền tay.
+      </p>
+      <div class="field-row">
+        <label class="small">CNEE / Consignee</label>
+        <textarea id="manualConsigneeInput" rows="4" placeholder="Tên công ty&#10;Địa chỉ&#10;SĐT..."></textarea>
+      </div>
+      <div class="field-row">
+        <label class="small">NOTIFY PARTY / Delivery Address</label>
+        <textarea id="manualNotifyInput" rows="4" placeholder="Tên người nhận&#10;Địa chỉ giao hàng&#10;Tel:..."></textarea>
+      </div>
+    </div>
+
     <div style="margin-top:16px;">
       <button class="btn" id="runBtn" disabled>Chạy OCR + Tách nhóm</button>
       <span class="status" id="mainStatus">Cần chọn: PDF (thư mục hoặc zip) + file DIM + Master Data.</span>
@@ -95,10 +115,13 @@
     <p class="desc" style="margin:0;">
       1) Chọn thư mục chứa toàn bộ PDF Packing List của 1 lô hàng (hoặc zip lại rồi upload file zip).<br>
       2) Chọn file DIM/khối lượng và file Master Data (SKU ↔ HS Code) tương ứng lô đó.<br>
-      3) Bấm "Chạy OCR + Tách nhóm" — log xử lý hiện trực tiếp bên dưới.<br>
-      4) Xong sẽ có 1 nút tải về 1 file .zip gồm: <code>PL_Total.xlsx</code> (2 sheet All_Items + Match_Status),
+      3) Nếu lô KHÔNG phải CN, có thể điền CNEE/Notify Party 1 lần ở mục 3 (tuỳ chọn) — lô CN thì bỏ qua, tự động rồi.<br>
+      4) Bấm "Chạy OCR + Tách nhóm" — log xử lý hiện trực tiếp bên dưới.<br>
+      5) Xong sẽ có 1 nút tải về 1 file .zip gồm: <code>PL_Total.xlsx</code> (2 sheet Packing List + Match_Status),
       cùng thư mục <code>PL_SPLIT_OUTPUT/</code> (tách theo Factory / CN Port / CN Store, kèm
       <code>PL_SPLIT_CONTROL.csv</code> và báo cáo đối soát).<br>
+      Shipping Mark trong Packing List tự lấy theo tên file PDF (bỏ đuôi .pdf). PO No. / Invoice No. / 中国标签名称
+      vẫn để trống — điền tay sau.<br>
       Logic OCR/tách nhóm giữ nguyên 100% so với bản Jupyter notebook gốc đã test — trang này chỉ là lớp giao diện
       chạy cùng logic đó ngay trong trình duyệt.
     </p>
@@ -115,6 +138,8 @@ const masterInput      = document.getElementById('masterInput');
 const dimSheetInput    = document.getElementById('dimSheetInput');
 const masterSheetInput = document.getElementById('masterSheetInput');
 const recursiveCheck   = document.getElementById('recursiveCheck');
+const manualConsigneeInput = document.getElementById('manualConsigneeInput');
+const manualNotifyInput    = document.getElementById('manualNotifyInput');
 const advToggle        = document.getElementById('advToggle');
 const advBox           = document.getElementById('advBox');
 const runBtn           = document.getElementById('runBtn');
@@ -301,7 +326,9 @@ async function runPipeline() {
     coreSrc = coreSrc
       .replace('__DIM_WEIGHT_SHEET__', pyStrLiteral(dimSheetInput.value.trim()))
       .replace('__MASTER_DATA_SHEET__', pyStrLiteral(masterSheetInput.value.trim()))
-      .replace('__RECURSIVE__', recursiveCheck.checked ? 'True' : 'False');
+      .replace('__RECURSIVE__', recursiveCheck.checked ? 'True' : 'False')
+      .replace('__MANUAL_CONSIGNEE__', pyStrLiteral(manualConsigneeInput.value.trim()))
+      .replace('__MANUAL_NOTIFY_PARTY__', pyStrLiteral(manualNotifyInput.value.trim()));
 
     pyodide.setStdout({ batched: (s) => log(s + '\n') });
     pyodide.setStderr({ batched: (s) => log(s + '\n') });
