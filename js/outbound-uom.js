@@ -5,17 +5,17 @@
  * portal: files never leave the browser.
  *
  * Inputs (2 Excel files, user-uploaded):
- *   1) Inventory — "Tồn kho theo thời gian thực" export.
- *      Required columns: Mã SKU đối tác, ĐVT, Khả dụng, Tên sản phẩm, Mã sản phẩm
- *   2) Order — Outbound Request export (sheet as exported by FOMS).
- *      Required columns: SKU Code, Requested Qty, Order Number
+ *  1) Inventory — "Tồn kho theo thời gian thực" export.
+ *     Required columns: Mã SKU đối tác, ĐVT, Khả dụng, Tên sản phẩm, Mã sản phẩm
+ *  2) Order — Outbound Request export (sheet as exported by FOMS).
+ *     Required columns: SKU Code, Requested Qty, Order Number
  *
  * Outputs (2 downloadable .xlsx, built client-side with SheetJS):
- *   1) Outbound_Type_Plan.xlsx — per order line: detect outbound type
- *      (CARTON vs PCS), quantities, stock detail, status.
- *   2) Suggest_Xa_Le.xlsx — only the lines flagged "cần bóc carton"
- *      (i.e. PCS lines where loose stock alone isn't enough), aggregated
- *      into "open N cartons of size X -> Y PCS released" suggestions.
+ *  1) Outbound_Type_Plan.xlsx — per order line: detect outbound type
+ *     (CARTON vs PCS), quantities, stock detail, status.
+ *  2) Suggest_Xa_Le.xlsx — only the lines flagged "cần bóc carton"
+ *     (i.e. PCS lines where loose stock alone isn't enough), aggregated
+ *     into "open N cartons of size X -> Y PCS released" suggestions.
  * ========================================================== */
 (function () {
   "use strict";
@@ -52,14 +52,49 @@
     if (missing.length) throw new Error(label + " thiếu cột: " + missing.join(", "));
   }
 
+  // ---- NEW: warn when a SKU has multiple distinct CARTON UOM variants ----
+  // (e.g. CARTON_10PCS + CARTON_20PCS + CARTON_30PCS for the SAME SKU).
+  // The detect/split logic below already handles this correctly (it tries
+  // biggest carton size first), but a human doing a manual VLOOKUP on the
+  // raw inventory export by SKU alone — without also matching the exact
+  // UOM/size column — can silently grab the wrong row (wrong carton size,
+  // wrong qty/carton). This just surfaces a loud reminder in the log so
+  // whoever's cross-checking manually knows to double check UOM, not just SKU.
+  function warnMultiCartonUom(skuRows, log) {
+    let flaggedSkus = 0;
+    skuRows.forEach(function (rows, sku) {
+      const sizes = new Set();
+      rows.forEach(function (row) {
+        const u = parseUom(row.dvt);
+        if (u.kind === "CARTON") sizes.add(u.size);
+      });
+      if (sizes.size > 1) {
+        flaggedSkus++;
+        const sizeList = Array.from(sizes)
+          .sort(function (a, b) { return a - b; })
+          .map(function (s) { return "CARTON_" + s + "PCS"; })
+          .join(", ");
+        log("[WARNING] SKU " + sku + ": có " + sizes.size + " loại UOM CARTON khác nhau trong tồn kho (" +
+          sizeList + ") — nếu VLOOKUP thủ công theo SKU trên file tồn kho gốc, nhớ match đúng cột UOM/ĐVT, " +
+          "không chỉ match SKU, kẻo bắt nhầm dòng carton sai size.");
+      }
+    });
+    if (flaggedSkus > 0) {
+      log("[WARNING] Tổng cộng " + flaggedSkus + " SKU có nhiều loại UOM CARTON khác nhau — xem chi tiết từng SKU ở các dòng [WARNING] phía trên trước khi đối chiếu thủ công.");
+    }
+    return flaggedSkus;
+  }
+
   // ---- Inventory ----
   function parseInventory(rows, log) {
     if (!rows.length) throw new Error("File tồn kho rỗng.");
     const idx = headerIndex(rows[0]);
     requireCols(idx, ["Mã SKU đối tác", "ĐVT", "Khả dụng", "Tên sản phẩm", "Mã sản phẩm"], "Inventory");
+
     const skuRows = new Map();
     const eanRows = new Map();
     let lineCount = 0;
+
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row) continue;
@@ -81,7 +116,10 @@
       }
       lineCount++;
     }
+
     log("[INFO] Tồn kho: " + skuRows.size + " SKU distinct; " + eanRows.size + " EAN distinct; " + lineCount + " dòng.");
+    warnMultiCartonUom(skuRows, log);
+
     return { skuRows: skuRows, eanRows: eanRows };
   }
 
@@ -90,6 +128,7 @@
     if (!rows.length) throw new Error("File order rỗng.");
     const idx = headerIndex(rows[0]);
     requireCols(idx, ["SKU Code", "Requested Qty", "Order Number"], "Order");
+
     const orderLines = [];
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
@@ -122,11 +161,11 @@
   }
 
   // ---- Core: detect outbound type + split CARTON/PCS for 1 SKU ----
-  // Priority: use biggest carton size first (whole cartons only), remainder -> loose
-  // PCS if enough; if loose isn't enough for the remainder but total stock still
-  // covers the requested qty, the WHOLE line collapses into a single PCS line
-  // (this is the "cần bóc carton / xả lẻ" case) — mirrors split_carton_pcs() in
-  // the source notebook exactly.
+  // Priority: use biggest carton size first (whole cartons only), remainder ->
+  // loose PCS if enough; if loose isn't enough for the remainder but total
+  // stock still covers the requested qty, the WHOLE line collapses into a
+  // single PCS line (this is the "cần bóc carton / xả lẻ" case) — mirrors
+  // split_carton_pcs() in the source notebook exactly.
   function splitCartonPcs(qty, rows) {
     if (!rows.length) {
       return {
@@ -145,11 +184,13 @@
       else if (u.kind === "CARTON" && row.khaDung > 0) cartonOptions.push([u.size, row.khaDung]);
     });
     cartonOptions.sort(function (a, b) { return b[0] - a[0]; }); // biggest carton first
+
     const totalStock = looseAvail + cartonOptions.reduce(function (s, o) { return s + o[0] * o[1]; }, 0);
 
     let lines = [];
     let note = null;
     let rem = qty;
+
     cartonOptions.forEach(function (opt) {
       if (rem <= 0) return;
       const size = opt[0], avail = opt[1];
@@ -199,6 +240,7 @@
       const r = splitCartonPcs(ol.qty, rows);
       const fallbackNote = matchedByEan ? ("Fallback EAN: Order SKU " + ol.sku + " -> EAN/SKU inventory " + fallbackEan) : "";
       const finalNote = [fallbackNote, r.note].filter(Boolean).join("; ");
+
       return {
         orderNum: ol.orderNum, originalSku: ol.sku, sku: outputSku, ean: ean, productName: productName,
         requestedQty: ol.qty, looseAvail: r.looseAvail, cartonDetail: r.cartonDetail,
@@ -248,18 +290,22 @@
       const line = item.line;
       if (line.type !== "PCS") return; // CTN lines are already whole cartons — nothing to convert
       if (!item.note || item.note.indexOf("xả lẻ") === -1) return;
+
       const options = parseCartonDetail(item.cartonDetail);
       if (!options.length) { log("[WARNING] " + item.sku + ": được đánh dấu cần xả lẻ nhưng không đọc được carton chi tiết — bỏ qua."); return; }
       options.sort(function (a, b) { return a.size - b.size; });
       const chosen = options[0];
+
       const shortfall = line.qtyPcs - item.looseAvail;
       if (shortfall <= 0) return;
       const cartonsNeeded = Math.ceil(shortfall / chosen.size);
       const pcsReleased = cartonsNeeded * chosen.size;
+
       let note = "Đơn " + item.orderNum + ": cần " + line.qtyPcs + " PCS lẻ, tồn PCS lẻ hiện có " + item.looseAvail +
         ", thiếu " + shortfall + " -> mở " + cartonsNeeded + " carton " + chosen.size + "PCS/carton";
       if (options.length > 1) note += " (SKU có nhiều loại carton, đã chọn loại nhỏ nhất " + chosen.size + "PCS để giảm dư thừa)";
       if (cartonsNeeded > chosen.avail) note += " | CẢNH BÁO: chỉ có " + chosen.avail + " carton khả dụng, KHÔNG ĐỦ để mở " + cartonsNeeded + " carton";
+
       out.push({ sku: item.sku, ean: item.ean, uom: "CARTON_" + chosen.size + "PCS", cartonsNeeded: cartonsNeeded, pcsReleased: pcsReleased, note: note });
     });
     out.sort(function (a, b) { return a.sku < b.sku ? -1 : (a.sku > b.sku ? 1 : 0); });
@@ -336,7 +382,7 @@
     const statusCounts = {};
     results.forEach(function (r) { statusCounts[r.status] = (statusCounts[r.status] || 0) + 1; });
     Object.keys(statusCounts).forEach(function (k) {
-      log("[INFO]   " + (STATUS_DISPLAY[k] || k) + ": " + statusCounts[k]);
+      log("[INFO] " + (STATUS_DISPLAY[k] || k) + ": " + statusCounts[k]);
     });
 
     const planAoa = [[
@@ -380,6 +426,6 @@
   window.WOPOutboundUom = {
     generate: generate,
     // exported for unit testing (Node) — not used by the UI directly
-    _internal: { cleanId: cleanId, toNum: toNum, parseUom: parseUom, splitCartonPcs: splitCartonPcs, buildXaLeSuggestions: buildXaLeSuggestions, flattenAndSort: flattenAndSort, runPlan: runPlan, parseInventory: parseInventory, parseOrder: parseOrder },
+    _internal: { cleanId: cleanId, toNum: toNum, parseUom: parseUom, splitCartonPcs: splitCartonPcs, buildXaLeSuggestions: buildXaLeSuggestions, flattenAndSort: flattenAndSort, runPlan: runPlan, parseInventory: parseInventory, parseOrder: parseOrder, warnMultiCartonUom: warnMultiCartonUom },
   };
 })();
