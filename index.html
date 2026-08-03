@@ -619,10 +619,10 @@
 <section id="section-outbound" class="section">
   <div class="card">
     <h2>Outbound</h2>
-    <p class="desc">Detect Outbound Type (CARTON hay PCS cho từng dòng order, dựa theo tồn khả dụng realtime), Suggest Convert UOM (gợi ý mở bao nhiêu carton khi PCS lẻ không đủ — "xả lẻ"), và Real-Time Outbound Availability (tổng hợp tồn khả dụng realtime cho sản phẩm bundle, tự loại bỏ thùng mix đã hết tồn). Chạy 100% client-side, file Order/Tồn kho không rời khỏi trình duyệt.</p>
+    <p class="desc">Detect Outbound Type (CARTON hay PCS cho từng dòng order, dựa theo tồn khả dụng realtime), Suggest Convert UOM (gợi ý mở bao nhiêu carton khi PCS lẻ không đủ — "xả lẻ"), và Combined Real-Time Inventory (kết hợp tồn kho realtime với danh sách sản phẩm con của bundle, tự bung các bundle đang còn tồn thành từng dòng Child EAN). Chạy 100% client-side, file Order/Tồn kho không rời khỏi trình duyệt.</p>
     <div class="subtabs">
       <button data-sub="outbound-uom" class="active">Detect Outbound Type &amp; Suggest Convert UOM</button>
-      <button data-sub="outbound-availability">Real-Time Outbound Availability</button>
+      <button data-sub="outbound-availability">Combined Real-Time Inventory</button>
       <button data-sub="outbound-vas">VAS / Carton Label Tools</button>
     </div>
 
@@ -652,11 +652,11 @@
 
     <div class="subsection" id="sub-outbound-availability">
       <div class="rtoa-title-block">
-        <h3 style="margin:0;">Real-Time Outbound Availability</h3>
-        <div class="rtoa-subtitle">Bundle-Aware Inventory Report</div>
+        <h3 style="margin:0;">Combined Real-Time Inventory</h3>
+        <div class="rtoa-subtitle">Bundle-Expanded Availability Report</div>
       </div>
-      <p class="desc" style="margin-top:6px;">Tổng hợp tồn kho khả dụng realtime cho sản phẩm outbound, bao gồm xử lý sản phẩm bundle và tự động loại bỏ các thùng mix đã hết tồn.</p>
-      <div class="rtoa-instructions">Upload the bundle mapping and latest real-time inventory report. A Bundle SKU represents one physical bundle carton — the system looks up each Bundle SKU directly in the inventory file and keeps only cartons with Available Qty greater than zero. Mỗi Bundle SKU là 1 thùng carton vật lý — hệ thống tra trực tiếp Bundle SKU trong file tồn kho realtime, chỉ giữ lại carton có Available Qty &gt; 0; các dòng Child SKU chỉ là thành phần bên trong carton đó, không quyết định tồn kho.</div>
+      <p class="desc" style="margin-top:6px;">Kết hợp báo cáo tồn kho realtime với danh sách sản phẩm con của bundle. Chỉ các bundle đang còn tồn trong báo cáo realtime mới được bung thành từng dòng Child EAN; số lượng lấy trực tiếp từ Qty/SL của Child SKU.</p>
+      <div class="rtoa-instructions">Real-Time Detailed Inventory is the source of truth. Only rows with Available Qty &gt; 0 are processed; bundle/MIX rows found there are expanded into their Child EAN lines using the bundle mapping — a bundle that only exists in the mapping file (not in the current inventory) never appears in the output. File tồn kho realtime là nguồn dữ liệu gốc — chỉ xử lý các dòng có Available Qty &gt; 0; những dòng bundle/MIX đang tồn sẽ được bung theo Child EAN trong file mapping; bundle chỉ có trong file mapping mà không có trong tồn kho realtime sẽ không xuất hiện trong báo cáo.</div>
 
       <div class="grid2" style="margin-top:14px;">
         <div class="panel">
@@ -679,14 +679,10 @@
       </details>
 
       <div class="panel" id="rtoaFilterPanel" style="margin-top:14px;">
-        <h4>4. Chọn Bundle SKU &amp; bộ lọc</h4>
-        <input type="text" id="rtoaBundleSearch" placeholder="Tìm Bundle SKU hoặc tên bundle..." style="width:100%; max-width:420px; padding:7px 10px; border:1px solid var(--line); border-radius:6px; font-size:13px; margin-bottom:8px;">
-        <br>
-        <label class="small"><input type="checkbox" id="rtoaSelectAll"> Chọn tất cả Bundle SKU</label>
-        <div id="rtoaBundleList" class="rtoa-bundle-list"></div>
+        <h4>4. Tạo báo cáo</h4>
         <div id="rtoaWarehouseFilter" class="rtoa-warehouse-filter" style="display:none;"></div>
         <div style="margin-top:12px;">
-          <button class="btn" id="rtoaRunBtn" disabled>Run Report</button>
+          <button class="btn" id="rtoaRunBtn" disabled>Generate Combined Report</button>
           <button class="btn secondary" id="rtoaResetBtn">Reset</button>
         </div>
         <div class="log-box" id="rtoaLog"></div>
@@ -697,20 +693,23 @@
         <div class="summary-cards" id="rtoaSummaryCards"></div>
 
         <div class="panel" style="margin-top:14px;">
-          <h4>Reconciliation</h4>
-          <table class="ref-table" id="rtoaReconTable"></table>
-        </div>
-
-        <div class="panel" style="margin-top:14px;">
           <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-            <h4 style="margin:0;">Available Inventory</h4>
-            <button class="btn" id="rtoaExportBtn" disabled>⬇ Export Excel</button>
+            <h4 style="margin:0;">6. Combined Real-Time Inventory</h4>
+            <button class="btn" id="rtoaExportBtn" disabled>⬇ Export Combined Excel</button>
+          </div>
+          <div class="rtoa-table-toolbar">
+            <input type="text" id="rtoaTableSearch" placeholder="Tìm theo Barcode / Partner SKU / Child EAN / Product / Warehouse...">
+            <div class="rtoa-pager">
+              <span id="rtoaPagerInfo" class="small">0 rows</span>
+              <button class="btn secondary" id="rtoaPagerPrev" type="button">‹ Prev</button>
+              <button class="btn secondary" id="rtoaPagerNext" type="button">Next ›</button>
+            </div>
           </div>
           <div class="table-scroll" id="rtoaAvailableTableWrap"></div>
         </div>
 
         <details class="panel rtoa-excluded-details" style="margin-top:14px;">
-          <summary>Excluded / Unavailable Bundle Cartons (<span id="rtoaExcludedCount">0</span>)</summary>
+          <summary>Processing Diagnostics (<span id="rtoaExcludedCount">0</span>)</summary>
           <div class="table-scroll" id="rtoaExcludedTableWrap"></div>
         </details>
       </div>

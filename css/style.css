@@ -145,3 +145,12 @@ table.data-table tr:nth-child(even) td { background:#f8fafc; }
 tr.rtoa-child-row td { background:#f8fafc; padding:8px 8px 12px 28px; }
 table.rtoa-child-table { min-width:0; margin-top:2px; }
 table.rtoa-child-table th { background:#334155; }
+
+/* ---- Combined Real-Time Inventory: table toolbar + pager ---- */
+.rtoa-table-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:10px 0; }
+.rtoa-table-toolbar input#rtoaTableSearch { flex:1; min-width:220px; max-width:480px; padding:7px 10px; border:1px solid var(--line); border-radius:6px; font-size:13px; }
+.rtoa-pager { display:flex; align-items:center; gap:8px; white-space:nowrap; }
+.rtoa-pager button.btn { padding:5px 12px; font-size:12px; }
+table.data-table th.rtoa-sortable { cursor:pointer; user-select:none; }
+table.data-table th.rtoa-sortable:hover { background:#1f2937; }
+table.data-table th.rtoa-sortable .rtoa-sort-arrow { opacity:.6; margin-left:4px; }

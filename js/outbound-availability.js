@@ -1,21 +1,28 @@
 /* ==========================================================
- * outbound-availability.js — Outbound: Real-Time Outbound Availability
- * (Bundle-Aware Inventory Report)
+ * outbound-availability.js — Outbound: Combined Real-Time Inventory
+ * (Bundle-Expanded Availability Report)
  *
- * Business model (confirmed against real files):
- *   A Bundle SKU is the unique inventory identity of ONE physical bundle
- *   carton. The "bundle child product" file lists many rows per Bundle SKU,
- *   but those rows are the components packed INSIDE that one carton, not
- *   separate cartons. The bundle carton itself shows up as its OWN line
- *   item in the Real-Time Detailed Inventory export (its code appears in
- *   the "Mã sản phẩm" / "Mã SKU đối tác" column, Unit often "MIX"), with
- *   its own Available Qty ("Khả dụng"). THAT row is what determines whether
- *   the physical carton currently exists in stock — not the availability
- *   of its individual child EANs.
+ * Purpose: produce ONE combined report from the Real-Time Detailed
+ * Inventory file (the source of truth for what currently exists) plus
+ * the Bundle Child Product file (a mapping used only to expand bundle
+ * cartons that are CURRENTLY present and available in the real-time
+ * inventory). This is not a bundle audit/selection tool — processing
+ * always starts from the real-time inventory rows, never from the
+ * bundle mapping file.
  *
- * Matching key: Bundle SKU -> looked up directly against the Real-Time
- * Inventory file (never against Child SKU/EAN). Only after a Bundle SKU
- * passes the Available Qty > 0 check are its child lines expanded/shown.
+ * Per available (Available Qty > 0) inventory row:
+ *  - if it matches a Bundle SKU in the mapping -> expand into one row
+ *    per Child SKU (EAN Qty = SL from the mapping; Available Qty is
+ *    NEVER shown/derived on these rows, since 1 Bundle SKU already =
+ *    1 physical available carton and the child qty already represents
+ *    what's inside it — no multiplication, no "Available PCS");
+ *  - else if it looks like a bundle/MIX row but has no mapping -> the
+ *    row is dropped and logged as a BUNDLE_MAPPING_NOT_FOUND diagnostic
+ *    (its Child SKU composition can't be determined, so it must not be
+ *    kept as an ordinary item);
+ *  - else -> kept as-is, a normal inventory row.
+ * A Bundle SKU that exists only in the mapping file (not currently in
+ * inventory) never appears in the output at all.
  *
  * 100% client-side (SheetJS, already loaded globally as `XLSX` in
  * index.html) — files never leave the browser.
@@ -26,8 +33,6 @@ window.WOPOutboundAvailability = (function () {
   // ----------------------------------------------------------------
   // 1. Normalization helpers
   // ----------------------------------------------------------------
-
-  // Normalize a header cell (or alias string) for column detection.
   function normalizeHeaderText(h) {
     if (h === null || h === undefined) return "";
     let s = String(h).toLowerCase();
@@ -37,10 +42,6 @@ window.WOPOutboundAvailability = (function () {
     return s;
   }
 
-  // Normalize a numeric-style identifier (Child SKU / EAN / Barcode) into a
-  // stable string: strips Excel-generated trailing ".0", never round-trips
-  // through Number() for display, preserves leading zeroes from string
-  // sources.
   function normalizeEan(v) {
     if (v === null || v === undefined) return "";
     if (typeof v === "number") {
@@ -54,17 +55,16 @@ window.WOPOutboundAvailability = (function () {
     return s;
   }
 
-  // Normalize a Bundle SKU (alphanumeric identifier, e.g. "TP-251223-09"):
-  // string-safe, trims spaces + non-breaking spaces, strips a stray
-  // Excel-generated trailing ".0", preserves original casing for display.
+  // Bundle SKU (alphanumeric identifier, e.g. "TP-251223-09"): string-safe,
+  // trims spaces + NBSP, strips a stray Excel-generated trailing ".0",
+  // preserves original casing for display; matching key is case-insensitive.
   function normalizeBundleSkuDisplay(v) {
     if (v === null || v === undefined) return "";
-    let s = String(v).replace(/ /g, " ").trim();
+    let s = String(v).replace(/ /g, " ").trim();
     if (s === "") return "";
     s = s.replace(/\.0+$/, "");
     return s;
   }
-  // Case-insensitive matching key derived from the display form above.
   function normalizeBundleSkuKey(v) { return normalizeBundleSkuDisplay(v).toLowerCase(); }
 
   function toNumberOrNull(v) {
@@ -81,6 +81,10 @@ window.WOPOutboundAvailability = (function () {
   function cleanStr(v) {
     if (v === null || v === undefined) return "";
     return String(v).trim();
+  }
+
+  function isMixUnit(unit) {
+    return normalizeHeaderText(unit) === "mix";
   }
 
   function escapeHtml(s) {
@@ -104,8 +108,7 @@ window.WOPOutboundAvailability = (function () {
   ];
 
   // "invProductCode" / "partnerSku" are the two candidate columns a Bundle
-  // SKU can be found under in the inventory export — which one actually
-  // holds it is auto-detected per file (see detectBundleSkuKeySource).
+  // SKU can be found under in the inventory export — auto-detected per file.
   const INVENTORY_COLUMN_DEFS = [
     { key: "warehouse", required: false, aliases: ["Warehouse", "Kho"] },
     { key: "invProductCode", required: true, aliases: ["Mã sản phẩm", "Child EAN", "Product Code", "Barcode", "Mã vạch"] },
@@ -124,11 +127,9 @@ window.WOPOutboundAvailability = (function () {
     { key: "lastStockoutDate", required: false, aliases: ["Last Stockout Date", "Ngày hết tồn gần nhất", "Ngày hết hàng gần nhất"] },
     { key: "lastOutboundDate", required: false, aliases: ["Last Outbound Date", "Ngày xuất kho gần nhất", "Ngày xuất gần nhất"] },
     { key: "lastInboundDate", required: false, aliases: ["Last Inbound Date", "Ngày nhập kho gần nhất", "Ngày nhập gần nhất"] },
+    { key: "invEanQty", required: false, aliases: ["EAN Qty", "Số lượng EAN"] },
   ];
 
-  // Detect which column index best matches each definition (exact match
-  // first, "contains" fallback second). Each column index can be claimed
-  // by at most one field.
   function detectColumns(headerRow, defs) {
     const normalizedHeaders = (headerRow || []).map(normalizeHeaderText);
     const used = new Set();
@@ -139,7 +140,6 @@ window.WOPOutboundAvailability = (function () {
     defs.forEach(function (def) {
       const normAliases = def.aliases.map(normalizeHeaderText);
       let bestIdx = -1;
-
       for (let i = 0; i < normalizedHeaders.length; i++) {
         if (used.has(i) || !normalizedHeaders[i]) continue;
         if (normAliases.indexOf(normalizedHeaders[i]) !== -1) { bestIdx = i; break; }
@@ -153,7 +153,6 @@ window.WOPOutboundAvailability = (function () {
           if (hit) { bestIdx = i; break; }
         }
       }
-
       if (bestIdx !== -1) {
         used.add(bestIdx);
         mapping[def.key] = bestIdx;
@@ -176,8 +175,7 @@ window.WOPOutboundAvailability = (function () {
   }
 
   // ----------------------------------------------------------------
-  // 3. Workbook / sheet reading (real exports sometimes declare a stale
-  //    "!ref" dimension smaller than the actual data).
+  // 3. Workbook / sheet reading
   // ----------------------------------------------------------------
   function fixSheetRange(ws) {
     let maxR = -1, maxC = -1, minR = Infinity, minC = Infinity;
@@ -210,9 +208,9 @@ window.WOPOutboundAvailability = (function () {
   }
 
   // ----------------------------------------------------------------
-  // 4. Parse Bundle Child Product File -> child rows + grouped bundles
+  // 4. Parse Bundle Child Product File -> grouped bundles
   //    (1 Bundle SKU = 1 physical carton; its rows are the components
-  //    packed inside it, NOT separate cartons).
+  //    packed inside it — used only as a mapping/expansion source).
   // ----------------------------------------------------------------
   function parseBundleFile(rows, colMapOverride) {
     if (!rows || !rows.length) throw new Error("File Bundle Child Product rỗng — không đọc được dòng nào.");
@@ -226,6 +224,7 @@ window.WOPOutboundAvailability = (function () {
 
     const childRows = [];
     let missingBundleSkuRows = 0;
+    let invalidChildSkuRows = 0;
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row) continue;
@@ -233,6 +232,7 @@ window.WOPOutboundAvailability = (function () {
       const childSku = mapping.childSku !== undefined ? normalizeEan(row[mapping.childSku]) : "";
       if (!bundleSkuDisplay && !childSku) continue; // fully blank row
       if (!bundleSkuDisplay) { missingBundleSkuRows++; continue; } // can't attribute to any carton
+      if (!childSku) { invalidChildSkuRows++; continue; } // no usable Child SKU on this mapping row
       childRows.push({
         rowIndex: i + 1,
         bundleSku: bundleSkuDisplay,
@@ -247,8 +247,6 @@ window.WOPOutboundAvailability = (function () {
       });
     }
 
-    // Group child rows into one record per unique Bundle SKU (case-insensitive
-    // key) — this is the "1 Bundle SKU = 1 physical carton" grouping.
     const bundleMap = new Map(); // bundleSkuKey -> { bundleSku, bundleName, children:[], totalChildPcs }
     childRows.forEach(function (r) {
       if (!bundleMap.has(r.bundleSkuKey)) {
@@ -262,11 +260,15 @@ window.WOPOutboundAvailability = (function () {
 
     const bundles = Array.from(bundleMap.values()).sort(function (a, b) { return a.bundleSku < b.bundleSku ? -1 : (a.bundleSku > b.bundleSku ? 1 : 0); });
 
-    return { headerRow: headerRow, mapping: mapping, detected: det, childRows: childRows, bundles: bundles, missingBundleSkuRows: missingBundleSkuRows };
+    return {
+      headerRow: headerRow, mapping: mapping, detected: det, childRows: childRows, bundles: bundles, bundleMap: bundleMap,
+      missingBundleSkuRows: missingBundleSkuRows, invalidChildSkuRows: invalidChildSkuRows,
+    };
   }
 
   // ----------------------------------------------------------------
   // 5. Parse Real-Time Detailed Inventory File
+  //    (the source of truth — every output row starts here).
   // ----------------------------------------------------------------
   function parseInventoryFile(rows, colMapOverride) {
     if (!rows || !rows.length) throw new Error("File Real-Time Detailed Inventory rỗng — không đọc được dòng nào.");
@@ -281,12 +283,13 @@ window.WOPOutboundAvailability = (function () {
     const get = function (row, key) { return mapping[key] !== undefined ? row[mapping[key]] : null; };
     const records = [];
     const warehouses = new Set();
+    let invalidSourceIdentifierRows = 0;
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row) continue;
       const invProductCode = cleanStr(get(row, "invProductCode"));
       const partnerSku = cleanStr(get(row, "partnerSku"));
-      if (!invProductCode && !partnerSku) continue; // no usable key on this row
+      if (!invProductCode && !partnerSku) { invalidSourceIdentifierRows++; continue; } // no usable identifier on this row
       const warehouse = cleanStr(get(row, "warehouse")) || "(N/A)";
       warehouses.add(warehouse);
       records.push({
@@ -309,238 +312,180 @@ window.WOPOutboundAvailability = (function () {
         lastStockoutDate: get(row, "lastStockoutDate"),
         lastOutboundDate: get(row, "lastOutboundDate"),
         lastInboundDate: get(row, "lastInboundDate"),
+        invEanQty: toNumberOrNull(get(row, "invEanQty")),
       });
     }
-    return { headerRow: headerRow, mapping: mapping, detected: det, records: records, warehouses: Array.from(warehouses).sort() };
+    return {
+      headerRow: headerRow, mapping: mapping, detected: det, records: records, warehouses: Array.from(warehouses).sort(),
+      invalidSourceIdentifierRows: invalidSourceIdentifierRows,
+    };
   }
 
   // ----------------------------------------------------------------
-  // 6. Bundle SKU inventory-key detection
-  //    A Bundle SKU can show up under either "Mã sản phẩm" (invProductCode)
-  //    or "Mã SKU đối tác" (partnerSku) depending on the export — pick
-  //    whichever column actually contains the most of the selected Bundle
-  //    SKUs (never hardcode one column), with a manual override available.
+  // 6. Bundle SKU inventory-key detection — never hardcoded. Compares
+  //    normalized overlap between the bundle map and each candidate
+  //    inventory column ("Mã sản phẩm" / "Mã SKU đối tác"); manual
+  //    override is supported from the UI.
   // ----------------------------------------------------------------
-  function buildBundleKeyIndex(invRecords, field) {
-    const idx = new Map(); // normalizedKeyCI -> [invRecord...]
-    invRecords.forEach(function (r) {
-      const key = normalizeBundleSkuKey(r[field]);
-      if (!key) return;
-      if (!idx.has(key)) idx.set(key, []);
-      idx.get(key).push(r);
-    });
-    return idx;
-  }
-
-  function countOverlap(bundleSkuKeys, index) {
-    let n = 0;
-    bundleSkuKeys.forEach(function (k) { if (index.has(k)) n++; });
-    return n;
-  }
-
-  // Returns { field, label, index, overlap, tried:[{field,overlap}] }.
-  // `field` is "invProductCode" or "partnerSku" (or the override field
-  // name if the caller forces one).
-  function detectBundleSkuKeySource(bundleSkuKeys, invRecords, forcedField) {
+  function detectBundleSkuKeySource(bundleMap, invRecords, forcedField) {
     const candidates = ["invProductCode", "partnerSku"];
-    const tried = candidates.map(function (f) {
-      const index = buildBundleKeyIndex(invRecords, f);
-      return { field: f, index: index, overlap: countOverlap(bundleSkuKeys, index) };
-    });
+    function overlapFor(field) {
+      let n = 0;
+      const seen = new Set();
+      invRecords.forEach(function (r) {
+        const k = normalizeBundleSkuKey(r[field]);
+        if (!k || seen.has(k)) return;
+        if (bundleMap.has(k)) { n++; seen.add(k); }
+      });
+      return n;
+    }
+    const tried = candidates.map(function (f) { return { field: f, overlap: overlapFor(f) }; });
     if (forcedField) {
-      const forced = tried.find(function (t) { return t.field === forcedField; }) ||
-        { field: forcedField, index: buildBundleKeyIndex(invRecords, forcedField), overlap: 0 };
-      forced.overlap = countOverlap(bundleSkuKeys, forced.index);
-      return { field: forced.field, index: forced.index, overlap: forced.overlap, tried: tried.map(function (t) { return { field: t.field, overlap: t.overlap }; }) };
+      const forced = tried.find(function (t) { return t.field === forcedField; }) || { field: forcedField, overlap: overlapFor(forcedField) };
+      return { field: forced.field, overlap: forced.overlap, tried: tried };
     }
     let best = tried[0];
     tried.forEach(function (t) { if (t.overlap > best.overlap) best = t; });
-    return { field: best.field, index: best.index, overlap: best.overlap, tried: tried.map(function (t) { return { field: t.field, overlap: t.overlap }; }) };
+    return { field: best.field, overlap: best.overlap, tried: tried };
   }
 
   // ----------------------------------------------------------------
-  // 7. Core matching engine — Bundle SKU is the inventory matching key.
-  //    A bundle carton is available only when its Bundle SKU exists in the
-  //    inventory file AND Available Qty is numeric and > 0. Child rows are
-  //    never used to decide availability — only shown once their parent
-  //    bundle carton has already passed the check.
+  // 7. Core transform — single pass over the real-time inventory rows
+  //    (the source of truth). Produces the ONE combined output array.
   // ----------------------------------------------------------------
-  const EXCLUSION_LABELS = {
-    AVAILABLE_QTY_ZERO: "Available Qty = 0",
-    AVAILABLE_QTY_NEGATIVE: "Available Qty < 0",
-    AVAILABLE_QTY_INVALID: "Available Qty blank/invalid",
-    BUNDLE_SKU_NOT_FOUND_IN_INVENTORY: "Bundle SKU không có trong file tồn kho realtime",
-    BUNDLE_SKU_MISSING: "Bundle SKU bị thiếu/không hợp lệ trong file bundle",
+  const DIAGNOSTIC_LABELS = {
+    AVAILABLE_QTY_ZERO: "Available Qty = 0 — loại khỏi báo cáo",
+    AVAILABLE_QTY_NEGATIVE: "Available Qty < 0 — loại khỏi báo cáo",
+    AVAILABLE_QTY_INVALID: "Available Qty blank/invalid — loại khỏi báo cáo",
     WAREHOUSE_FILTERED_OUT: "Bị loại bởi bộ lọc Warehouse",
+    BUNDLE_MAPPING_NOT_FOUND: "Dòng MIX/bundle đang tồn nhưng không có trong file mapping — không xác định được Child SKU",
+    INVALID_SOURCE_IDENTIFIER: "Dòng tồn kho không có mã định danh hợp lệ (Mã sản phẩm / Mã SKU đối tác đều trống)",
+    INVALID_CHILD_SKU_IN_MAPPING: "Dòng trong file bundle mapping thiếu Child SKU hợp lệ",
   };
 
-  function runMatch(opts) {
-    const bundles = opts.bundles || []; // grouped bundles from parseBundleFile
-    const bundleKeyIndex = opts.bundleKeyIndex; // Map from detectBundleSkuKeySource
-    const selectedBundleSkuKeys = opts.selectedBundleSkuKeys; // Set|null (of bundleSkuKey)
+  function generateCombinedReport(opts) {
+    const invRecords = opts.invRecords || [];
+    const bundleMap = opts.bundleMap; // Map bundleSkuKey -> { bundleSku, bundleName, children, totalChildPcs }
+    const bundleKeyField = opts.bundleKeyField; // "invProductCode" | "partnerSku"
     const warehouseFilter = opts.warehouseFilter; // Set|null
 
-    const available = []; // one entry per available bundle-carton (bundle x warehouse)
-    const excluded = []; // one entry per excluded bundle-carton (or per not-found bundle)
+    const combined = [];
+    const diagnostics = [];
 
-    let uniqueBundleSkusFound = 0;
-    let matchedInInventory = 0;
-    let notFoundInInventory = 0;
-    let availableQtyGt0Count = 0;
-    let availableQtyLte0Count = 0;
-    let excludedByWarehouseFilter = 0;
+    let removedUnavailableRows = 0;
+    let warehouseFilteredRows = 0;
+    let availableNormalRows = 0;
+    let availableBundlesExpanded = 0;
+    let bundleChildRowsGenerated = 0;
+    let unmappedBundleRowsExcluded = 0;
 
-    const availableBundleSkuKeys = new Set();
+    invRecords.forEach(function (ir) {
+      // Available Qty is a SOURCE-ROW FILTER ONLY — it is never displayed
+      // or used in any calculation on the final output rows.
+      const avail = ir.availableQty;
+      let qtyReason = null;
+      if (avail === null) qtyReason = "AVAILABLE_QTY_INVALID";
+      else if (avail < 0) qtyReason = "AVAILABLE_QTY_NEGATIVE";
+      else if (avail === 0) qtyReason = "AVAILABLE_QTY_ZERO";
+      if (qtyReason) {
+        removedUnavailableRows++;
+        diagnostics.push({ warehouse: ir.warehouse, code: ir.invProductCode || ir.partnerSku, product: ir.product, reason: qtyReason });
+        return;
+      }
 
-    bundles.forEach(function (b) {
-      const key = normalizeBundleSkuKey(b.bundleSku);
-      if (selectedBundleSkuKeys && !selectedBundleSkuKeys.has(key)) return;
-      uniqueBundleSkusFound++;
+      if (warehouseFilter && warehouseFilter.size && !warehouseFilter.has(ir.warehouse)) {
+        warehouseFilteredRows++;
+        diagnostics.push({ warehouse: ir.warehouse, code: ir.invProductCode || ir.partnerSku, product: ir.product, reason: "WAREHOUSE_FILTERED_OUT" });
+        return;
+      }
 
-      const invRows = bundleKeyIndex ? bundleKeyIndex.get(key) : null;
-      if (!invRows || !invRows.length) {
-        notFoundInInventory++;
-        excluded.push({
-          bundleSku: b.bundleSku, bundleName: b.bundleName, warehouse: "",
-          childCount: b.children.length, totalChildPcs: b.totalChildPcs, reason: "BUNDLE_SKU_NOT_FOUND_IN_INVENTORY",
+      const keyRaw = bundleKeyField === "partnerSku" ? ir.partnerSku : ir.invProductCode;
+      const key = normalizeBundleSkuKey(keyRaw);
+      const bundle = key ? bundleMap.get(key) : null;
+
+      if (bundle) {
+        // CASE 2 — available bundle carton with a valid mapping: drop the
+        // 1-line summary row, expand into 1 row per Child SKU. EAN Qty
+        // comes straight from the mapping's SL — never Available Qty,
+        // never a multiplication (1 Bundle SKU already = 1 available carton).
+        availableBundlesExpanded++;
+        bundle.children.forEach(function (child) {
+          bundleChildRowsGenerated++;
+          combined.push({
+            warehouse: ir.warehouse, barcode: bundle.bundleSku, partnerSku: ir.partnerSku, childEan: child.childSku,
+            product: child.childProduct, category: ir.category, unit: ir.unit, conditionType: ir.conditionType,
+            stockQty: ir.stockQty, freezeQty: ir.freezeQty, pendingIn: ir.pendingIn, pendingOut: ir.pendingOut,
+            weightKg: ir.weightKg, cbm: ir.cbm,
+            lastStockoutDate: ir.lastStockoutDate, lastOutboundDate: ir.lastOutboundDate, lastInboundDate: ir.lastInboundDate,
+            eanQty: child.qty, _rowType: "bundleChild", _bundleSku: bundle.bundleSku,
+          });
         });
         return;
       }
 
-      matchedInInventory++;
-      invRows.forEach(function (ir) {
-        if (warehouseFilter && warehouseFilter.size && !warehouseFilter.has(ir.warehouse)) {
-          excludedByWarehouseFilter++;
-          excluded.push({
-            bundleSku: b.bundleSku, bundleName: b.bundleName, warehouse: ir.warehouse,
-            childCount: b.children.length, totalChildPcs: b.totalChildPcs, reason: "WAREHOUSE_FILTERED_OUT",
-          });
-          return;
-        }
+      if (isMixUnit(ir.unit)) {
+        // CASE 4 — currently available bundle/MIX row with NO mapping:
+        // composition can't be determined, so it is excluded entirely
+        // (not kept as an ordinary item) and logged as a diagnostic.
+        unmappedBundleRowsExcluded++;
+        diagnostics.push({ warehouse: ir.warehouse, code: ir.invProductCode || ir.partnerSku, product: ir.product, reason: "BUNDLE_MAPPING_NOT_FOUND" });
+        return;
+      }
 
-        const avail = ir.availableQty;
-        let reason = null;
-        if (avail === null) reason = "AVAILABLE_QTY_INVALID";
-        else if (avail < 0) reason = "AVAILABLE_QTY_NEGATIVE";
-        else if (avail === 0) reason = "AVAILABLE_QTY_ZERO";
-
-        if (reason) {
-          availableQtyLte0Count++;
-          excluded.push({
-            bundleSku: b.bundleSku, bundleName: b.bundleName, warehouse: ir.warehouse,
-            childCount: b.children.length, totalChildPcs: b.totalChildPcs, reason: reason,
-          });
-          return;
-        }
-
-        availableQtyGt0Count++;
-        availableBundleSkuKeys.add(key);
-        available.push({
-          bundleSku: b.bundleSku, bundleName: b.bundleName, warehouse: ir.warehouse,
-          invProductCode: ir.invProductCode, partnerSku: ir.partnerSku, invProductName: ir.product,
-          category: ir.category, unit: ir.unit, conditionType: ir.conditionType,
-          stockQty: ir.stockQty, freezeQty: ir.freezeQty, availableQty: avail,
-          pendingIn: ir.pendingIn, pendingOut: ir.pendingOut, weightKg: ir.weightKg, cbm: ir.cbm,
-          lastStockoutDate: ir.lastStockoutDate, lastInboundDate: ir.lastInboundDate, lastOutboundDate: ir.lastOutboundDate,
-          childCount: b.children.length, totalChildPcs: b.totalChildPcs, children: b.children,
-        });
+      // CASE 1 — ordinary available inventory row: keep as-is.
+      availableNormalRows++;
+      combined.push({
+        warehouse: ir.warehouse, barcode: ir.invProductCode, partnerSku: ir.partnerSku, childEan: ir.invProductCode,
+        product: ir.product, category: ir.category, unit: ir.unit, conditionType: ir.conditionType,
+        stockQty: ir.stockQty, freezeQty: ir.freezeQty, pendingIn: ir.pendingIn, pendingOut: ir.pendingOut,
+        weightKg: ir.weightKg, cbm: ir.cbm,
+        lastStockoutDate: ir.lastStockoutDate, lastOutboundDate: ir.lastOutboundDate, lastInboundDate: ir.lastInboundDate,
+        eanQty: ir.invEanQty, _rowType: "normal",
       });
     });
 
-    // Total child SKU lines / PCS are bundle-definition properties, counted
-    // once per distinct AVAILABLE Bundle SKU (not per warehouse instance,
-    // so a bundle stocked in 2 warehouses doesn't double its child totals).
-    let totalChildSkuLinesInAvailableBundles = 0;
-    let totalChildPcsInAvailableBundles = 0;
-    bundles.forEach(function (b) {
-      const key = normalizeBundleSkuKey(b.bundleSku);
-      if (!availableBundleSkuKeys.has(key)) return;
-      totalChildSkuLinesInAvailableBundles += b.children.length;
-      totalChildPcsInAvailableBundles += b.totalChildPcs;
-    });
-
     return {
-      available: available,
-      excluded: excluded,
-      reconciliation: {
-        uniqueBundleSkusFound: uniqueBundleSkusFound,
-        matchedInInventory: matchedInInventory,
-        availableQtyGt0: availableQtyGt0Count,
-        availableQtyLte0: availableQtyLte0Count,
-        notFoundInInventory: notFoundInInventory,
-        invalidOrMissingIdentifiers: opts.missingBundleSkuRows || 0,
-        excludedByWarehouseFilter: excludedByWarehouseFilter,
-      },
+      combined: combined,
+      diagnostics: diagnostics,
       summary: {
-        totalUniqueBundleCartonsInFile: uniqueBundleSkusFound,
-        availableBundleCartons: availableBundleSkuKeys.size,
-        unavailableBundleCartons: uniqueBundleSkusFound - availableBundleSkuKeys.size,
-        totalChildSkuLinesInAvailableBundles: totalChildSkuLinesInAvailableBundles,
-        totalChildPcsInAvailableBundles: totalChildPcsInAvailableBundles,
+        sourceRealTimeInventoryRows: invRecords.length,
+        availableNormalRows: availableNormalRows,
+        availableBundlesExpanded: availableBundlesExpanded,
+        bundleChildRowsGenerated: bundleChildRowsGenerated,
+        finalCombinedRows: combined.length,
+        removedUnavailableRows: removedUnavailableRows,
+        unmappedBundleRowsExcluded: unmappedBundleRowsExcluded,
+        warehouseFilteredRows: warehouseFilteredRows,
       },
     };
   }
 
   // ----------------------------------------------------------------
-  // 8. Excel export (4-sheet workbook, identifiers forced to text)
+  // 8. Excel export — exactly ONE worksheet, identifiers forced to text.
   // ----------------------------------------------------------------
   function asText(v) { return v === null || v === undefined ? "" : String(v); }
 
-  function buildExportWorkbook(result) {
-    const cartonHeader = [
-      "Bundle SKU", "Bundle Name", "Warehouse", "Inventory Product Code", "Partner SKU", "Inventory Product Name",
-      "Category", "Unit", "Condition", "Stock Qty", "Freeze Qty", "Available Qty", "Pending In", "Pending Out",
-      "Weight (Kg)", "CBM", "Last Stockout Date", "Last Inbound Date", "Last Outbound Date", "Child SKU Count", "Total Child PCS",
-    ];
-    const cartonAoa = [cartonHeader].concat(result.available.map(function (r) {
+  const EXPORT_HEADER = [
+    "#", "Warehouse", "Barcode", "Partner SKU", "Child EAN", "Product", "Category", "Unit", "Condition Type",
+    "Stock Qty", "Freeze Qty", "Pending In", "Pending Out", "Weight (Kg)", "CBM",
+    "Last Stockout Date", "Last Outbound Date", "Last Inbound Date", "EAN Qty",
+  ];
+  const EXPORT_COL_WIDTHS = [5, 20, 18, 16, 16, 34, 14, 10, 12, 10, 10, 10, 11, 12, 10, 16, 16, 16, 10];
+
+  function buildExportWorkbook(combinedRows) {
+    const aoa = [EXPORT_HEADER].concat(combinedRows.map(function (r, i) {
       return [
-        asText(r.bundleSku), asText(r.bundleName), asText(r.warehouse), asText(r.invProductCode), asText(r.partnerSku),
-        asText(r.invProductName), asText(r.category), asText(r.unit), asText(r.conditionType),
-        r.stockQty, r.freezeQty, r.availableQty, r.pendingIn, r.pendingOut, r.weightKg, r.cbm,
-        asText(r.lastStockoutDate), asText(r.lastInboundDate), asText(r.lastOutboundDate), r.childCount, r.totalChildPcs,
+        i + 1, asText(r.warehouse), asText(r.barcode), asText(r.partnerSku), asText(r.childEan), asText(r.product),
+        asText(r.category), asText(r.unit), asText(r.conditionType),
+        r.stockQty, r.freezeQty, r.pendingIn, r.pendingOut, r.weightKg, r.cbm,
+        asText(r.lastStockoutDate), asText(r.lastOutboundDate), asText(r.lastInboundDate), r.eanQty,
       ];
     }));
-
-    const childHeader = ["Bundle SKU", "Bundle Name", "Child SKU", "Child Product Name", "Unit Code", "Unit Name", "Qty", "Availability Ratio (%)"];
-    const childRows = [];
-    const seenBundleForChildSheet = new Set();
-    result.available.forEach(function (r) {
-      if (seenBundleForChildSheet.has(r.bundleSku)) return; // list children once per available bundle, not per warehouse
-      seenBundleForChildSheet.add(r.bundleSku);
-      (r.children || []).forEach(function (c) {
-        childRows.push([asText(r.bundleSku), asText(r.bundleName), asText(c.childSku), asText(c.childProduct), asText(c.unitCode), asText(c.unitName), c.qty, c.availabilityRatio]);
-      });
-    });
-    const childAoa = [childHeader].concat(childRows);
-
-    const exclHeader = ["Bundle SKU", "Bundle Name", "Warehouse", "Child SKU Count", "Total Child PCS", "Exclusion Reason"];
-    const exclAoa = [exclHeader].concat(result.excluded.map(function (r) {
-      return [asText(r.bundleSku), asText(r.bundleName), asText(r.warehouse), r.childCount, r.totalChildPcs, r.reason];
-    }));
-
-    const s = result.summary, rc = result.reconciliation;
-    const reconAoa = [
-      ["Reconciliation Summary", ""],
-      ["Total Unique Bundle Cartons in Bundle File", s.totalUniqueBundleCartonsInFile],
-      ["Available Bundle Cartons", s.availableBundleCartons],
-      ["Unavailable / Missing Bundle Cartons", s.unavailableBundleCartons],
-      ["Total Child SKU Lines in Available Bundles", s.totalChildSkuLinesInAvailableBundles],
-      ["Total Child PCS in Available Bundles", s.totalChildPcsInAvailableBundles],
-      ["", ""],
-      ["Unique Bundle SKUs found in bundle file", rc.uniqueBundleSkusFound],
-      ["Bundle SKUs matched in real-time inventory", rc.matchedInInventory],
-      ["Bundle SKUs with Available Qty > 0", rc.availableQtyGt0],
-      ["Bundle SKUs with Available Qty ≤ 0 / invalid", rc.availableQtyLte0],
-      ["Bundle SKUs not found in real-time inventory", rc.notFoundInInventory],
-      ["Bundle SKUs with invalid or missing identifiers", rc.invalidOrMissingIdentifiers],
-      ["Excluded by warehouse filter", rc.excludedByWarehouseFilter],
-    ];
-
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = EXPORT_COL_WIDTHS.map(function (w) { return { wch: w }; });
+    ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(aoa.length - 1, 0), c: EXPORT_HEADER.length - 1 } }) };
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cartonAoa), "Available Bundle Cartons");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(childAoa), "Available Bundle Child Details");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(exclAoa), "Unavailable Bundle Cartons");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(reconAoa), "Reconciliation Summary");
+    XLSX.utils.book_append_sheet(wb, ws, "Combined Real-Time Inventory");
     const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
     return new Blob([out], { type: "application/octet-stream" });
   }
@@ -548,13 +493,24 @@ window.WOPOutboundAvailability = (function () {
   function exportFilename() {
     const d = new Date();
     const pad = function (n) { return String(n).padStart(2, "0"); };
-    return "Real_Time_Outbound_Availability_" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+    return "Combined_Real_Time_Inventory_" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
       "_" + pad(d.getHours()) + pad(d.getMinutes()) + ".xlsx";
   }
 
   // ----------------------------------------------------------------
   // 9. UI wiring
   // ----------------------------------------------------------------
+  const PREVIEW_COLS = [
+    ["warehouse", "Warehouse"], ["barcode", "Barcode"], ["partnerSku", "Partner SKU"], ["childEan", "Child EAN"],
+    ["product", "Product"], ["category", "Category"], ["unit", "Unit"], ["conditionType", "Condition Type"],
+    ["stockQty", "Stock Qty"], ["freezeQty", "Freeze Qty"], ["pendingIn", "Pending In"], ["pendingOut", "Pending Out"],
+    ["weightKg", "Weight (Kg)"], ["cbm", "CBM"],
+    ["lastStockoutDate", "Last Stockout Date"], ["lastOutboundDate", "Last Outbound Date"], ["lastInboundDate", "Last Inbound Date"],
+    ["eanQty", "EAN Qty"],
+  ];
+  const SEARCH_FIELDS = ["barcode", "partnerSku", "childEan", "product", "warehouse"];
+  const PAGE_SIZE = 100;
+
   function init() {
     const bundleInput = document.getElementById("rtoaBundleInput");
     if (!bundleInput) return; // markup not present on this page
@@ -563,35 +519,34 @@ window.WOPOutboundAvailability = (function () {
     const bundleStatus = document.getElementById("rtoaBundleStatus");
     const invStatus = document.getElementById("rtoaInventoryStatus");
     const mappingBox = document.getElementById("rtoaMappingBody");
-    const bundleSearch = document.getElementById("rtoaBundleSearch");
-    const selectAllChk = document.getElementById("rtoaSelectAll");
-    const bundleListEl = document.getElementById("rtoaBundleList");
     const warehouseFilterEl = document.getElementById("rtoaWarehouseFilter");
     const runBtn = document.getElementById("rtoaRunBtn");
     const resetBtn = document.getElementById("rtoaResetBtn");
     const logEl = document.getElementById("rtoaLog");
     const resultsWrap = document.getElementById("rtoaResultsWrap");
     const summaryCardsEl = document.getElementById("rtoaSummaryCards");
-    const reconTableEl = document.getElementById("rtoaReconTable");
-    const availableTableWrap = document.getElementById("rtoaAvailableTableWrap");
-    const excludedTableWrap = document.getElementById("rtoaExcludedTableWrap");
-    const excludedCountEl = document.getElementById("rtoaExcludedCount");
+    const tableWrap = document.getElementById("rtoaAvailableTableWrap");
+    const searchInput = document.getElementById("rtoaTableSearch");
+    const pagerInfo = document.getElementById("rtoaPagerInfo");
+    const pagerPrev = document.getElementById("rtoaPagerPrev");
+    const pagerNext = document.getElementById("rtoaPagerNext");
+    const diagnosticsWrap = document.getElementById("rtoaExcludedTableWrap");
+    const diagnosticsCountEl = document.getElementById("rtoaExcludedCount");
     const exportBtn = document.getElementById("rtoaExportBtn");
 
     let bundleParsed = null;
     let invParsed = null;
     let bundleColOverride = {};
     let invColOverride = {};
-    let bundleSkuKeyFieldOverride = null; // "invProductCode" | "partnerSku" | null(auto)
-    let lastResult = null;
-    let checkedBundleKeys = new Set();
+    let bundleSkuKeyFieldOverride = null;
+    let lastCombined = []; // the ONE final array — export always uses this, unfiltered
+    let sortState = { col: null, dir: 1 };
+    let searchQuery = "";
+    let currentPage = 0;
 
     function log(msg) { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; }
     function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
-
-    function refreshRunEnabled() {
-      runBtn.disabled = !(bundleParsed && invParsed);
-    }
+    function refreshRunEnabled() { runBtn.disabled = !(bundleParsed && invParsed); }
 
     // ---- File Mapping panel ----
     function renderMappingRow(fieldLabel, key, detected, headerRow, currentOverride, onChange) {
@@ -625,8 +580,7 @@ window.WOPOutboundAvailability = (function () {
 
     function renderBundleKeySourceRow() {
       if (!bundleParsed || !invParsed) return null;
-      const bundleKeys = new Set(bundleParsed.bundles.map(function (b) { return normalizeBundleSkuKey(b.bundleSku); }));
-      const detection = detectBundleSkuKeySource(bundleKeys, invParsed.records, bundleSkuKeyFieldOverride);
+      const detection = detectBundleSkuKeySource(bundleParsed.bundleMap, invParsed.records, bundleSkuKeyFieldOverride);
 
       const wrap = document.createElement("div");
       wrap.className = "rtoa-map-row";
@@ -651,13 +605,8 @@ window.WOPOutboundAvailability = (function () {
         renderMapping();
       });
       const badge = document.createElement("span");
-      if (detection.overlap === 0) {
-        badge.className = "rtoa-map-badge warn";
-        badge.textContent = "0 khớp!";
-      } else {
-        badge.className = "rtoa-map-badge ok";
-        badge.textContent = detection.overlap + " Bundle SKU khớp";
-      }
+      if (detection.overlap === 0) { badge.className = "rtoa-map-badge warn"; badge.textContent = "0 khớp!"; }
+      else { badge.className = "rtoa-map-badge ok"; badge.textContent = detection.overlap + " Bundle SKU khớp"; }
       wrap.appendChild(label); wrap.appendChild(sel); wrap.appendChild(badge);
 
       if (detection.overlap === 0) {
@@ -702,36 +651,13 @@ window.WOPOutboundAvailability = (function () {
       }
     }
 
-    // ---- Bundle SKU picker ----
-    function renderBundleList() {
-      bundleListEl.innerHTML = "";
-      if (!bundleParsed) return;
-      const q = (bundleSearch.value || "").trim().toLowerCase();
-      bundleParsed.bundles.forEach(function (b) {
-        if (q && b.bundleSku.toLowerCase().indexOf(q) === -1 && (b.bundleName || "").toLowerCase().indexOf(q) === -1) return;
-        const key = normalizeBundleSkuKey(b.bundleSku);
-        const row = document.createElement("label");
-        row.className = "rtoa-bundle-row";
-        const chk = document.createElement("input");
-        chk.type = "checkbox";
-        chk.checked = checkedBundleKeys.has(key);
-        chk.addEventListener("change", function () {
-          if (chk.checked) checkedBundleKeys.add(key); else checkedBundleKeys.delete(key);
-        });
-        const txt = document.createElement("span");
-        txt.textContent = b.bundleSku + (b.bundleName ? " — " + b.bundleName : "") + " (" + b.children.length + " child SKU, " + b.totalChildPcs + " PCS)";
-        row.appendChild(chk); row.appendChild(txt);
-        bundleListEl.appendChild(row);
-      });
-    }
-
     function renderWarehouseFilter() {
       warehouseFilterEl.innerHTML = "";
       if (!invParsed || invParsed.warehouses.length <= 1) { warehouseFilterEl.style.display = "none"; return; }
       warehouseFilterEl.style.display = "";
       const title = document.createElement("div");
       title.className = "small";
-      title.textContent = "Lọc theo Warehouse (bỏ chọn = loại khỏi kết quả):";
+      title.textContent = "Lọc theo Warehouse (bỏ chọn = loại khỏi kết quả, áp dụng cho cả dòng thường và dòng bundle bung ra):";
       warehouseFilterEl.appendChild(title);
       invParsed.warehouses.forEach(function (wh) {
         const row = document.createElement("label");
@@ -756,24 +682,16 @@ window.WOPOutboundAvailability = (function () {
       return new Set(checked);
     }
 
-    bundleSearch.addEventListener("input", renderBundleList);
-    selectAllChk.addEventListener("change", function () {
-      if (!bundleParsed) return;
-      if (selectAllChk.checked) bundleParsed.bundles.forEach(function (b) { checkedBundleKeys.add(normalizeBundleSkuKey(b.bundleSku)); });
-      else checkedBundleKeys.clear();
-      renderBundleList();
-    });
-
     // ---- File loading ----
     function reparseBundle() {
       if (!bundleInput.files.length) return;
       try {
         const raw = bundleInput._rows;
         bundleParsed = parseBundleFile(raw, bundleColOverride);
-        bundleStatus.textContent = "Đã đọc " + bundleParsed.childRows.length + " dòng child SKU — " + bundleParsed.bundles.length + " Bundle SKU (carton) distinct." +
-          (bundleParsed.missingBundleSkuRows ? " (" + bundleParsed.missingBundleSkuRows + " dòng thiếu Bundle SKU đã bị bỏ qua.)" : "");
-        checkedBundleKeys = new Set();
-        renderBundleList();
+        let msg = "Đã đọc " + bundleParsed.childRows.length + " dòng child SKU — " + bundleParsed.bundles.length + " Bundle SKU (carton) distinct.";
+        if (bundleParsed.missingBundleSkuRows) msg += " (" + bundleParsed.missingBundleSkuRows + " dòng thiếu Bundle SKU đã bị bỏ qua.)";
+        if (bundleParsed.invalidChildSkuRows) msg += " (" + bundleParsed.invalidChildSkuRows + " dòng thiếu Child SKU đã bị bỏ qua.)";
+        bundleStatus.textContent = msg;
         renderMapping();
         refreshRunEnabled();
       } catch (e) {
@@ -832,15 +750,17 @@ window.WOPOutboundAvailability = (function () {
       }
     });
 
-    // ---- Rendering results ----
+    // ---- Results rendering ----
     function renderSummaryCards(s) {
       summaryCardsEl.innerHTML = "";
       const cards = [
-        ["Total Unique Bundle Cartons in Bundle File", s.totalUniqueBundleCartonsInFile],
-        ["Available Bundle Cartons", s.availableBundleCartons],
-        ["Unavailable / Missing Bundle Cartons", s.unavailableBundleCartons],
-        ["Total Child SKU Lines in Available Bundles", s.totalChildSkuLinesInAvailableBundles],
-        ["Total Child PCS in Available Bundles", s.totalChildPcsInAvailableBundles],
+        ["Source Real-Time Inventory Rows", s.sourceRealTimeInventoryRows],
+        ["Available Normal Rows", s.availableNormalRows],
+        ["Available Bundles Expanded", s.availableBundlesExpanded],
+        ["Bundle Child Rows Generated", s.bundleChildRowsGenerated],
+        ["Final Combined Rows", s.finalCombinedRows],
+        ["Removed Unavailable Rows", s.removedUnavailableRows],
+        ["Unmapped Bundle Rows Excluded", s.unmappedBundleRowsExcluded],
       ];
       cards.forEach(function (c) {
         const div = document.createElement("div");
@@ -850,153 +770,146 @@ window.WOPOutboundAvailability = (function () {
       });
     }
 
-    function renderRecon(rc) {
-      reconTableEl.innerHTML =
-        "<tr><th>Mục</th><th>Số lượng</th></tr>" +
-        "<tr><td>Unique Bundle SKUs found in bundle file</td><td>" + rc.uniqueBundleSkusFound + "</td></tr>" +
-        "<tr><td>Bundle SKUs matched in real-time inventory</td><td>" + rc.matchedInInventory + "</td></tr>" +
-        "<tr><td>Bundle SKUs with Available Qty &gt; 0</td><td>" + rc.availableQtyGt0 + "</td></tr>" +
-        "<tr><td>Bundle SKUs with Available Qty ≤ 0 / invalid</td><td>" + rc.availableQtyLte0 + "</td></tr>" +
-        "<tr><td>Bundle SKUs not found in real-time inventory</td><td>" + rc.notFoundInInventory + "</td></tr>" +
-        "<tr><td>Bundle SKUs with invalid or missing identifiers</td><td>" + rc.invalidOrMissingIdentifiers + "</td></tr>" +
-        "<tr><td>Excluded by warehouse filter</td><td>" + rc.excludedByWarehouseFilter + "</td></tr>";
+    function getFilteredSortedRows() {
+      let rows = lastCombined;
+      const q = searchQuery.trim().toLowerCase();
+      if (q) {
+        rows = rows.filter(function (r) {
+          return SEARCH_FIELDS.some(function (f) { return String(r[f] === null || r[f] === undefined ? "" : r[f]).toLowerCase().indexOf(q) !== -1; });
+        });
+      }
+      if (sortState.col) {
+        const col = sortState.col, dir = sortState.dir;
+        rows = rows.slice().sort(function (a, b) {
+          const av = a[col], bv = b[col];
+          const an = typeof av === "number", bn = typeof bv === "number";
+          if (an && bn) return (av - bv) * dir;
+          const as = av === null || av === undefined ? "" : String(av);
+          const bs = bv === null || bv === undefined ? "" : String(bv);
+          return as.localeCompare(bs) * dir;
+        });
+      }
+      return rows;
     }
 
-    // Bundle-carton-centric table with an expandable child-detail row
-    // beneath each carton (Option B: one parent bundle row + expandable
-    // child table), built with real DOM nodes so the toggle buttons work.
-    function renderAvailableTable(rows) {
-      availableTableWrap.innerHTML = "";
+    function renderTable() {
+      tableWrap.innerHTML = "";
+      const rows = getFilteredSortedRows();
+      const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+      if (currentPage >= totalPages) currentPage = totalPages - 1;
+      if (currentPage < 0) currentPage = 0;
+      const startIdx = currentPage * PAGE_SIZE;
+      const pageRows = rows.slice(startIdx, startIdx + PAGE_SIZE);
+
+      const filterNote = searchQuery.trim() ? " (lọc từ " + lastCombined.length + " dòng)" : "";
+      pagerInfo.textContent = rows.length === 0
+        ? "0 rows" + filterNote
+        : ("Hiển thị " + (startIdx + 1) + "–" + Math.min(startIdx + PAGE_SIZE, rows.length) + " / " + rows.length + " rows" + filterNote);
+      pagerPrev.disabled = currentPage <= 0;
+      pagerNext.disabled = currentPage >= totalPages - 1;
+
       if (!rows.length) {
         const p = document.createElement("p");
         p.className = "status";
-        p.textContent = "Không có bundle carton nào khả dụng (Available Qty > 0) cho lựa chọn hiện tại.";
-        availableTableWrap.appendChild(p);
+        p.textContent = lastCombined.length ? "Không có dòng nào khớp với tìm kiếm." : "Không có dòng nào trong báo cáo kết hợp.";
+        tableWrap.appendChild(p);
         return;
       }
-      const cartonCols = [
-        ["bundleSku", "Bundle SKU"], ["bundleName", "Bundle Name"], ["warehouse", "Warehouse"],
-        ["invProductCode", "Inventory Product Code"], ["partnerSku", "Partner SKU"], ["invProductName", "Inventory Product Name"],
-        ["category", "Category"], ["unit", "Unit"], ["conditionType", "Condition"],
-        ["stockQty", "Stock Qty"], ["freezeQty", "Freeze Qty"], ["availableQty", "Available Qty"],
-        ["pendingIn", "Pending In"], ["pendingOut", "Pending Out"], ["weightKg", "Weight (Kg)"], ["cbm", "CBM"],
-        ["lastStockoutDate", "Last Stockout Date"], ["lastInboundDate", "Last Inbound Date"], ["lastOutboundDate", "Last Outbound Date"],
-        ["childCount", "Child SKU Count"], ["totalChildPcs", "Total Child PCS"],
-      ];
-      const childCols = [
-        ["childSku", "Child SKU"], ["childProduct", "Child Product Name"], ["unitCode", "Unit Code"],
-        ["unitName", "Unit Name"], ["qty", "Qty"], ["availabilityRatio", "Availability Ratio (%)"],
-      ];
 
       const table = document.createElement("table");
       table.className = "data-table";
       const thead = document.createElement("thead");
       const headTr = document.createElement("tr");
-      const expandTh = document.createElement("th"); expandTh.textContent = "";
-      headTr.appendChild(expandTh);
-      cartonCols.forEach(function (c) { const th = document.createElement("th"); th.textContent = c[1]; headTr.appendChild(th); });
+      PREVIEW_COLS.forEach(function (c) {
+        const th = document.createElement("th");
+        th.className = "rtoa-sortable";
+        th.textContent = c[1];
+        if (sortState.col === c[0]) {
+          const arrow = document.createElement("span");
+          arrow.className = "rtoa-sort-arrow";
+          arrow.textContent = sortState.dir === 1 ? "▲" : "▼";
+          th.appendChild(arrow);
+        }
+        th.addEventListener("click", function () {
+          if (sortState.col === c[0]) sortState.dir = -sortState.dir;
+          else { sortState.col = c[0]; sortState.dir = 1; }
+          currentPage = 0;
+          renderTable();
+        });
+        headTr.appendChild(th);
+      });
       thead.appendChild(headTr);
       table.appendChild(thead);
 
       const tbody = document.createElement("tbody");
-      rows.forEach(function (r, idx) {
+      pageRows.forEach(function (r) {
         const tr = document.createElement("tr");
-        const toggleTd = document.createElement("td");
-        const toggleBtn = document.createElement("button");
-        toggleBtn.type = "button";
-        toggleBtn.className = "rtoa-toggle-btn";
-        toggleBtn.textContent = "▸ " + r.childCount;
-        toggleTd.appendChild(toggleBtn);
-        tr.appendChild(toggleTd);
-        cartonCols.forEach(function (c) {
+        PREVIEW_COLS.forEach(function (c) {
           const td = document.createElement("td");
           const v = r[c[0]];
           td.textContent = v === null || v === undefined ? "" : String(v);
           tr.appendChild(td);
         });
         tbody.appendChild(tr);
-
-        const childTr = document.createElement("tr");
-        childTr.className = "rtoa-child-row";
-        childTr.style.display = "none";
-        const childTd = document.createElement("td");
-        childTd.colSpan = cartonCols.length + 1;
-        const childTable = document.createElement("table");
-        childTable.className = "data-table rtoa-child-table";
-        const cThead = document.createElement("thead");
-        const cHeadTr = document.createElement("tr");
-        childCols.forEach(function (c) { const th = document.createElement("th"); th.textContent = c[1]; cHeadTr.appendChild(th); });
-        cThead.appendChild(cHeadTr);
-        childTable.appendChild(cThead);
-        const cTbody = document.createElement("tbody");
-        (r.children || []).forEach(function (child) {
-          const cTr = document.createElement("tr");
-          childCols.forEach(function (c) {
-            const cTd = document.createElement("td");
-            const v = child[c[0]];
-            cTd.textContent = v === null || v === undefined ? "" : String(v);
-            cTr.appendChild(cTd);
-          });
-          cTbody.appendChild(cTr);
-        });
-        childTable.appendChild(cTbody);
-        childTd.appendChild(childTable);
-        childTr.appendChild(childTd);
-        tbody.appendChild(childTr);
-
-        toggleBtn.addEventListener("click", function () {
-          const open = childTr.style.display !== "none";
-          childTr.style.display = open ? "none" : "table-row";
-          toggleBtn.textContent = (open ? "▸ " : "▾ ") + r.childCount;
-        });
       });
       table.appendChild(tbody);
-
-      availableTableWrap.appendChild(table);
+      tableWrap.appendChild(table);
     }
 
-    function renderExcludedTable(rows) {
-      excludedCountEl.textContent = String(rows.length);
-      if (!rows.length) { excludedTableWrap.innerHTML = '<p class="status">Không có bundle carton nào bị loại.</p>'; return; }
-      let html = '<table class="data-table"><thead><tr><th>Bundle SKU</th><th>Bundle Name</th><th>Warehouse</th><th>Child SKU Count</th><th>Total Child PCS</th><th>Exclusion Reason</th></tr></thead><tbody>';
-      rows.forEach(function (r) {
-        html += "<tr><td>" + escapeHtml(r.bundleSku) + "</td><td>" + escapeHtml(r.bundleName) + "</td><td>" + escapeHtml(r.warehouse) +
-          "</td><td>" + escapeHtml(r.childCount) + "</td><td>" + escapeHtml(r.totalChildPcs) +
-          '</td><td><span class="rtoa-reason-badge">' + escapeHtml(EXCLUSION_LABELS[r.reason] || r.reason) + "</span></td></tr>";
+    searchInput.addEventListener("input", function () { searchQuery = searchInput.value; currentPage = 0; renderTable(); });
+    pagerPrev.addEventListener("click", function () { currentPage--; renderTable(); });
+    pagerNext.addEventListener("click", function () { currentPage++; renderTable(); });
+
+    function renderDiagnosticsTable(diagnostics) {
+      diagnosticsCountEl.textContent = String(diagnostics.length);
+      if (!diagnostics.length) { diagnosticsWrap.innerHTML = '<p class="status">Không có cảnh báo xử lý nào.</p>'; return; }
+      let html = '<table class="data-table"><thead><tr><th>Warehouse</th><th>Code</th><th>Product</th><th>Reason</th></tr></thead><tbody>';
+      diagnostics.forEach(function (r) {
+        html += "<tr><td>" + escapeHtml(r.warehouse) + "</td><td>" + escapeHtml(r.code) + "</td><td>" + escapeHtml(r.product) +
+          '</td><td><span class="rtoa-reason-badge">' + escapeHtml(DIAGNOSTIC_LABELS[r.reason] || r.reason) + "</span></td></tr>";
       });
       html += "</tbody></table>";
-      excludedTableWrap.innerHTML = html;
+      diagnosticsWrap.innerHTML = html;
     }
 
     runBtn.addEventListener("click", async function () {
       if (!bundleParsed || !invParsed) return;
-      if (!checkedBundleKeys.size) { log("⚠️ Vui lòng chọn ít nhất 1 Bundle SKU."); return; }
       runBtn.disabled = true;
       logEl.textContent = "";
-      log("[INFO] Đang chạy đối chiếu Bundle SKU x Real-Time Inventory...");
+      log("[INFO] Đang tạo Combined Real-Time Inventory Report...");
       await tick();
       try {
-        const bundleKeys = new Set(bundleParsed.bundles.map(function (b) { return normalizeBundleSkuKey(b.bundleSku); }));
-        const detection = detectBundleSkuKeySource(bundleKeys, invParsed.records, bundleSkuKeyFieldOverride);
-        log("[INFO] Bundle SKU key column: " + detection.field + " (khớp " + detection.overlap + "/" + checkedBundleKeys.size + " bundle đã chọn trên toàn bộ file).");
+        const detection = detectBundleSkuKeySource(bundleParsed.bundleMap, invParsed.records, bundleSkuKeyFieldOverride);
+        log("[INFO] Bundle SKU key column: " + detection.field + " (khớp " + detection.overlap + " Bundle SKU trên toàn bộ file tồn kho).");
         if (detection.overlap === 0) {
           log("⚠️ No Bundle SKU from the bundle file was found in the selected real-time inventory key column. Please verify the inventory file or manually select the correct Bundle SKU column.");
         }
-        const result = runMatch({
-          bundles: bundleParsed.bundles,
-          bundleKeyIndex: detection.index,
-          selectedBundleSkuKeys: checkedBundleKeys,
+        const result = generateCombinedReport({
+          invRecords: invParsed.records,
+          bundleMap: bundleParsed.bundleMap,
+          bundleKeyField: detection.field,
           warehouseFilter: getWarehouseFilter(),
-          missingBundleSkuRows: bundleParsed.missingBundleSkuRows,
         });
-        lastResult = result;
-        log("[INFO] Available bundle cartons: " + result.available.length + " rows | Excluded: " + result.excluded.length + " rows");
+        // surface file-level parse diagnostics alongside row-level ones
+        const extraDiagnostics = [];
+        for (let i = 0; i < (invParsed.invalidSourceIdentifierRows || 0); i++) {
+          extraDiagnostics.push({ warehouse: "", code: "", product: "", reason: "INVALID_SOURCE_IDENTIFIER" });
+        }
+        for (let i = 0; i < (bundleParsed.invalidChildSkuRows || 0); i++) {
+          extraDiagnostics.push({ warehouse: "", code: "", product: "", reason: "INVALID_CHILD_SKU_IN_MAPPING" });
+        }
+        const allDiagnostics = result.diagnostics.concat(extraDiagnostics);
+
+        lastCombined = result.combined;
+        searchQuery = ""; searchInput.value = ""; sortState = { col: null, dir: 1 }; currentPage = 0;
+
+        log("[INFO] Final combined rows: " + result.summary.finalCombinedRows +
+          " (normal: " + result.summary.availableNormalRows + ", bundle child rows: " + result.summary.bundleChildRowsGenerated + " from " + result.summary.availableBundlesExpanded + " bundles)");
         renderSummaryCards(result.summary);
-        renderRecon(result.reconciliation);
-        renderAvailableTable(result.available);
-        renderExcludedTable(result.excluded);
+        renderTable();
+        renderDiagnosticsTable(allDiagnostics);
         resultsWrap.style.display = "";
-        exportBtn.disabled = result.available.length === 0;
+        exportBtn.disabled = lastCombined.length === 0;
         log("✅ Hoàn tất.");
       } catch (e) {
         log("❌ Lỗi: " + e.message);
@@ -1006,8 +919,8 @@ window.WOPOutboundAvailability = (function () {
     });
 
     exportBtn.addEventListener("click", function () {
-      if (!lastResult) return;
-      const blob = buildExportWorkbook(lastResult);
+      if (!lastCombined.length) return;
+      const blob = buildExportWorkbook(lastCombined); // always the FULL final array, never the filtered/paginated view
       WOPUtils.downloadBlob(blob, exportFilename());
     });
 
@@ -1015,11 +928,11 @@ window.WOPOutboundAvailability = (function () {
       bundleInput.value = ""; invInput.value = "";
       bundleParsed = null; invParsed = null;
       bundleColOverride = {}; invColOverride = {}; bundleSkuKeyFieldOverride = null;
-      checkedBundleKeys = new Set(); lastResult = null;
+      lastCombined = []; sortState = { col: null, dir: 1 }; searchQuery = ""; currentPage = 0;
       bundleStatus.textContent = "Chưa chọn file."; invStatus.textContent = "Chưa chọn file.";
-      mappingBox.innerHTML = ""; bundleListEl.innerHTML = ""; warehouseFilterEl.innerHTML = ""; warehouseFilterEl.style.display = "none";
+      mappingBox.innerHTML = ""; warehouseFilterEl.innerHTML = ""; warehouseFilterEl.style.display = "none";
       logEl.textContent = ""; resultsWrap.style.display = "none"; exportBtn.disabled = true;
-      bundleSearch.value = ""; selectAllChk.checked = false;
+      searchInput.value = "";
       refreshRunEnabled();
     });
   }
@@ -1029,17 +942,17 @@ window.WOPOutboundAvailability = (function () {
     parseBundleFile: parseBundleFile,
     parseInventoryFile: parseInventoryFile,
     detectBundleSkuKeySource: detectBundleSkuKeySource,
-    buildBundleKeyIndex: buildBundleKeyIndex,
-    runMatch: runMatch,
+    generateCombinedReport: generateCombinedReport,
     buildExportWorkbook: buildExportWorkbook,
     exportFilename: exportFilename,
-    EXCLUSION_LABELS: EXCLUSION_LABELS,
+    EXPORT_HEADER: EXPORT_HEADER,
+    DIAGNOSTIC_LABELS: DIAGNOSTIC_LABELS,
     BUNDLE_COLUMN_DEFS: BUNDLE_COLUMN_DEFS,
     INVENTORY_COLUMN_DEFS: INVENTORY_COLUMN_DEFS,
     _internal: {
       normalizeHeaderText: normalizeHeaderText, normalizeEan: normalizeEan,
       normalizeBundleSkuDisplay: normalizeBundleSkuDisplay, normalizeBundleSkuKey: normalizeBundleSkuKey,
-      toNumberOrNull: toNumberOrNull, detectColumns: detectColumns, fixSheetRange: fixSheetRange,
+      toNumberOrNull: toNumberOrNull, detectColumns: detectColumns, fixSheetRange: fixSheetRange, isMixUnit: isMixUnit,
     },
   };
 
