@@ -125,13 +125,19 @@
       2) Chọn file DIM/khối lượng và file Master Data (SKU ↔ HS Code) tương ứng lô đó.<br>
       3) Nếu lô KHÔNG phải CN, có thể điền CNEE/Notify Party 1 lần ở mục 3 (tuỳ chọn) — lô CN thì bỏ qua, tự động rồi.<br>
       4) Bấm "Chạy OCR + Tách nhóm" — log xử lý hiện trực tiếp bên dưới.<br>
-      5) Xong sẽ có 1 nút tải về 1 file .zip gồm: <code>PL_Total.xlsx</code> (2 sheet Packing List + Match_Status),
+      5) Xong sẽ có 1 nút tải về 1 file .zip gồm: <code>PL_Total.xlsx</code> (4 sheet — <b>Packing List</b> +
+      <b>Match_Status</b> (QC log nội bộ) + <b>Raw_Data</b> (mỗi dòng item 1 hàng không merge, đầy đủ audit trail
+      kể cả DIM) + <b>Audit_Summary</b> (version parser, số liệu chạy, DIM detection method)),
       cùng thư mục <code>PL_SPLIT_OUTPUT/</code> (tách theo Factory / CN Port / CN Store, kèm
-      <code>PL_SPLIT_CONTROL.csv</code> và báo cáo đối soát).<br>
+      <code>PL_SPLIT_CONTROL.csv</code> và báo cáo đối soát). Tóm tắt kết quả (số PDF/package/item, quantity check,
+      DIM match...) hiện ngay trên trang sau khi chạy xong, kèm nút tải diagnostic log.<br>
       Shipping Mark trong Packing List tự lấy theo tên file PDF (bỏ đuôi .pdf). PO No. / Invoice No. / 中国标签名称
       vẫn để trống — điền tay sau.<br>
-      Logic OCR/tách nhóm giữ nguyên 100% so với bản Jupyter notebook gốc đã test — trang này chỉ là lớp giao diện
-      chạy cùng logic đó ngay trong trình duyệt.
+      Parser core đã được audit lại và sửa nhiều lỗi table/text parsing + DIM matching so với bản notebook gốc, kèm
+      bộ regression test trong repo (<code>tools/pl-ocr-grouping/tests/</code>). Số version thật của bản đang chạy
+      trên trình duyệt của bạn hiện ngay trong ô tóm tắt phía trên sau khi bấm chạy — so số đó với lịch sử commit
+      trên GitHub nếu cần xác minh. Trang này vẫn chạy 100% Python thật trong trình duyệt qua Pyodide, không upload
+      PDF/DIM/Master Data lên server nào.
     </p>
   </div>
 
