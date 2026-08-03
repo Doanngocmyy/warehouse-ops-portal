@@ -40,7 +40,7 @@ from openpyxl.utils import get_column_letter
 # Shown in the app.html run summary so it's possible to verify the browser is
 # actually running this revision (not a stale cached copy) and to tag every
 # exported Audit_Summary sheet with the exact code that produced it.
-PARSER_VERSION = "v10-audit-2026-08"
+PARSER_VERSION = "v10.1-audit-2026-08"
 GIT_COMMIT = __GIT_COMMIT__
 LAST_RUN_META: Optional[dict] = None  # populated by run_pipeline(), read by app.html for the UI summary
 
@@ -900,8 +900,21 @@ class DimMapper:
 
     def _extract_with_header(self, ws, merge_map, header_row_idx, col_idx,
                               sheet_name, method, max_row, max_col) -> int:
+        # `loaded` must count rows *successfully committed* to self._data,
+        # not rows merely attempted -- a bug found while writing the
+        # PARTIAL_HEADER_POSITIONAL regression test: the old code did
+        # `loaded += 1` unconditionally after calling _commit_row(), so a
+        # header-detected sheet where every row was malformed (missing
+        # dimension, non-positive, duplicate key) still made `if n:` in
+        # _load_sheet() true, silently reporting HEADER_MAPPING /
+        # PARTIAL_HEADER_POSITIONAL as "successful" with 0 usable DIM
+        # records AND never falling through to try
+        # PACKAGE_CODE_POSITIONAL_FALLBACK, which might have recovered the
+        # row. _commit_row() now returns bool so the caller's count reflects
+        # reality.
         loaded = 0
         last_ref = None
+        pkg_col = col_idx.get("pkg")
         for r in range(header_row_idx + 1, max_row + 1):
             self.rows_scanned += 1
             raw_ref = self._cell(ws, r, col_idx["ref"], merge_map)
@@ -917,11 +930,20 @@ class DimMapper:
             pkg_norm = normalize(str(raw_pkg)) if raw_pkg not in (None, "") else ""
             if not ref_norm or not pkg_norm or pkg_norm == "NAN":
                 continue  # blank row / spacer row, not malformed
-            vals = {f: safe_float(self._cell(ws, r, col_idx[f], merge_map)) if f in col_idx else None
-                    for f in self._POSITIONAL_ORDER}
-            self._commit_row(sheet_name, r, method, col_idx.get("pkg"),
-                              raw_ref, ref_norm, raw_pkg, pkg_norm, vals)
-            loaded += 1
+            if method == "PARTIAL_HEADER_POSITIONAL" and pkg_col is not None:
+                # Header only found ref+pkg (and maybe some, but not all, of
+                # L/W/H/Wt/CBM) -- per spec, tier 2 reads ALL FIVE dimension
+                # cells positionally (pkg_col+1..+5), the same fixed order
+                # as tier 3, rather than trusting a partial/ambiguous header
+                # match for some dimensions and not others.
+                vals = {f: safe_float(self._cell(ws, r, pkg_col + i, merge_map))
+                        for i, f in enumerate(self._POSITIONAL_ORDER, start=1)}
+            else:
+                vals = {f: safe_float(self._cell(ws, r, col_idx[f], merge_map)) if f in col_idx else None
+                        for f in self._POSITIONAL_ORDER}
+            if self._commit_row(sheet_name, r, method, col_idx.get("pkg"),
+                                 raw_ref, ref_norm, raw_pkg, pkg_norm, vals):
+                loaded += 1
         return loaded
 
     # ── tier 3: PACKAGE_CODE_POSITIONAL_FALLBACK ─────────────────────────
@@ -980,9 +1002,9 @@ class DimMapper:
             vals = {}
             for i, field_name in enumerate(self._POSITIONAL_ORDER, start=1):
                 vals[field_name] = safe_float(self._cell(ws, r, pkg_col + i, merge_map))
-            self._commit_row(sheet_name, r, "PACKAGE_CODE_POSITIONAL_FALLBACK", pkg_col,
-                              raw_ref, ref_norm, raw_pkg, pkg_norm, vals)
-            loaded += 1
+            if self._commit_row(sheet_name, r, "PACKAGE_CODE_POSITIONAL_FALLBACK", pkg_col,
+                                 raw_ref, ref_norm, raw_pkg, pkg_norm, vals):
+                loaded += 1
         return loaded
 
     # ── shared row commit (validation, CBM cross-check, dedup) ──────────
@@ -1000,7 +1022,7 @@ class DimMapper:
                                                 vals, None, None, reason))
             log.warning(f"  Row {excel_row} ({ref_norm}|{pkg_norm}): {reason} "
                         f"missing={missing} non_positive={non_positive}")
-            return
+            return False
 
         expected_cbm = (length * width * height) / 1_000_000 if length and width and height else None
         cbm_diff = abs(cbm - expected_cbm) if (cbm is not None and expected_cbm is not None) else None
@@ -1022,7 +1044,7 @@ class DimMapper:
             self.diagnostics.append(self._diag(sheet_name, excel_row, method, pkg_col,
                                                 raw_ref, ref_norm, raw_pkg, pkg_norm, vals,
                                                 expected_cbm, cbm_diff, "DUPLICATE_KEY"))
-            return
+            return False
 
         self._data[key] = {"length": length, "width": width, "height": height,
                             "weight": weight, "cbm": cbm}
@@ -1030,6 +1052,7 @@ class DimMapper:
         self.diagnostics.append(self._diag(sheet_name, excel_row, method, pkg_col,
                                             raw_ref, ref_norm, raw_pkg, pkg_norm, vals,
                                             expected_cbm, cbm_diff, status, key=key))
+        return True
 
     @staticmethod
     def _diag(sheet, excel_row, method, pkg_col, raw_ref, ref_norm, raw_pkg, pkg_norm,

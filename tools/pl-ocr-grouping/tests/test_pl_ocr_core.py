@@ -305,6 +305,79 @@ def t_condition_word_separate_cell_8col():
     assert item.condition
 
 
+def t_seven_column_row_all_fields():
+    """Exactly 7 cells, no trailing blank column (distinct from the 8-col
+    fixture above, which has a trailing ""). Verifies every field flagged
+    in the follow-up review, not just quantity+condition: GTIN, SKU,
+    description, UOM, condition, quantity."""
+    row = ["3", "4894961082016", "TP-SVN-RL07-BLK-01", "7mm Rope Loop Black", "PCS", "Moi", "12"]
+    item = C["parse_item_cells"](row)
+    assert item is not None
+    assert item.barcode == "4894961082016", item.barcode                # GTIN
+    assert item.product_code == "TP-SVN-RL07-BLK-01", item.product_code  # SKU
+    assert "Rope Loop" in item.product_name, item.product_name          # description
+    assert item.unit == "PCS", item.unit                                # UOM
+    assert item.condition, item.condition                               # condition
+    assert item.quantity == 12, item.quantity                           # quantity
+
+
+def t_delta_fallback_table_zero_items_recovers_via_text():
+    """Direct regression test for bug #16 (`if tables: used_table = True`
+    anti-pattern). Reproduces the exact Parser-level calls and the exact
+    boolean condition run_pipeline() uses to decide whether to fall back to
+    the text layer -- table pass yields a non-empty `tables` list whose
+    every row is noise/header/blank (0 new items, 0 packages closed), so
+    the fallback MUST trigger and the text layer's real item must be
+    recovered exactly once (no duplication)."""
+    Parser = C["Parser"]
+    p = Parser()
+    p.set_file(Path("CN-9999-Delta-CN.pdf"))
+    p.set_page(1)
+    p.feed_table_row(["Ma kien hang: PGKECDLT0000001 1/1", "", "", "", "", ""])
+
+    items_before = p.total_item_count()
+    closed_before = len(p.packages)
+    # A non-empty `tables` list (3 rows) whose every row fails to produce a
+    # valid item -- exactly the shape that used to permanently disable the
+    # text fallback for the rest of the page under the old `if tables:` rule.
+    garbage_table_rows = [
+        ["about:blank", "", "", "", "", ""],                             # noise row
+        ["STT", "GTIN", "SKU", "Ten hang", "DVT", "Tinh trang SL"],      # repeated header row
+        ["", "", "", "", "", ""],                                        # blank row
+    ]
+    for row in garbage_table_rows:
+        p.feed_table_row(row)
+    items_after_table = p.total_item_count()
+    closed_after_table = len(p.packages)
+
+    assert items_after_table == items_before, "garbage table rows must not add any item"
+    assert closed_after_table == closed_before, "garbage table rows must not close a package"
+
+    # This is the literal run_pipeline() delta-fallback condition (bug #16
+    # fix) re-evaluated here against the real Parser counters.
+    should_fall_back = (items_after_table == items_before and closed_after_table == closed_before)
+    assert should_fall_back, "delta-fallback condition must trigger when the table pass yields nothing new"
+
+    item_line = "1 4894961082009 TP-DLT-001-A Rope Loop PCS Moi 9"
+    p.feed_text_line(item_line)
+    assert p._cur is not None and p._cur.item_count == 1, "text fallback must recover exactly 1 item"
+
+    # Re-feeding the identical recovered line must NOT double-count it.
+    dup_before = p.duplicate_items_skipped
+    p.feed_text_line(item_line)
+    assert p.duplicate_items_skipped == dup_before + 1, "re-feeding the same line must be caught by dedup"
+    assert p._cur.item_count == 1, "item count must stay at 1 after the duplicate re-feed"
+
+    p.feed_text_line("Tong cong 9")
+    p.finalise()
+    assert len(p.packages) == 1
+    pkg = p.packages[0]
+    assert pkg.item_count == 1, f"expected exactly 1 item after fallback recovery, got {pkg.item_count}"
+    assert pkg.items[0].quantity == 9
+    assert pkg.declared_total_qty == 9
+    assert pkg.calc_qty == 9
+
+
 test("condition+quantity merged cell split ('Moi 12')", t_cond_qty_merge_split)
 test("SKU '-BOX' suffix joined (newline inside cell)", t_sku_box_suffix_newline_in_cell)
 test("SKU '-BOX' suffix joined (suffix on its own next row)", t_sku_box_suffix_next_row)
@@ -321,6 +394,8 @@ test("legitimately repeated SKU on different rows both kept", t_legit_repeated_s
 test("one page, multiple packages parsed correctly", t_multi_package_same_page)
 test("package spanning pages: continuation merges, totals reconcile", t_package_spans_pages_totals_reconcile)
 test("condition + quantity in separate cells (8-col layout)", t_condition_word_separate_cell_8col)
+test("7-column row (no trailing blank col): GTIN/SKU/description/UOM/condition/quantity all correct", t_seven_column_row_all_fields)
+test("delta-fallback: non-empty garbage table -> text layer recovers item, no duplicate (bug #16)", t_delta_fallback_table_zero_items_recovers_via_text)
 
 
 # =============================================================================
@@ -355,6 +430,34 @@ def t_dim_header_mapping_synthetic_file():
     d = dim.lookup("SYN-1002-WarehouseBeta-CN", "PGKECSYN10020001")
     assert d is not None
     assert d["length"] == 45
+
+
+def t_dim_partial_header_positional_fill():
+    """PARTIAL_HEADER_POSITIONAL (tier 2): ref+pkg found by header alias,
+    but the 5 dimension columns have meaningless headers ("X1".."X5") that
+    match no alias -- found while writing this test, the original code
+    (a) never actually filled those 5 fields positionally despite the
+    docstring promising it, and (b) counted the row as "loaded" even though
+    _commit_row() rejected it as malformed, so tier 3 was never tried and
+    the sheet falsely reported success with 0 usable records. Both are
+    fixed: PARTIAL_HEADER_POSITIONAL now reads all 5 dimension cells at
+    pkg_col+1..+5 (same fixed order as tier 3), and the row-loaded counters
+    only count rows _commit_row() actually accepted."""
+    path, tmp = _dim_wb(
+        headers=["Lo hang", "Tracking", "X1", "X2", "X3", "X4", "X5"],
+        rows=[["REF-P", "PGKECPPP0000001", 10, 20, 15, 2.5, 0.003]],
+    )
+    try:
+        DimMapper = C["DimMapper"]
+        dim = DimMapper(path)
+        assert dim.detection_method == "PARTIAL_HEADER_POSITIONAL", dim.detection_method
+        assert dim.valid_rows == 1, dim.valid_rows
+        d = dim.lookup("REF-P", "PGKECPPP0000001")
+        assert d is not None
+        assert d["length"] == 10 and d["width"] == 20 and d["height"] == 15
+        assert d["weight"] == 2.5 and d["cbm"] == 0.003
+    finally:
+        shutil.rmtree(tmp)
 
 
 def t_dim_header_alias_rename():
@@ -552,6 +655,7 @@ def t_raw_data_sheet_has_dim_per_item_row():
 
 
 test("HEADER_MAPPING against the sanitized synthetic DIM.xlsx", t_dim_header_mapping_synthetic_file)
+test("PARTIAL_HEADER_POSITIONAL: ref+pkg via header, L/W/H/Wt/CBM filled positionally", t_dim_partial_header_positional_fill)
 test("HEADER_MAPPING via alias-renamed headers", t_dim_header_alias_rename)
 test("broken headers -> PACKAGE_CODE_POSITIONAL_FALLBACK, fixed L/W/H/Wt/CBM order", t_dim_broken_header_positional_fallback)
 test("leading STT column before package code still detected", t_dim_positional_with_leading_stt_column)
