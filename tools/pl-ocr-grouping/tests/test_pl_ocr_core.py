@@ -29,8 +29,19 @@ HERE = Path(__file__).resolve().parent
 TOOL_DIR = HERE.parent
 CORE_PY = TOOL_DIR / "pl_ocr_core.py"
 FIXTURES = HERE / "fixtures"
-CN1286_PDFS = FIXTURES / "CN-1286"
-CN1286_DIM = FIXTURES / "CN-1286 DIM.xlsx"
+# SANITIZED SYNTHETIC fixtures only (see 2026-08-03 incident: the original
+# version of this test suite committed 8 REAL customer packing-list PDFs +
+# a real DIM.xlsx containing real customer names/phone numbers/addresses to
+# this PUBLIC repo. That history has been purged -- see git log / README
+# note for the cleanup commit. These synthetic fixtures were built with
+# reportlab (tools/pl-ocr-grouping/tests/fixtures/synthetic/generate.py) to
+# reproduce the exact same layout defects (merged condition+quantity cell,
+# SKU "-BOX" suffix split across a newline, package header living inside
+# the item table, package continuation across pages, one page with two
+# packages, repeated table header + about:blank/date noise) using entirely
+# fabricated codes/addresses. NO real shipment data ships in this repo.
+SYN_PDFS = FIXTURES / "synthetic"
+SYN_DIM = FIXTURES / "synthetic" / "SYN-DIM.xlsx"
 
 _ENTRY_MARKER = "# ── Entry point ────────────────────────────────────────────────────────────"
 _AUTO_SPLIT_MARKER = "# =========================================================\n# AUTO SPLIT:"
@@ -336,14 +347,14 @@ def _dim_wb(rows, headers=None, tmp_name="dim_fixture.xlsx"):
     return path, tmp_dir
 
 
-def t_dim_header_mapping_real_file():
+def t_dim_header_mapping_synthetic_file():
     DimMapper = C["DimMapper"]
-    dim = DimMapper(CN1286_DIM)
+    dim = DimMapper(SYN_DIM)
     assert dim.detection_method == "HEADER_MAPPING", dim.detection_method
-    assert dim.valid_rows == 16, dim.valid_rows
-    d = dim.lookup("CN-1286-Guangzhou_SZX-CN", "PGKECJ9NBAGY5910001")
+    assert dim.valid_rows == 3, dim.valid_rows
+    d = dim.lookup("SYN-1002-WarehouseBeta-CN", "PGKECSYN10020001")
     assert d is not None
-    assert d["length"] == 60
+    assert d["length"] == 45
 
 
 def t_dim_header_alias_rename():
@@ -522,7 +533,7 @@ def t_raw_data_sheet_has_dim_per_item_row():
     master_path = out_dir / "master.xlsx"
     _make_empty_master_xlsx(master_path)
     try:
-        ns = load_core_pipeline(CN1286_PDFS, CN1286_DIM, master_path, out_dir)
+        ns = load_core_pipeline(SYN_PDFS, SYN_DIM, master_path, out_dir)
         import openpyxl
         wb = openpyxl.load_workbook(str(out_dir / "PL_Total.xlsx"))
         assert "Raw_Data" in wb.sheetnames
@@ -540,7 +551,7 @@ def t_raw_data_sheet_has_dim_per_item_row():
         shutil.rmtree(out_dir)
 
 
-test("HEADER_MAPPING against the real CN-1286 DIM.xlsx", t_dim_header_mapping_real_file)
+test("HEADER_MAPPING against the sanitized synthetic DIM.xlsx", t_dim_header_mapping_synthetic_file)
 test("HEADER_MAPPING via alias-renamed headers", t_dim_header_alias_rename)
 test("broken headers -> PACKAGE_CODE_POSITIONAL_FALLBACK, fixed L/W/H/Wt/CBM order", t_dim_broken_header_positional_fallback)
 test("leading STT column before package code still detected", t_dim_positional_with_leading_stt_column)
@@ -555,36 +566,57 @@ test("Raw_Data sheet carries DIM values on every item row (not merge-only)", t_r
 
 
 # =============================================================================
-# 3. Real-file integration test (spec section 16: must run against real
-#    files, not just synthetic fixtures)
+# 3. Synthetic-file integration test (spec section 16 originally called for
+#    a real-file integration test; those real files were purged from repo
+#    history after the 2026-08-03 security incident -- see module docstring)
 # =============================================================================
-print("\n== Real-file integration test (8 real CN-1286 PDFs + real DIM.xlsx) ==")
+print("\n== Synthetic-file integration test (2 sanitized PDFs + synthetic DIM.xlsx) ==")
 
 
-def t_real_files_full_pipeline():
-    out_dir = Path(tempfile.mkdtemp(prefix="pipeline_real_"))
+def t_synthetic_files_full_pipeline():
+    """End-to-end run against the two sanitized synthetic PDFs + synthetic
+    DIM.xlsx. This exercises the SAME layout defects the original real-file
+    audit reproduced (merged condition+quantity cells, "-BOX" split across a
+    newline, package header living inside the item table, continuation
+    across pages, one page with two packages, about:blank/date/repeated-
+    header noise) -- see tools/pl-ocr-grouping/tests/fixtures/synthetic/generate.py
+    for exactly how each fixture maps to which bug.
+
+    NOTE (see 2026-08-03 security incident): this replaces what used to be a
+    genuine real-file integration test against 8 real customer PDFs, which
+    were purged from this repo's history entirely. This synthetic run is
+    NOT a substitute for periodically re-running the tool against real
+    files locally (never committed) before trusting a release -- see
+    README/limitations."""
+    out_dir = Path(tempfile.mkdtemp(prefix="pipeline_syn_"))
     master_path = out_dir / "master.xlsx"
     _make_empty_master_xlsx(master_path)
     try:
-        ns = load_core_pipeline(CN1286_PDFS, CN1286_DIM, master_path, out_dir)
+        ns = load_core_pipeline(SYN_PDFS, SYN_DIM, master_path, out_dir)
         packages = ns["packages"]
         audit_status = ns["audit_status"]
-        assert len(packages) == 16, f"expected 16 packages from 8 PDFs x 2 packages, got {len(packages)}"
-        assert all(p.item_count > 0 for p in packages), "no package should have 0 items on these real files"
+        assert len(packages) == 3, f"expected 3 packages (1 spanning 2 pages + 2 on one page), got {len(packages)}"
+        assert all(p.item_count > 0 for p in packages), "no package should have 0 items on these fixtures"
+        assert sum(p.item_count for p in packages) == 9, f"expected 9 items total, got {sum(p.item_count for p in packages)}"
         statuses = {audit_status(p) for p in packages}
         assert statuses == {"OK"}, f"expected all packages OK, got {statuses}"
         assert all(p.declared_total_qty == p.calc_qty for p in packages), \
             "declared vs calculated totals must reconcile for every package"
-        assert all(p.dim_matched for p in packages), "every package must DIM-match against the real DIM.xlsx"
+        assert all(p.dim_matched for p in packages), "every package must DIM-match against the synthetic DIM.xlsx"
         assert ns["RUN_SUMMARY"]["errors"] == 0
         assert ns["RUN_SUMMARY"]["duplicate_items_skipped"] == 0
         seen_codes = [p.package_code for p in packages]
         assert len(seen_codes) == len(set(seen_codes)), "no duplicate package codes"
+        by_code = {p.package_code: p for p in packages}
+        assert by_code["PGKECSYN10010001"].item_count == 5, "the 2-page continuation package must merge to 5 items"
+        assert by_code["PGKECSYN10010001"].calc_qty == 36
+        box_item = next(i for i in by_code["PGKECSYN10010001"].items if i.product_code.endswith("-BOX"))
+        assert box_item.product_code == "TP-SYN-A-001-BOX", box_item.product_code
     finally:
         shutil.rmtree(out_dir)
 
 
-test("8 real CN-1286 PDFs + real DIM.xlsx: 16/16 packages OK, totals reconcile, DIM 16/16", t_real_files_full_pipeline)
+test("synthetic fixtures (2 PDFs, 3 packages, 9 items): all OK, totals reconcile, DIM 3/3", t_synthetic_files_full_pipeline)
 
 
 # ── summary ──────────────────────────────────────────────────────────────

@@ -1,0 +1,21 @@
+# Real / private test data must NEVER be committed to this repo (public).
+# See tools/pl-ocr-grouping/tests/test_pl_ocr_core.py for the 2026-08-03
+# incident this guards against: 8 real customer packing-list PDFs + a real
+# DIM.xlsx (customer names, phone numbers, addresses, shipment/package
+# codes) were committed to this public repo and had to be purged from Git
+# history. Only synthetic/sanitized fixtures belong in version control.
+real_test_data/
+**/tests/fixtures/private/
+**/tests/fixtures/**/*.real.pdf
+**/tests/fixtures/**/*.real.xlsx
+
+# Generated pipeline output -- never commit run results, only source/fixtures.
+PL_Total.xlsx
+PL_OCR_Grouping_Result.zip
+PL_SPLIT_OUTPUT/
+*.tmp.xlsx
+
+# Common Python/OS junk
+__pycache__/
+*.pyc
+.DS_Store
