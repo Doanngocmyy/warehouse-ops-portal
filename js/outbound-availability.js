@@ -100,6 +100,63 @@ window.WOPOutboundAvailability = (function () {
     return as < bs ? -1 : 1;
   }
 
+  // ----------------------------------------------------------------
+  // Final EAN Qty rule (single source of truth for BOTH the web preview
+  // and the Excel export — never computed separately in either place):
+  //   - expanded MIX bundle child row -> EAN Qty = Child SL from the
+  //     bundle mapping (Stock Qty is left untouched: the original MIX
+  //     source row's Stock Qty, normally 1 carton).
+  //   - Unit/UOM === "PCS"            -> EAN Qty = Stock Qty
+  //   - Unit/UOM === CARTON_<N>PCS    -> EAN Qty = Stock Qty x N
+  //     (case/space-insensitive: "carton_40pcs", "CARTON_40 PCS",
+  //     "CARTON_40PCS " all resolve to N = 40; a bare "CARTON_PCS" with
+  //     no parseable N yields CARTON_PCS_SIZE_NOT_DETECTED, never a
+  //     guessed size)
+  //   - any other/unknown UOM         -> keep the source file's own EAN
+  //     Qty value if it looks numeric/trustworthy, else leave blank and
+  //     flag EAN_QTY_RULE_NOT_DETECTED
+  //   - Stock Qty blank/invalid on a PCS or CARTON row -> EAN Qty blank,
+  //     flagged EAN_QTY_STOCK_INVALID (never silently coerced to 0)
+  // Returns { eanQty: number|null, diagnostic: string|null }.
+  // ----------------------------------------------------------------
+  function deriveEanQty(input) {
+    input = input || {};
+    const isExpandedBundle = !!input.isExpandedBundle;
+    const stockQtyNum = toNumberOrNull(input.stockQty);
+    const childQtyNum = toNumberOrNull(input.childQty);
+    const sourceEanQtyNum = toNumberOrNull(input.sourceEanQty);
+
+    if (isExpandedBundle) {
+      // Rule 3 — MIX bundle child: EAN Qty = Child SL only. Never
+      // multiplied by Stock Qty/Available Qty; Stock Qty itself is not
+      // touched here at all (caller keeps the original source value).
+      return { eanQty: childQtyNum, diagnostic: null };
+    }
+
+    const normUnit = String(input.unit === null || input.unit === undefined ? "" : input.unit).trim().toUpperCase();
+
+    if (normUnit === "PCS") {
+      // Rule 1
+      if (stockQtyNum === null) return { eanQty: null, diagnostic: "EAN_QTY_STOCK_INVALID" };
+      return { eanQty: stockQtyNum, diagnostic: null };
+    }
+
+    if (normUnit.indexOf("CARTON") === 0) {
+      // Rule 2 — normalize away all whitespace so "CARTON_40 PCS",
+      // "CARTON_40PCS ", "carton_40pcs" all match the same pattern.
+      const compact = normUnit.replace(/\s+/g, "");
+      const m = compact.match(/^CARTON_(\d+)PCS$/);
+      if (!m) return { eanQty: null, diagnostic: "CARTON_PCS_SIZE_NOT_DETECTED" };
+      if (stockQtyNum === null) return { eanQty: null, diagnostic: "EAN_QTY_STOCK_INVALID" };
+      return { eanQty: stockQtyNum * Number(m[1]), diagnostic: null };
+    }
+
+    // Unknown/unsupported UOM: fall back to the source file's own EAN Qty
+    // value only if it is present and numeric; otherwise leave blank.
+    if (sourceEanQtyNum !== null) return { eanQty: sourceEanQtyNum, diagnostic: null };
+    return { eanQty: null, diagnostic: "EAN_QTY_RULE_NOT_DETECTED" };
+  }
+
   function escapeHtml(s) {
     return String(s === null || s === undefined ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -374,6 +431,9 @@ window.WOPOutboundAvailability = (function () {
     BUNDLE_MAPPING_NOT_FOUND: "Dòng MIX/bundle đang tồn nhưng không có trong file mapping — không xác định được Child SKU",
     INVALID_SOURCE_IDENTIFIER: "Dòng tồn kho không có mã định danh hợp lệ (Mã sản phẩm / Mã SKU đối tác đều trống)",
     INVALID_CHILD_SKU_IN_MAPPING: "Dòng trong file bundle mapping thiếu Child SKU hợp lệ",
+    EAN_QTY_RULE_NOT_DETECTED: "Không xác định được quy tắc tính EAN Qty cho UOM này — giữ nguyên dòng, để trống EAN Qty",
+    CARTON_PCS_SIZE_NOT_DETECTED: "UOM dạng CARTON nhưng không đọc được số PCS/carton — giữ nguyên dòng, để trống EAN Qty",
+    EAN_QTY_STOCK_INVALID: "Stock Qty trống/không hợp lệ nên không tính được EAN Qty — giữ nguyên dòng, để trống EAN Qty",
   };
 
   function generateCombinedReport(opts) {
@@ -424,13 +484,17 @@ window.WOPOutboundAvailability = (function () {
         availableBundlesExpanded++;
         bundle.children.forEach(function (child, childIdx) {
           bundleChildRowsGenerated++;
+          const derivedChild = deriveEanQty({ unit: ir.unit, stockQty: ir.stockQty, isExpandedBundle: true, childQty: child.qty, sourceEanQty: null });
+          if (derivedChild.diagnostic) {
+            diagnostics.push({ warehouse: ir.warehouse, code: child.childSku, product: child.childProduct, reason: derivedChild.diagnostic });
+          }
           combined.push({
             warehouse: ir.warehouse, barcode: bundle.bundleSku, partnerSku: ir.partnerSku, childEan: child.childSku,
             product: child.childProduct, category: ir.category, unit: ir.unit, conditionType: ir.conditionType,
             stockQty: ir.stockQty, freezeQty: ir.freezeQty, pendingIn: ir.pendingIn, pendingOut: ir.pendingOut,
             weightKg: ir.weightKg, cbm: ir.cbm,
             lastStockoutDate: ir.lastStockoutDate, lastOutboundDate: ir.lastOutboundDate, lastInboundDate: ir.lastInboundDate,
-            eanQty: child.qty, _rowType: "bundleChild", _bundleSku: bundle.bundleSku, _childOrder: childIdx,
+            eanQty: derivedChild.eanQty, _rowType: "bundleChild", _bundleSku: bundle.bundleSku, _childOrder: childIdx,
           });
         });
         return;
@@ -445,15 +509,23 @@ window.WOPOutboundAvailability = (function () {
         return;
       }
 
-      // CASE 1 — ordinary available inventory row: keep as-is.
+      // CASE 1 — ordinary available inventory row: keep as-is. EAN Qty
+      // is derived from Stock Qty per the Unit/UOM rule (PCS / CARTON_NPCS
+      // / unknown), never left hardcoded and never computed a second time
+      // anywhere else (UI preview and Excel export both read this exact
+      // field).
       availableNormalRows++;
+      const derivedNormal = deriveEanQty({ unit: ir.unit, stockQty: ir.stockQty, isExpandedBundle: false, childQty: null, sourceEanQty: ir.invEanQty });
+      if (derivedNormal.diagnostic) {
+        diagnostics.push({ warehouse: ir.warehouse, code: ir.invProductCode || ir.partnerSku, product: ir.product, reason: derivedNormal.diagnostic });
+      }
       combined.push({
         warehouse: ir.warehouse, barcode: ir.invProductCode, partnerSku: ir.partnerSku, childEan: ir.invProductCode,
         product: ir.product, category: ir.category, unit: ir.unit, conditionType: ir.conditionType,
         stockQty: ir.stockQty, freezeQty: ir.freezeQty, pendingIn: ir.pendingIn, pendingOut: ir.pendingOut,
         weightKg: ir.weightKg, cbm: ir.cbm,
         lastStockoutDate: ir.lastStockoutDate, lastOutboundDate: ir.lastOutboundDate, lastInboundDate: ir.lastInboundDate,
-        eanQty: ir.invEanQty, _rowType: "normal", _childOrder: 0,
+        eanQty: derivedNormal.eanQty, _rowType: "normal", _childOrder: 0,
       });
     });
 
@@ -986,6 +1058,7 @@ window.WOPOutboundAvailability = (function () {
       normalizeBundleSkuDisplay: normalizeBundleSkuDisplay, normalizeBundleSkuKey: normalizeBundleSkuKey,
       toNumberOrNull: toNumberOrNull, detectColumns: detectColumns, fixSheetRange: fixSheetRange, isMixUnit: isMixUnit,
       compareCodes: compareCodes,
+      deriveEanQty: deriveEanQty,
     },
   };
 

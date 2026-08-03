@@ -349,5 +349,216 @@ test("25. Default sort: mixed normal + bundle rows interleave correctly by Wareh
   assert.deepStrictEqual(r.combined.map(function (row) { return row.childEan; }).slice(1, 3), ["C1", "C2"]); // original mapping order preserved
 });
 
+
+// ==========================================================
+// Final EAN Qty logic (Rule 1 PCS, Rule 2 CARTON_<N>PCS, Rule 3 MIX
+// bundle child) — deriveEanQty() is the single shared helper used by
+// BOTH the normal-row and bundle-child branches inside
+// generateCombinedReport, so these tests exercise it both directly
+// (unit tests on deriveEanQty) and through the full transform
+// (integration tests via run()/invRow()) to prove the preview/export
+// row objects never compute EAN Qty a second time anywhere else.
+// ==========================================================
+
+test("EAN-1. PCS: Stock Qty=40 -> EAN Qty=40 (never hardcoded to 1)", function () {
+  const r = run([invRow("SG2", "SKU-PCS-1", 5, { unit: "PCS", stockQty: 40 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 40);
+  assert.notStrictEqual(r.combined[0].eanQty, 1);
+});
+
+test("EAN-2. PCS numeric string: Stock Qty=\"40\" -> EAN Qty=40 (numeric, not concatenated)", function () {
+  const r = run([invRow("SG2", "SKU-PCS-2", 5, { unit: "PCS", stockQty: "40" })], []);
+  assert.strictEqual(r.combined[0].eanQty, 40);
+  assert.strictEqual(typeof r.combined[0].eanQty, "number");
+});
+
+test("EAN-3. CARTON_20PCS: Stock Qty=3 -> EAN Qty=60", function () {
+  const r = run([invRow("SG2", "SKU-C20", 5, { unit: "CARTON_20PCS", stockQty: 3 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 60);
+});
+
+test("EAN-4. CARTON_30PCS: Stock Qty=4 -> EAN Qty=120", function () {
+  const r = run([invRow("SG2", "SKU-C30", 5, { unit: "CARTON_30PCS", stockQty: 4 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 120);
+});
+
+test("EAN-5. CARTON_40PCS: Stock Qty=12 -> EAN Qty=480", function () {
+  const r = run([invRow("SG2", "SKU-C40", 5, { unit: "CARTON_40PCS", stockQty: 12 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 480);
+});
+
+test("EAN-6. CARTON_60PCS: Stock Qty=6 -> EAN Qty=360", function () {
+  const r = run([invRow("SG2", "SKU-C60", 5, { unit: "CARTON_60PCS", stockQty: 6 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 360);
+});
+
+test("EAN-7. CARTON_100PCS: Stock Qty=2 -> EAN Qty=200", function () {
+  const r = run([invRow("SG2", "SKU-C100", 5, { unit: "CARTON_100PCS", stockQty: 2 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 200);
+});
+
+test("EAN-8. Lowercase UOM \"carton_40pcs\": Stock Qty=12 -> EAN Qty=480", function () {
+  const r = run([invRow("SG2", "SKU-C40L", 5, { unit: "carton_40pcs", stockQty: 12 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 480);
+});
+
+test("EAN-9. UOM with internal space \"CARTON_40 PCS\": Stock Qty=12 -> EAN Qty=480", function () {
+  const r = run([invRow("SG2", "SKU-C40S", 5, { unit: "CARTON_40 PCS", stockQty: 12 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 480);
+});
+
+test("EAN-10. Trailing-space UOM \"CARTON_40PCS \": Stock Qty=12 -> EAN Qty=480", function () {
+  const r = run([invRow("SG2", "SKU-C40T", 5, { unit: "CARTON_40PCS ", stockQty: 12 })], []);
+  assert.strictEqual(r.combined[0].eanQty, 480);
+});
+
+test("EAN-11. Invalid carton UOM \"CARTON_PCS\" (no N) -> EAN Qty blank + CARTON_PCS_SIZE_NOT_DETECTED", function () {
+  const r = run([invRow("SG2", "SKU-CBAD", 5, { unit: "CARTON_PCS", stockQty: 12 })], []);
+  assert.strictEqual(r.combined[0].eanQty, null);
+  assert.ok(r.diagnostics.some(function (d) { return d.reason === "CARTON_PCS_SIZE_NOT_DETECTED" && d.code === "SKU-CBAD"; }));
+  // must NOT invent a carton size (e.g. never silently falls back to Stock Qty itself)
+  assert.notStrictEqual(r.combined[0].eanQty, 12);
+});
+
+test("EAN-12. Expanded MIX child: Stock Qty=1, Child SL=100 -> EAN Qty=100", function () {
+  const bundles = [{ sku: "TP-MIX-1", children: [{ childSku: "C1", childProduct: "P1", qty: 100 }] }];
+  const r = run([invRow("SG2", "TP-MIX-1", 1, { unit: "MIX", stockQty: 1 })], bundles);
+  assert.strictEqual(r.combined[0].stockQty, 1);
+  assert.strictEqual(r.combined[0].eanQty, 100);
+});
+
+test("EAN-13. Expanded MIX child: Stock Qty remains 1, is NOT overwritten by Child SL", function () {
+  const bundles = [{ sku: "TP-MIX-2", children: [{ childSku: "C1", childProduct: "P1", qty: 250 }] }];
+  const r = run([invRow("SG2", "TP-MIX-2", 1, { unit: "MIX", stockQty: 1 })], bundles);
+  assert.strictEqual(r.combined[0].stockQty, 1); // NOT 250
+  assert.notStrictEqual(r.combined[0].stockQty, r.combined[0].eanQty);
+});
+
+test("EAN-14. MIX child SL values 100/10/10/20 -> EAN Qty 100/10/10/20", function () {
+  const bundles = [{ sku: "TP-MIX-3", children: [
+    { childSku: "C1", childProduct: "P1", qty: 100 }, { childSku: "C2", childProduct: "P2", qty: 10 },
+    { childSku: "C3", childProduct: "P3", qty: 10 }, { childSku: "C4", childProduct: "P4", qty: 20 },
+  ] }];
+  const r = run([invRow("SG2", "TP-MIX-3", 1, { unit: "MIX", stockQty: 1 })], bundles);
+  assert.deepStrictEqual(r.combined.map(function (row) { return row.eanQty; }), [100, 10, 10, 20]);
+  assert.ok(r.combined.every(function (row) { return row.stockQty === 1; })); // all 4 share source Stock Qty, unchanged
+});
+
+test("EAN-15. MIX EAN Qty is not multiplied by Stock Qty", function () {
+  const bundles = [{ sku: "TP-MIX-4", children: [{ childSku: "C1", childProduct: "P1", qty: 50 }] }];
+  // Stock Qty = 3 (unusual, but must still NOT multiply: EAN Qty stays 50, not 150)
+  const r = run([invRow("SG2", "TP-MIX-4", 1, { unit: "MIX", stockQty: 3 })], bundles);
+  assert.strictEqual(r.combined[0].eanQty, 50);
+  assert.strictEqual(r.combined[0].stockQty, 3);
+});
+
+test("EAN-16. Normal row metadata unchanged by the EAN Qty refactor", function () {
+  const r = run([invRow("WH1", "SKU-META", 5, {
+    unit: "CARTON_20PCS", stockQty: 3, partnerSku: "PSKU-1", product: "Widget", category: "Cat1",
+    conditionType: "Mới", freezeQty: 2, pendingIn: 1, pendingOut: 0, weightKg: 4.5, cbm: 0.02,
+  })], []);
+  const row = r.combined[0];
+  assert.strictEqual(row.warehouse, "WH1");
+  assert.strictEqual(row.partnerSku, "PSKU-1");
+  assert.strictEqual(row.product, "Widget");
+  assert.strictEqual(row.category, "Cat1");
+  assert.strictEqual(row.conditionType, "Mới");
+  assert.strictEqual(row.freezeQty, 2);
+  assert.strictEqual(row.pendingIn, 1);
+  assert.strictEqual(row.pendingOut, 0);
+  assert.strictEqual(row.weightKg, 4.5);
+  assert.strictEqual(row.cbm, 0.02);
+  assert.strictEqual(row.stockQty, 3);
+  assert.strictEqual(row.eanQty, 60); // 3 x 20, confirms the calc still ran correctly alongside untouched metadata
+});
+
+test("EAN-17. Web preview and Excel export contain identical EAN Qty values (same row objects)", function () {
+  const bundles = [{ sku: "TP-MIX-5", children: [
+    { childSku: "C1", childProduct: "P1", qty: 100 }, { childSku: "C2", childProduct: "P2", qty: 10 },
+  ] }];
+  const r = run([
+    invRow("WH1", "SKU-NORM", 5, { unit: "PCS", stockQty: 40 }),
+    invRow("WH1", "SKU-CART", 5, { unit: "CARTON_40PCS", stockQty: 12 }),
+    invRow("WH1", "TP-MIX-5", 1, { unit: "MIX", stockQty: 1 }),
+  ], bundles);
+  const previewEanQtys = r.combined.map(function (row) { return row.eanQty; });
+
+  const capturedAoa = [];
+  global.XLSX = {
+    utils: {
+      aoa_to_sheet: function (aoa) { capturedAoa.push(aoa); return { __aoa: aoa }; },
+      book_new: function () { return { sheets: {} }; },
+      book_append_sheet: function () {},
+      encode_range: function (rr) { return "A1:Z" + (rr.e.r + 1); },
+    },
+    write: function () { return new Uint8Array([1]); },
+  };
+  global.Blob = function (parts, opts) { this.size = 1; this.type = opts.type; };
+  mod.buildExportWorkbook(r.combined);
+  delete global.XLSX; delete global.Blob;
+
+  const aoa = capturedAoa[0];
+  const eanQtyColIdx = mod.EXPORT_HEADER.indexOf("EAN Qty");
+  const exportEanQtys = aoa.slice(1).map(function (row) { return row[eanQtyColIdx]; });
+  assert.deepStrictEqual(exportEanQtys, previewEanQtys); // preview and export must never disagree
+});
+
+test("EAN-18. Output schema still contains both Stock Qty and EAN Qty columns", function () {
+  assert.ok(mod.EXPORT_HEADER.indexOf("Stock Qty") !== -1);
+  assert.ok(mod.EXPORT_HEADER.indexOf("EAN Qty") !== -1);
+});
+
+test("EAN-19. No Available PCS / Total PCS / duplicate quantity column exists", function () {
+  assert.strictEqual(mod.EXPORT_HEADER.indexOf("Available PCS"), -1);
+  assert.strictEqual(mod.EXPORT_HEADER.indexOf("PCS per UOM"), -1);
+  assert.strictEqual(mod.EXPORT_HEADER.indexOf("Total PCS"), -1);
+  assert.strictEqual(mod.EXPORT_HEADER.length, 19);
+  const r = run([invRow("SG2", "SKU-SCHEMA", 5, { unit: "PCS", stockQty: 10 })], []);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(r.combined[0], "availablePcs"), false);
+});
+
+test("EAN-20. Only Available Qty > 0 source rows enter the final output", function () {
+  const r = run([
+    invRow("SG2", "SKU-OK", 1, { unit: "PCS", stockQty: 10 }),
+    invRow("SG2", "SKU-ZERO", 0, { unit: "PCS", stockQty: 10 }),
+    invRow("SG2", "SKU-NEG", -5, { unit: "PCS", stockQty: 10 }),
+  ], []);
+  assert.strictEqual(r.combined.length, 1);
+  assert.strictEqual(r.combined[0].barcode, "SKU-OK");
+});
+
+// ---- deriveEanQty direct unit tests (the shared helper itself) ----
+test("EAN-21. deriveEanQty: PCS branch returns Stock Qty untouched", function () {
+  const out = mod._internal.deriveEanQty({ unit: "PCS", stockQty: 40, isExpandedBundle: false, childQty: null, sourceEanQty: null });
+  assert.strictEqual(out.eanQty, 40);
+  assert.strictEqual(out.diagnostic, null);
+});
+
+test("EAN-22. deriveEanQty: CARTON branch multiplies, numeric string safe (\"12\" x 40 -> 480)", function () {
+  const out = mod._internal.deriveEanQty({ unit: "CARTON_40PCS", stockQty: "12", isExpandedBundle: false, childQty: null, sourceEanQty: null });
+  assert.strictEqual(out.eanQty, 480);
+  assert.strictEqual(typeof out.eanQty, "number");
+});
+
+test("EAN-23. deriveEanQty: isExpandedBundle always wins, ignoring unit/stockQty entirely", function () {
+  const out = mod._internal.deriveEanQty({ unit: "PCS", stockQty: 999, isExpandedBundle: true, childQty: 7, sourceEanQty: null });
+  assert.strictEqual(out.eanQty, 7);
+});
+
+test("EAN-24. deriveEanQty: blank/invalid Stock Qty on a PCS row -> blank + EAN_QTY_STOCK_INVALID", function () {
+  const out = mod._internal.deriveEanQty({ unit: "PCS", stockQty: null, isExpandedBundle: false, childQty: null, sourceEanQty: null });
+  assert.strictEqual(out.eanQty, null);
+  assert.strictEqual(out.diagnostic, "EAN_QTY_STOCK_INVALID");
+});
+
+test("EAN-25. deriveEanQty: unknown UOM falls back to trustworthy source EAN Qty, else blank + EAN_QTY_RULE_NOT_DETECTED", function () {
+  const withSource = mod._internal.deriveEanQty({ unit: "BOX", stockQty: 5, isExpandedBundle: false, childQty: null, sourceEanQty: 42 });
+  assert.strictEqual(withSource.eanQty, 42);
+  assert.strictEqual(withSource.diagnostic, null);
+  const withoutSource = mod._internal.deriveEanQty({ unit: "BOX", stockQty: 5, isExpandedBundle: false, childQty: null, sourceEanQty: null });
+  assert.strictEqual(withoutSource.eanQty, null);
+  assert.strictEqual(withoutSource.diagnostic, "EAN_QTY_RULE_NOT_DETECTED");
+});
+
 console.log("\n=== " + passed + " passed, " + failed + " failed ===\n");
 process.exit(failed ? 1 : 0);
