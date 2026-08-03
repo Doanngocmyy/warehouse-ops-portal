@@ -25,6 +25,9 @@
   // ---- Pre-inbound: OCR ảnh (drag/drop, paste, file) ----
   if (window.WOPOcrScan) WOPOcrScan.init();
 
+  // ---- Outbound: Real-Time Outbound Availability (Bundle-Aware Inventory Report) ----
+  if (window.WOPOutboundAvailability) WOPOutboundAvailability.init();
+
   // ---- flowchart interactivity ----
   const ioPanel = document.getElementById("io-detail");
   const exPanel = document.getElementById("ex-detail");

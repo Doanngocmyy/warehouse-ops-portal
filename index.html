@@ -619,9 +619,10 @@
 <section id="section-outbound" class="section">
   <div class="card">
     <h2>Outbound</h2>
-    <p class="desc">Detect Outbound Type (CARTON hay PCS cho từng dòng order, dựa theo tồn khả dụng realtime) và Suggest Convert UOM (gợi ý mở bao nhiêu carton khi PCS lẻ không đủ — "xả lẻ"). Chạy 100% client-side, file Order/Tồn kho không rời khỏi trình duyệt.</p>
+    <p class="desc">Detect Outbound Type (CARTON hay PCS cho từng dòng order, dựa theo tồn khả dụng realtime), Suggest Convert UOM (gợi ý mở bao nhiêu carton khi PCS lẻ không đủ — "xả lẻ"), và Real-Time Outbound Availability (tổng hợp tồn khả dụng realtime cho sản phẩm bundle, tự loại bỏ thùng mix đã hết tồn). Chạy 100% client-side, file Order/Tồn kho không rời khỏi trình duyệt.</p>
     <div class="subtabs">
       <button data-sub="outbound-uom" class="active">Detect Outbound Type &amp; Suggest Convert UOM</button>
+      <button data-sub="outbound-availability">Real-Time Outbound Availability</button>
       <button data-sub="outbound-vas">VAS / Carton Label Tools</button>
     </div>
 
@@ -646,6 +647,72 @@
           <div class="log-box" id="outboundUomLog"></div>
           <div class="result-files" id="outboundUomResults"></div>
         </div>
+      </div>
+    </div>
+
+    <div class="subsection" id="sub-outbound-availability">
+      <div class="rtoa-title-block">
+        <h3 style="margin:0;">Real-Time Outbound Availability</h3>
+        <div class="rtoa-subtitle">Bundle-Aware Inventory Report</div>
+      </div>
+      <p class="desc" style="margin-top:6px;">Tổng hợp tồn kho khả dụng realtime cho sản phẩm outbound, bao gồm xử lý sản phẩm bundle và tự động loại bỏ các thùng mix đã hết tồn.</p>
+      <div class="rtoa-instructions">Upload the bundle mapping and latest real-time inventory report. The system will retain only Child EANs with Available Qty greater than zero. Mọi Child EAN trong file bundle đều được đối chiếu lại với file tồn kho realtime mới nhất — chỉ giữ lại dòng có Available Qty &gt; 0.</div>
+
+      <div class="grid2" style="margin-top:14px;">
+        <div class="panel">
+          <h4>1. Bundle Child Product File</h4>
+          <label class="small">Danh sách sản phẩm con của bundle (.xlsx)</label><br>
+          <input type="file" id="rtoaBundleInput" accept=".xlsx,.xls" style="margin:6px 0 12px;">
+          <div class="status" id="rtoaBundleStatus">Chưa chọn file.</div>
+        </div>
+        <div class="panel">
+          <h4>2. Real-Time Detailed Inventory File</h4>
+          <label class="small">File tồn kho khả dụng theo thời gian thực — <b>không</b> phải file đơn outbound/lịch sử xuất kho (.xlsx)</label><br>
+          <input type="file" id="rtoaInventoryInput" accept=".xlsx,.xls" style="margin:6px 0 12px;">
+          <div class="status" id="rtoaInventoryStatus">Chưa chọn file.</div>
+        </div>
+      </div>
+
+      <details class="rtoa-mapping-details">
+        <summary>3. File Mapping — cột đã nhận diện tự động (bấm để xem/chỉnh)</summary>
+        <div class="rtoa-mapping-body" id="rtoaMappingBody"></div>
+      </details>
+
+      <div class="panel" id="rtoaFilterPanel" style="margin-top:14px;">
+        <h4>4. Chọn Bundle SKU &amp; bộ lọc</h4>
+        <input type="text" id="rtoaBundleSearch" placeholder="Tìm Bundle SKU hoặc tên bundle..." style="width:100%; max-width:420px; padding:7px 10px; border:1px solid var(--line); border-radius:6px; font-size:13px; margin-bottom:8px;">
+        <br>
+        <label class="small"><input type="checkbox" id="rtoaSelectAll"> Chọn tất cả Bundle SKU</label>
+        <div id="rtoaBundleList" class="rtoa-bundle-list"></div>
+        <div id="rtoaWarehouseFilter" class="rtoa-warehouse-filter" style="display:none;"></div>
+        <div style="margin-top:12px;">
+          <button class="btn" id="rtoaRunBtn" disabled>Run Report</button>
+          <button class="btn secondary" id="rtoaResetBtn">Reset</button>
+        </div>
+        <div class="log-box" id="rtoaLog"></div>
+      </div>
+
+      <div id="rtoaResultsWrap" style="display:none;">
+        <h4 style="margin:18px 0 8px;">5. Summary</h4>
+        <div class="summary-cards" id="rtoaSummaryCards"></div>
+
+        <div class="panel" style="margin-top:14px;">
+          <h4>Reconciliation</h4>
+          <table class="ref-table" id="rtoaReconTable"></table>
+        </div>
+
+        <div class="panel" style="margin-top:14px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+            <h4 style="margin:0;">Available Inventory</h4>
+            <button class="btn" id="rtoaExportBtn" disabled>⬇ Export Excel</button>
+          </div>
+          <div class="table-scroll" id="rtoaAvailableTableWrap"></div>
+        </div>
+
+        <details class="panel rtoa-excluded-details" style="margin-top:14px;">
+          <summary>Excluded / Unavailable Child EANs (<span id="rtoaExcludedCount">0</span>)</summary>
+          <div class="table-scroll" id="rtoaExcludedTableWrap"></div>
+        </details>
       </div>
     </div>
 
@@ -765,6 +832,7 @@
 <script src="js/asn-mix.js?v=20260720a"></script>
 <script src="js/pdf-order.js?v=20260720a"></script>
 <script src="js/outbound-uom.js?v=20260720a"></script>
+<script src="js/outbound-availability.js?v=20260803a"></script>
 <script src="js/flowcharts.js?v=20260720a"></script>
 <script src="js/ocr-scan.js?v=20260720a"></script>
 <script src="js/app.js?v=20260720a"></script>

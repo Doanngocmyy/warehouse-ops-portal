@@ -102,3 +102,38 @@ a.vas-link-btn { display:inline-block; background:var(--green); color:#fff; padd
 .ocr-thumb-remove { position:absolute; top:2px; right:2px; background:rgba(15,23,42,.75); color:#fff; border:none; border-radius:50%; width:18px; height:18px; font-size:10px; line-height:1; cursor:pointer; padding:0; }
 .ocr-result { width:100%; box-sizing:border-box; margin-top:8px; padding:10px; border:1px solid var(--line); border-radius:8px; font-family:monospace; font-size:12.5px; resize:vertical; white-space:pre-wrap; }
 
+
+/* ---- Real-Time Outbound Availability (Bundle-Aware Inventory Report) ---- */
+.rtoa-title-block { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+.rtoa-subtitle { font-size:12.5px; font-weight:700; color:var(--purple); text-transform:uppercase; letter-spacing:.03em; }
+.rtoa-instructions { background:#f5f3ff; border:1px solid #ddd6fe; color:#4c1d95; border-radius:8px; padding:10px 12px; font-size:12.5px; line-height:1.5; }
+
+.rtoa-mapping-details { margin-top:14px; border:1px solid var(--line); border-radius:10px; padding:10px 14px; background:#fff; }
+.rtoa-mapping-details > summary { cursor:pointer; font-weight:600; font-size:13px; padding:4px 0; }
+.rtoa-mapping-body { margin-top:8px; }
+.rtoa-mapping-body h5 { font-size:12.5px; margin:10px 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.02em; }
+.rtoa-map-row { display:flex; align-items:center; gap:8px; padding:3px 0; font-size:12.5px; }
+.rtoa-map-row .rtoa-map-label { width:150px; flex-shrink:0; color:var(--ink); font-family:monospace; }
+.rtoa-map-row select { flex:1; max-width:360px; }
+.rtoa-map-badge { font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:10px; }
+.rtoa-map-badge.ok { background:#dcfce7; color:#166534; }
+.rtoa-map-badge.warn { background:#fef3c7; color:#92400e; }
+
+.rtoa-bundle-list { max-height:220px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:6px 10px; margin-top:8px; background:#f8fafc; }
+.rtoa-bundle-row { display:flex; align-items:center; gap:8px; font-size:12.5px; padding:4px 2px; cursor:pointer; }
+.rtoa-bundle-row:hover { background:#eef2ff; border-radius:4px; }
+.rtoa-warehouse-filter { margin-top:12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.rtoa-wh-chip { display:inline-flex; align-items:center; gap:5px; font-size:12px; border:1px solid var(--line); border-radius:16px; padding:4px 10px; cursor:pointer; background:#fff; }
+
+.summary-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+.summary-card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px; text-align:center; }
+.summary-card-value { font-size:22px; font-weight:800; color:var(--purple); }
+.summary-card-label { font-size:11.5px; color:var(--muted); margin-top:4px; }
+
+.table-scroll { overflow-x:auto; margin-top:10px; border:1px solid var(--line); border-radius:8px; }
+table.data-table { border-collapse:collapse; width:100%; min-width:1200px; font-size:11.5px; white-space:nowrap; }
+table.data-table th { background:#111827; color:#fff; padding:7px 8px; text-align:left; position:sticky; top:0; }
+table.data-table td { border-bottom:1px solid var(--line); padding:6px 8px; }
+table.data-table tr:nth-child(even) td { background:#f8fafc; }
+.rtoa-reason-badge { background:#fee2e2; color:#991b1b; font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:10px; white-space:nowrap; }
+.rtoa-excluded-details > summary { cursor:pointer; font-weight:700; }
