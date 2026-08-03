@@ -299,5 +299,55 @@ test("Extra: negative/invalid Available Qty removed with correct reasons", funct
   assert.deepStrictEqual(reasons, ["AVAILABLE_QTY_INVALID", "AVAILABLE_QTY_INVALID", "AVAILABLE_QTY_NEGATIVE"]);
 });
 
+
+// ---- Default output sort: Warehouse -> Product Code, bundle children
+// grouped together in original mapping order ----
+test("21. compareCodes: numeric-string codes compare numerically, not lexically", function () {
+  assert.ok(mod._internal.compareCodes("9", "10") < 0);   // NOT lexical ("10" < "9" as strings)
+  assert.ok(mod._internal.compareCodes("100", "20") > 0);
+  assert.strictEqual(mod._internal.compareCodes("A", "A"), 0);
+});
+
+test("22. compareCodes: alphanumeric Bundle SKUs fall back to string order", function () {
+  assert.ok(mod._internal.compareCodes("TP-001", "TP-002") < 0);
+  assert.ok(mod._internal.compareCodes("TP-002", "TP-001") > 0);
+});
+
+test("23. Default sort groups bundle child rows together, in original mapping order", function () {
+  const bundles = [{ sku: "TP-SORT", children: [
+    { childSku: "Z-LAST", childProduct: "Z", qty: 1 }, // deliberately NOT alphabetical
+    { childSku: "A-FIRST", childProduct: "A", qty: 2 },
+    { childSku: "M-MID", childProduct: "M", qty: 3 },
+  ] }];
+  const r = run([invRow("SG2", "TP-SORT", 1, { unit: "MIX" })], bundles);
+  assert.strictEqual(r.combined.length, 3);
+  // all 3 rows adjacent (same barcode = bundle SKU) AND in the exact
+  // original mapping order (Z, A, M) — NOT re-alphabetized.
+  assert.deepStrictEqual(r.combined.map(function (row) { return row.childEan; }), ["Z-LAST", "A-FIRST", "M-MID"]);
+  assert.ok(r.combined.every(function (row) { return row.barcode === "TP-SORT"; }));
+});
+
+test("24. Default sort: normal rows ordered by Warehouse -> Product Code", function () {
+  const r = run([
+    invRow("WH-South", "SKU-002", 1),
+    invRow("WH-North", "SKU-100", 1),
+    invRow("WH-North", "SKU-005", 1),
+  ], []);
+  const order = r.combined.map(function (row) { return row.warehouse + "|" + row.barcode; });
+  assert.deepStrictEqual(order, ["WH-North|SKU-005", "WH-North|SKU-100", "WH-South|SKU-002"]);
+});
+
+test("25. Default sort: mixed normal + bundle rows interleave correctly by Warehouse -> Barcode", function () {
+  const bundles = [{ sku: "SKU-050", children: [{ childSku: "C1", childProduct: "C1", qty: 1 }, { childSku: "C2", childProduct: "C2", qty: 2 }] }];
+  const r = run([
+    invRow("WH1", "SKU-100", 1),
+    invRow("WH1", "SKU-050", 1, { unit: "MIX" }), // bundle carton whose "barcode" sorts between 010 and 100
+    invRow("WH1", "SKU-010", 1),
+  ], bundles);
+  const seq = r.combined.map(function (row) { return row.barcode; });
+  assert.deepStrictEqual(seq, ["SKU-010", "SKU-050", "SKU-050", "SKU-100"]); // bundle's 2 children stay adjacent, in place by barcode
+  assert.deepStrictEqual(r.combined.map(function (row) { return row.childEan; }).slice(1, 3), ["C1", "C2"]); // original mapping order preserved
+});
+
 console.log("\n=== " + passed + " passed, " + failed + " failed ===\n");
 process.exit(failed ? 1 : 0);

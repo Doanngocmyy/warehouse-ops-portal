@@ -87,6 +87,19 @@ window.WOPOutboundAvailability = (function () {
     return normalizeHeaderText(unit) === "mix";
   }
 
+  // Numeric-aware comparator for product/bundle codes (Warehouse -> Barcode
+  // sort key): compares as numbers when both sides are pure digit strings
+  // (typical EANs), otherwise falls back to plain string order (typical
+  // alphanumeric Bundle SKUs / Partner SKUs).
+  function compareCodes(a, b) {
+    const as = a === null || a === undefined ? "" : String(a);
+    const bs = b === null || b === undefined ? "" : String(b);
+    if (as === bs) return 0;
+    const an = /^\d+$/.test(as), bn = /^\d+$/.test(bs);
+    if (an && bn) { const na = Number(as), nb = Number(bs); return na < nb ? -1 : (na > nb ? 1 : 0); }
+    return as < bs ? -1 : 1;
+  }
+
   function escapeHtml(s) {
     return String(s === null || s === undefined ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -409,7 +422,7 @@ window.WOPOutboundAvailability = (function () {
         // comes straight from the mapping's SL — never Available Qty,
         // never a multiplication (1 Bundle SKU already = 1 available carton).
         availableBundlesExpanded++;
-        bundle.children.forEach(function (child) {
+        bundle.children.forEach(function (child, childIdx) {
           bundleChildRowsGenerated++;
           combined.push({
             warehouse: ir.warehouse, barcode: bundle.bundleSku, partnerSku: ir.partnerSku, childEan: child.childSku,
@@ -417,7 +430,7 @@ window.WOPOutboundAvailability = (function () {
             stockQty: ir.stockQty, freezeQty: ir.freezeQty, pendingIn: ir.pendingIn, pendingOut: ir.pendingOut,
             weightKg: ir.weightKg, cbm: ir.cbm,
             lastStockoutDate: ir.lastStockoutDate, lastOutboundDate: ir.lastOutboundDate, lastInboundDate: ir.lastInboundDate,
-            eanQty: child.qty, _rowType: "bundleChild", _bundleSku: bundle.bundleSku,
+            eanQty: child.qty, _rowType: "bundleChild", _bundleSku: bundle.bundleSku, _childOrder: childIdx,
           });
         });
         return;
@@ -440,8 +453,25 @@ window.WOPOutboundAvailability = (function () {
         stockQty: ir.stockQty, freezeQty: ir.freezeQty, pendingIn: ir.pendingIn, pendingOut: ir.pendingOut,
         weightKg: ir.weightKg, cbm: ir.cbm,
         lastStockoutDate: ir.lastStockoutDate, lastOutboundDate: ir.lastOutboundDate, lastInboundDate: ir.lastInboundDate,
-        eanQty: ir.invEanQty, _rowType: "normal",
+        eanQty: ir.invEanQty, _rowType: "normal", _childOrder: 0,
       });
+    });
+
+    // Default output order (applied automatically, before any interactive
+    // on-screen sort click): Warehouse -> Product Code. "Product Code" is
+    // the Barcode field, which for a normal row IS its own code, and for a
+    // bundle-expanded row is the shared Bundle SKU — so grouping by
+    // (warehouse, barcode) automatically clusters every bundle's child
+    // rows together, and _childOrder (their original position in the
+    // bundle mapping file) keeps them in that original order within the
+    // group. Array.prototype.sort is stable (ES2019+), so this is
+    // deterministic.
+    combined.sort(function (a, b) {
+      const w = compareCodes(a.warehouse, b.warehouse);
+      if (w) return w;
+      const c = compareCodes(a.barcode, b.barcode);
+      if (c) return c;
+      return (a._childOrder || 0) - (b._childOrder || 0);
     });
 
     return {
@@ -508,7 +538,7 @@ window.WOPOutboundAvailability = (function () {
     ["lastStockoutDate", "Last Stockout Date"], ["lastOutboundDate", "Last Outbound Date"], ["lastInboundDate", "Last Inbound Date"],
     ["eanQty", "EAN Qty"],
   ];
-  const SEARCH_FIELDS = ["barcode", "partnerSku", "childEan", "product", "warehouse"];
+  const SEARCH_FIELDS = ["barcode", "partnerSku", "childEan", "product"]; // per spec: search these 4 fields simultaneously (Warehouse has its own dedicated filter)
   const PAGE_SIZE = 100;
 
   function init() {
@@ -801,10 +831,12 @@ window.WOPOutboundAvailability = (function () {
       const startIdx = currentPage * PAGE_SIZE;
       const pageRows = rows.slice(startIdx, startIdx + PAGE_SIZE);
 
-      const filterNote = searchQuery.trim() ? " (lọc từ " + lastCombined.length + " dòng)" : "";
+      // Always shows the exact count of rows currently matching the filter
+      // (searchQuery) — this is the number that also gets exported to Excel.
+      const filterNote = searchQuery.trim() ? (" — tổng " + lastCombined.length + " dòng trước khi lọc") : "";
       pagerInfo.textContent = rows.length === 0
-        ? "0 rows" + filterNote
-        : ("Hiển thị " + (startIdx + 1) + "–" + Math.min(startIdx + PAGE_SIZE, rows.length) + " / " + rows.length + " rows" + filterNote);
+        ? ("0 rows" + filterNote)
+        : ("Hiển thị " + (startIdx + 1) + "–" + Math.min(startIdx + PAGE_SIZE, rows.length) + " / " + rows.length + " rows sau lọc" + filterNote);
       pagerPrev.disabled = currentPage <= 0;
       pagerNext.disabled = currentPage >= totalPages - 1;
 
@@ -953,6 +985,7 @@ window.WOPOutboundAvailability = (function () {
       normalizeHeaderText: normalizeHeaderText, normalizeEan: normalizeEan,
       normalizeBundleSkuDisplay: normalizeBundleSkuDisplay, normalizeBundleSkuKey: normalizeBundleSkuKey,
       toNumberOrNull: toNumberOrNull, detectColumns: detectColumns, fixSheetRange: fixSheetRange, isMixUnit: isMixUnit,
+      compareCodes: compareCodes,
     },
   };
 
