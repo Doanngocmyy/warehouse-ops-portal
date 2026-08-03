@@ -236,6 +236,31 @@ test("Extra: detectColumns resolves real Inventory screenshot headers", function
   assert.strictEqual(det.mapping.eanQty, 19); // last "EAN Qty" column, not the "Child EAN" one
 });
 
+// Regression test: real "Tồn kho theo thời gian thực" export uploaded by the
+// user (2026-08-03) — column order/wording differs slightly from the
+// screenshot-based test above (e.g. "Ngày hết tồn gần nhất" for stockout,
+// "Phong tỏa" for freeze, no separate Barcode column). This caught a real
+// bug where the 3 date columns were mismapped/unmapped and Freeze Qty was
+// unmapped — required columns (Child EAN, Available Qty) were unaffected,
+// but display accuracy for these optional columns was wrong.
+test("Extra: detectColumns resolves the REAL uploaded inventory export headers", function () {
+  const header = ["#", "Kho", "Mã sản phẩm", "Mã SKU đối tác", "Tên sản phẩm", "Danh mục", "ĐVT", "Tình trạng hàng hoá",
+    "Tồn kho", "Phong tỏa", "Khả dụng", "Đi đường", "Chờ nhập", "Chờ xuất", "Khối lượng (Kg)", "CBM",
+    "Ngày hết tồn gần nhất", "Ngày nhập kho gần nhất", "Ngày xuất kho gần nhất"];
+  const det = mod._internal.detectColumns(header, mod.INVENTORY_COLUMN_DEFS);
+  assert.strictEqual(det.unresolvedRequired.length, 0);
+  assert.strictEqual(det.mapping.warehouse, 1);
+  assert.strictEqual(det.mapping.childEan, 2);
+  assert.strictEqual(det.mapping.partnerSku, 3);
+  assert.strictEqual(det.mapping.conditionType, 7);
+  assert.strictEqual(det.mapping.stockQty, 8);
+  assert.strictEqual(det.mapping.freezeQty, 9);
+  assert.strictEqual(det.mapping.availableQty, 10);
+  assert.strictEqual(det.mapping.lastStockoutDate, 16); // "Ngày hết tồn gần nhất"
+  assert.strictEqual(det.mapping.lastInboundDate, 17);  // "Ngày nhập kho gần nhất"
+  assert.strictEqual(det.mapping.lastOutboundDate, 18); // "Ngày xuất kho gần nhất"
+});
+
 test("Extra: parseBundleFile end-to-end against real reference example rows", function () {
   const rows = [
     ["Bundle SKU (Barcode)", "Tên Bundle", "Child SKU (Barcode)", "Tên sản phẩm con", "Mã ĐVT", "Tên ĐVT", "SL", "Tỷ Lệ Khả Dụng (%)"],
