@@ -656,7 +656,7 @@
         <div class="rtoa-subtitle">Bundle-Aware Inventory Report</div>
       </div>
       <p class="desc" style="margin-top:6px;">Tổng hợp tồn kho khả dụng realtime cho sản phẩm outbound, bao gồm xử lý sản phẩm bundle và tự động loại bỏ các thùng mix đã hết tồn.</p>
-      <div class="rtoa-instructions">Upload the bundle mapping and latest real-time inventory report. The system will retain only Child EANs with Available Qty greater than zero. Mọi Child EAN trong file bundle đều được đối chiếu lại với file tồn kho realtime mới nhất — chỉ giữ lại dòng có Available Qty &gt; 0.</div>
+      <div class="rtoa-instructions">Upload the bundle mapping and latest real-time inventory report. A Bundle SKU represents one physical bundle carton — the system looks up each Bundle SKU directly in the inventory file and keeps only cartons with Available Qty greater than zero. Mỗi Bundle SKU là 1 thùng carton vật lý — hệ thống tra trực tiếp Bundle SKU trong file tồn kho realtime, chỉ giữ lại carton có Available Qty &gt; 0; các dòng Child SKU chỉ là thành phần bên trong carton đó, không quyết định tồn kho.</div>
 
       <div class="grid2" style="margin-top:14px;">
         <div class="panel">
@@ -710,7 +710,7 @@
         </div>
 
         <details class="panel rtoa-excluded-details" style="margin-top:14px;">
-          <summary>Excluded / Unavailable Child EANs (<span id="rtoaExcludedCount">0</span>)</summary>
+          <summary>Excluded / Unavailable Bundle Cartons (<span id="rtoaExcludedCount">0</span>)</summary>
           <div class="table-scroll" id="rtoaExcludedTableWrap"></div>
         </details>
       </div>
