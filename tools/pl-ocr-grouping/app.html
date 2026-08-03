@@ -28,6 +28,13 @@
   .stage-badge.err { background:#fee2e2; color:#991b1b; }
   .manual-panel { margin-top:16px; }
   .manual-panel textarea { width:100%; padding:6px 8px; border:1px solid #e2e8f0; border-radius:6px; font-size:12.5px; font-family:inherit; resize:vertical; }
+  .run-summary { margin-top:16px; padding:12px 14px; border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc; }
+  .run-summary .version-line { font-size:11.5px; color:#64748b; margin-bottom:8px; }
+  .run-summary .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:8px 14px; }
+  .run-summary .stat { font-size:12.5px; color:#334155; }
+  .run-summary .stat b { display:block; font-size:17px; color:#0f172a; }
+  .run-summary .stat.err b { color:#b91c1c; }
+  .run-summary .dl-log { margin-top:10px; font-size:12px; }
 </style>
 </head>
 <body>
@@ -107,6 +114,7 @@
     </div>
 
     <div class="log-box" id="logBox" style="display:none;"></div>
+    <div class="run-summary" id="runSummary" style="display:none;"></div>
     <div class="result-files" id="resultFiles"></div>
   </div>
 
@@ -147,8 +155,23 @@ const mainStatus       = document.getElementById('mainStatus');
 const logBox           = document.getElementById('logBox');
 const resultFiles      = document.getElementById('resultFiles');
 const stageBadge       = document.getElementById('stageBadge');
+const runSummaryEl     = document.getElementById('runSummary');
 
 let selectedPdfEntries = null; // [{path, file}], path = relative path under the PDF folder
+let runSummary_lastLogText = '';
+let runSummary_lastJson = null;
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 advToggle.addEventListener('click', () => {
   advBox.classList.toggle('show');
@@ -328,7 +351,15 @@ async function runPipeline() {
       .replace('__MASTER_DATA_SHEET__', pyStrLiteral(masterSheetInput.value.trim()))
       .replace('__RECURSIVE__', recursiveCheck.checked ? 'True' : 'False')
       .replace('__MANUAL_CONSIGNEE__', pyStrLiteral(manualConsigneeInput.value.trim()))
-      .replace('__MANUAL_NOTIFY_PARTY__', pyStrLiteral(manualNotifyInput.value.trim()));
+      .replace('__MANUAL_NOTIFY_PARTY__', pyStrLiteral(manualNotifyInput.value.trim()))
+      // No build step serves this page (plain static file on GitHub Pages), so
+      // there is no real git-commit-at-build-time value to inject here. Left
+      // blank on purpose rather than faking a SHA -- PARSER_VERSION (shown in
+      // the run summary below) plus the page's own cache-busted fetch above
+      // are what let you verify the browser loaded the latest source; cross-
+      // check PARSER_VERSION against the pl_ocr_core.py history in the repo
+      // for the exact commit.
+      .replace('__GIT_COMMIT__', pyStrLiteral(''));
 
     pyodide.setStdout({ batched: (s) => log(s + '\n') });
     pyodide.setStderr({ batched: (s) => log(s + '\n') });
@@ -337,6 +368,54 @@ async function runPipeline() {
     log('\n----- Bắt đầu chạy pipeline -----\n');
 
     await pyodide.runPythonAsync(coreSrc);
+
+    // ── Run summary (spec section 13) ──────────────────────────────────
+    // RUN_SUMMARY is a plain dict left in the Python global namespace by
+    // pl_ocr_core.py's entry-point block; pyodide.globals exposes that same
+    // namespace here so the page can render it without re-parsing the log.
+    let runSummary = null;
+    try {
+      const pySummary = pyodide.globals.get('RUN_SUMMARY');
+      runSummary = pySummary ? pySummary.toJs({ dict_converter: Object.fromEntries }) : null;
+      if (pySummary && pySummary.destroy) pySummary.destroy();
+    } catch (e) {
+      log('\n(Không đọc được RUN_SUMMARY để hiển thị tóm tắt: ' + e.message + ')\n');
+    }
+    if (runSummary) {
+      const errClass = (n) => (n > 0 ? ' err' : '');
+      runSummary_lastLogText = logBox.textContent;
+      runSummary_lastJson = runSummary;
+      runSummary.push_ok = true;
+      const stat = (label, value, isErr) => `<div class="stat${isErr ? ' err' : ''}"><b>${value}</b>${label}</div>`;
+      runSummaryEl.innerHTML =
+        `<div class="version-line">pl_ocr_core <b>${runSummary.parser_version || '(unknown)'}</b>` +
+        (runSummary.git_commit ? ` — commit <code>${runSummary.git_commit}</code>` : '') +
+        ` — nếu số này không khớp với commit mới nhất trên GitHub, trang đang chạy bản cache cũ, hãy hard-refresh (Ctrl/Cmd+Shift+R).</div>` +
+        `<div class="grid">` +
+        stat('PDF đã xử lý', runSummary.pdf_files_processed) +
+        stat('Package tìm thấy', runSummary.packages_found) +
+        stat('Item tìm thấy', runSummary.items_found) +
+        stat('Quantity check OK', runSummary.qty_checks_passed) +
+        stat('Quantity check FAIL', runSummary.qty_checks_failed, runSummary.qty_checks_failed > 0) +
+        stat('DIM rows loaded', runSummary.dim_rows_loaded) +
+        stat('DIM khớp chính xác', runSummary.dim_exact_matched) +
+        stat('DIM cần review (CBM)', runSummary.dim_review_required, runSummary.dim_review_required > 0) +
+        stat('DIM không khớp', runSummary.dim_mismatched, runSummary.dim_mismatched > 0) +
+        stat('Duplicate đã loại', runSummary.duplicate_items_skipped) +
+        stat('Lỗi (errors)', runSummary.errors, runSummary.errors > 0) +
+        `</div>` +
+        `<div class="dl-log"><a href="#" id="dlLogLink">⬇ Tải diagnostic log (.txt)</a> ·  ` +
+        `<a href="#" id="dlSummaryLink">⬇ Tải RUN_SUMMARY (.json)</a></div>`;
+      runSummaryEl.style.display = 'block';
+      document.getElementById('dlLogLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        downloadText('pl_ocr_diagnostic_log.txt', runSummary_lastLogText);
+      });
+      document.getElementById('dlSummaryLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        downloadText('pl_ocr_run_summary.json', JSON.stringify(runSummary_lastJson, null, 2));
+      });
+    }
 
     log('\n----- Hoàn tất, đang đóng gói kết quả -----\n');
     setStage('busy', 'Đang đóng gói file kết quả...');

@@ -22,17 +22,27 @@ there. PO No. / Invoice No. / 中国标签名称 are still intentionally left
 blank — fill them in manually.
 """
 from __future__ import annotations
-import re, sys, logging, unicodedata
+import re, sys, logging, unicodedata, difflib, json
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import pdfplumber
+import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.styles.borders import Border, Side
 from openpyxl.utils import get_column_letter
+
+# ── Version / build identity ────────────────────────────────────────────────
+# Shown in the app.html run summary so it's possible to verify the browser is
+# actually running this revision (not a stale cached copy) and to tag every
+# exported Audit_Summary sheet with the exact code that produced it.
+PARSER_VERSION = "v10-audit-2026-08"
+GIT_COMMIT = __GIT_COMMIT__
+LAST_RUN_META: Optional[dict] = None  # populated by run_pipeline(), read by app.html for the UI summary
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -65,6 +75,14 @@ MANUAL_NOTIFY_PARTY = __MANUAL_NOTIFY_PARTY__
 VALID_UNITS  = {"PCS", "SET", "CARTON", "CTN", "BOX", "PACK"}
 UNIT_PAT     = "|".join(VALID_UNITS)
 STATUS_WORDS = {"MOI", "NEW", "USED", "CU"}
+# Canonical display form for each condition word we recognise (used when a
+# "Tinh trang" cell is split out of a merged "Tinh trang So luong" cell —
+# see RE_COND_QTY below — so the exported value is stable regardless of
+# accented/unaccented spelling in the source PDF).
+CONDITION_CANON = {
+    "MOI": "Mới", "NEW": "New", "CU": "Cũ", "USED": "Used",
+    "REFURBISHED": "Refurbished",
+}
 VN_KEYWORDS  = {"POP", "JION", "QIFENG", "SBGEAR", "SB_GEAR"}
 TABLE_HDR_KW = {"stt","barcode","ma vach","ma hang","ten hang",
                 "don vi","so luong","tinh trang","condition","quantity"}
@@ -80,23 +98,95 @@ RE_TOTAL = re.compile(
     re.IGNORECASE | re.UNICODE)
 
 RE_BARCODE   = re.compile(r'(?<!\d)(\d{8,14})(?!\d)')
+RE_GTIN13    = re.compile(r'^\d{13}$')
 RE_PROD_CODE = re.compile(r'(TP-[A-Z0-9]{2,}(?:-[A-Z0-9]+)*-?)', re.IGNORECASE)
 RE_TERMINAL  = re.compile(rf'({UNIT_PAT})\s+[^\d\n]+?\s+([\d,]+)\s*$',
                           re.IGNORECASE | re.UNICODE)
-RE_NOISE     = re.compile(
-    r'^(STT|No\.\s*$|PACKING\s*LIST|DANH\s*S[AÁ]CH|Page\s*\d)',
+# Bug #9 in the audit: pdfplumber sometimes merges the "Tinh trang" (condition)
+# and "So luong" (quantity) columns into a single cell, e.g. "Moi 12". Left
+# unsplit, that cell fails every classifier below (not a barcode, not a SKU,
+# not a bare unit, not a bare integer) and silently falls through to the
+# product-name bucket -- the item is then dropped for quantity==0. This
+# pattern recognises and splits that merged cell.
+RE_COND_QTY  = re.compile(
+    r'^\s*(M[oớ]i|C[uũ]|New|Used|Refurbished)\s+([\d][\d,\.]*)\s*$',
+    re.IGNORECASE | re.UNICODE)
+# Bug #6: a SKU suffix like "-BOX" that lands on its own on the next physical
+# row/line (continuation of the previous item's code) instead of staying
+# attached to the code cell.
+RE_SKU_SUFFIX_ROW = re.compile(r'^-?(BOX|SET|PACK|CTN|CARTON)$', re.IGNORECASE)
+# Header/footer noise that must never be parsed as an item row (bug #12):
+# browser tab title ("about:blank"), print timestamp, page numbers, and the
+# "# Barcode  Ma san pham ..." table header repeated as plain text on every
+# page once the table border detector fails to catch it as a real table.
+RE_NOISE = re.compile(
+    r'^(STT\b|No\.\s*$|PACKING\s*LIST|DANH\s*S[AÁ]CH|Page\s*\d+\s*(/|of)?\s*\d*\s*$'
+    r'|about:blank'
+    r'|\d{1,2}/\d{1,2}/\d{2,4},?\s*\d{1,2}:\d{2}\s*(AM|PM)?'
+    r'|#?\s*Barcode\s+M[aã]\s*s[aả]n\s*ph[aẩ]m'
+    r'|^Kho\s|^Hotline|^\u0110[iị]a\s*ch[iỉ]|^S[oố]\s*\u0111i[eệ]n\s*tho[aạ]i'
+    r'|^Th[oô]ng\s*tin\s)',
     re.IGNORECASE | re.UNICODE)
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+# Unicode artifacts observed in real PL PDFs (bug #13 in the audit): the text
+# layer sometimes contains U+FFFE / U+FFFF ("noncharacter" codepoints) or a
+# Unicode dash variant (en dash, em dash, non-breaking hyphen, ...) in place
+# of a plain ASCII '-'; zero-width characters (ZWSP/ZWNJ/ZWJ/word joiner/BOM/
+# soft hyphen) and NBSP-family spaces also show up inside otherwise-
+# contiguous codes. All normalization below funnels through one function so
+# every caller (DIM ref/pkg keys, SKU keys, display codes) handles these the
+# same way instead of each reimplementing a partial fix.
+_ZERO_WIDTH_RE    = re.compile('[\u200B\u200C\u200D\u2060\uFEFF\xad]')
+_DASH_VARIANTS_RE = re.compile('[\u2010\u2011\u2012\u2013\u2014\u2015\uFFFE\uFFFF]')
+_NBSP_RE          = re.compile('[\xa0\u202f]')
+
+def fix_unicode_artifacts(s) -> str:
+    """Canonical Unicode cleanup shared by every code/reference normalizer:
+    NFKC-fold, convert PDF-extraction dash artifacts (U+FFFE/U+FFFF, en/em
+    dash, non-breaking hyphen, ...) to a plain '-', drop zero-width
+    characters, convert NBSP-like spaces to a normal space, then collapse any
+    whitespace (including a literal newline) that sits directly around a '-'
+    so a code split across a line ("...-56-\nBOX") re-joins into one token
+    ("...-56-BOX")."""
+    if s is None:
+        return ""
+    s = unicodedata.normalize("NFKC", str(s))
+    s = _DASH_VARIANTS_RE.sub("-", s)
+    s = _ZERO_WIDTH_RE.sub("", s)
+    s = _NBSP_RE.sub(" ", s)
+    s = re.sub(r"\s*-\s*", "-", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+def normalize_code(text) -> str:
+    """Display-safe code normalizer for SKU / package / reference codes:
+    fixes Unicode artifacts via fix_unicode_artifacts(), then strips every
+    remaining whitespace (a code never legitimately contains one) and
+    upper-cases. Keeps hyphens intact, unlike normalize_sku_key() below,
+    which is a stricter matching key. Never fuzzy-corrects characters (no
+    O<->0 / I<->1 substitution) — only Unicode-artifact cleanup."""
+    if text is None:
+        return ""
+    text = fix_unicode_artifacts(text)
+    text = re.sub(r"\s+", "", text)
+    return text.upper()
+
 def strip_accents(s: str) -> str:
     nfd = unicodedata.normalize('NFD', str(s).strip())
     return ''.join(c for c in nfd if unicodedata.category(c) != 'Mn').upper()
 
 def normalize(s: str) -> str:
+    s = fix_unicode_artifacts(s)
     s = strip_accents(s)
     s = re.sub(r'[^\x20-\x7E]', '', s)
     s = re.sub(r'\s*[\(\[]\d+[\)\]]', '', s)
     return s.strip()
+
+def is_valid_gtin13(s: str) -> bool:
+    """Strict GTIN validation per spec: exactly 13 digits, exact match only
+    -- never fuzzy-corrected (no O->0 / I->1 substitution)."""
+    return bool(RE_GTIN13.fullmatch(str(s or '').strip()))
 
 def parse_qty(s: str) -> int:
     return int(re.sub(r'[,\.]', '', s.strip()))
@@ -139,6 +229,14 @@ def is_table_hdr(cells: List[str]) -> bool:
 def is_noise(line: str) -> bool:
     return bool(RE_NOISE.match(line.strip()))
 
+def is_noise_row(cells: List[str]) -> bool:
+    """Same header/footer-noise filter as is_noise(), applied to a table row
+    (list of cells) instead of a single text line -- covers repeated table
+    headers and about:blank/date/page-number rows that pdfplumber sometimes
+    hands back as an extra 1-row 'table' rather than as plain text."""
+    joined = " ".join(c for c in cells if c).strip()
+    return bool(joined) and bool(RE_NOISE.match(joined))
+
 def safe_float(v) -> Optional[float]:
     try:
         f = float(v)
@@ -147,15 +245,20 @@ def safe_float(v) -> Optional[float]:
         return None
 
 def normalize_sku_key(text: str) -> str:
-    """Robust key for SKU/EAN lookup: remove hidden chars, spaces and punctuation."""
+    """Robust key for SKU/EAN lookup: remove hidden chars, spaces and
+    punctuation. Bug fix: the previous version called
+    .replace("\ufffe", "-") twice and never handled U+FFFF at all (both
+    show up in real PL PDFs in place of a plain '-' inside a SKU) --
+    fix_unicode_artifacts() now handles both, plus the other dash variants /
+    zero-width characters, in one place shared with normalize_code()."""
     text = clean_excel_key(text) if 'clean_excel_key' in globals() else str(text or '').strip()
-    text = unicodedata.normalize("NFKC", text)
-    text = text.replace("￾", "-").replace("￾", "-").replace("­", "-")
-    text = re.sub(r"-\s+", "-", text)
-    text = re.sub(r"\s+-", "-", text)
+    text = fix_unicode_artifacts(text)
     return re.sub(r"[^A-Z0-9]", "", text.upper())
 
-_INVISIBLE_CHARS_RE = re.compile('[ ​‌‍⁠﻿\xad]')
+_INVISIBLE_CHARS_RE = re.compile('[\u200b\u200c\u200d\u2060\ufeff\xad]')  # bug fix: a literal ASCII space used to sit in this class (typo'd in place
+# of NBSP U+00A0), silently deleting every space from every table cell
+# ("14mm Rope Loop" -> "14mmRopeLoop") -- confirmed via real-file test on
+# CN-1286-Kerry_PVG-CN.pdf before this fix.
 
 def sanitize_ocr_cell(s: str) -> str:
     """Strip invisible/zero-width unicode artifacts (NBSP, zero-width space,
@@ -201,6 +304,25 @@ class Item:
     quantity: int
     hs_code: str = ""
     parse_method: str = "table"
+    # -- audit/diagnostic fields (v10 audit) -- additive only; every field
+    # above this line is unchanged so pl_group_export.py / the Excel writer
+    # keep working exactly as before (backward compatible).
+    condition: str = ""
+    remark: str = ""
+    sku_raw: str = ""
+    gtin_raw: str = ""
+    source_page: Optional[int] = None
+    gtin_valid: bool = False
+    dedup_key: Tuple = field(default=(), repr=False, compare=False)
+
+    @property
+    def sku(self) -> str:
+        """Spec vocabulary alias for product_code (normalized SKU)."""
+        return self.product_code
+    @property
+    def gtin(self) -> str:
+        """Spec vocabulary alias for barcode."""
+        return self.barcode
 
 @dataclass
 class Package:
@@ -224,6 +346,11 @@ class Package:
     # Stays "" for non-CN-factory packages; fill manually if needed.
     port: str = ""
     store: str = ""
+    # v10 audit: first page the package header was seen on, and the internal
+    # dedup set used while items are being fed in (see Parser._add_item).
+    first_page: Optional[int] = None
+    dim_source_method: str = ""
+    _seen_item_keys: set = field(default_factory=set, repr=False, compare=False)
 
     @property
     def calc_qty(self) -> int:
@@ -235,22 +362,49 @@ class Package:
     def origin(self) -> str:
         return get_origin(self.source_file, self.reference_code)
 
+# Spec-vocabulary status codes for the Raw_Data / Audit_Summary sheets and
+# the app.html run summary (kept separate from overall_status() below, which
+# stays byte-for-byte backward compatible for the existing Match_Status
+# sheet's color-coding).
+def audit_status(pkg: "Package") -> str:
+    if pkg.item_count == 0:
+        return "ZERO_ITEMS" if pkg.declared_total_qty is not None else "PARSE_REVIEW_REQUIRED"
+    if pkg.declared_total_qty is None:
+        return "MISSING_TOTAL"
+    if pkg.declared_total_qty != pkg.calc_qty:
+        return "QUANTITY_MISMATCH"
+    return "OK"
+
 # ── Item parsers ───────────────────────────────────────────────────────────
-def parse_item_cells(cells: List[str]) -> Optional[Item]:
+def parse_item_cells(cells: List[str], source_page: Optional[int] = None) -> Optional[Item]:
+    """Parse one packing-list item row from a table's cells. Column-count
+    agnostic (works for the 6/7/8-column shapes pdfplumber hands back — bug
+    #8/#10) because every cell is classified by *content*, not a fixed
+    index. RE_COND_QTY below is the fix for bug #9: a merged "Tinh trang So
+    luong" cell ("Moi 12") used to fail every classifier and silently fall
+    into the product-name bucket, dropping the whole item (quantity stayed
+    0). Confirmed against CN-1286-CNWorld_PEK-CN.pdf p.1 table 1: rows 1-4
+    all used this merged shape and were previously lost (23 units missing
+    from package PGKECISZTEPU3490002's declared total)."""
     line_no = ""
-    barcode = prod_code = unit = ""
+    barcode = prod_code = unit = condition = ""
+    sku_raw = gtin_raw = ""
     quantity = 0
     name_parts: List[str] = []
     unit_idx = -1
     barcode_idx = -1
     prod_idx = -1
 
+    # Pass 1: Unicode-normalize every cell (bug #13: U+FFFE/U+FFFF/zero-width
+    # artifacts) and re-join a SKU/product code pdfplumber split across two
+    # adjacent cells (trailing '-' + continuation cell in the next column).
     merged: List[str] = []
     i = 0
     while i < len(cells):
-        cell = sanitize_ocr_cell(str(cells[i]).strip())
+        cell = fix_unicode_artifacts(sanitize_ocr_cell(str(cells[i])))
         if cell.endswith('-') and RE_PROD_CODE.fullmatch(cell) and i + 1 < len(cells):
-            merged.append(cell + str(cells[i + 1]).strip())
+            nxt = fix_unicode_artifacts(sanitize_ocr_cell(str(cells[i + 1])))
+            merged.append(cell + nxt)
             i += 2
         else:
             merged.append(cell)
@@ -261,6 +415,14 @@ def parse_item_cells(cells: List[str]) -> Optional[Item]:
         if not cell:
             continue
 
+        # Bug #9 fix: merged "Tinh trang So luong" cell, e.g. "Moi 12".
+        m_cq = RE_COND_QTY.match(cell)
+        if m_cq:
+            cond_key = strip_accents(m_cq.group(1))
+            condition = CONDITION_CANON.get(cond_key, m_cq.group(1))
+            quantity = parse_qty(m_cq.group(2))
+            continue
+
         # STT / No column usually appears before barcode or SKU.
         if not line_no and re.fullmatch(r'\d{1,4}', cell) and not barcode and not prod_code and idx <= 2:
             line_no = cell
@@ -268,6 +430,7 @@ def parse_item_cells(cells: List[str]) -> Optional[Item]:
 
         if RE_BARCODE.fullmatch(cell) and len(cell) in (8, 12, 13, 14):
             barcode = cell
+            gtin_raw = cell
             barcode_idx = idx
             continue
 
@@ -276,12 +439,14 @@ def parse_item_cells(cells: List[str]) -> Optional[Item]:
         if m:
             pc = m.group(1).rstrip('-')
             if pc.count('-') >= 2:
-                prod_code = pc.upper()
+                sku_raw = candidate
+                prod_code = normalize_code(pc)
                 prod_idx = idx
                 rest = RE_PROD_CODE.sub('', candidate).strip()
                 if rest and strip_accents(rest) not in STATUS_WORDS:
                     no_from_name, clean_name = split_leading_no(rest, line_no)
-                    line_no = no_from_name
+                    if no_from_name:
+                        line_no = no_from_name
                     if clean_name:
                         name_parts.append(clean_name)
                 continue
@@ -291,13 +456,18 @@ def parse_item_cells(cells: List[str]) -> Optional[Item]:
             unit_idx = idx
             continue
 
+        # Bare condition word in its own cell (7/8-column layout, condition
+        # and quantity NOT merged).
+        cond_key = strip_accents(cell)
+        if cond_key in STATUS_WORDS:
+            condition = CONDITION_CANON.get(cond_key, cell)
+            continue
+
         if re.fullmatch(r'\d{1,5}', cell) and idx > unit_idx >= 0:
             quantity = int(cell)
             continue
 
         if RE_PKG_HEADER.search(cell):
-            continue
-        if strip_accents(cell) in STATUS_WORDS:
             continue
 
         # Avoid putting STT in product name if it appears as a separate numeric cell.
@@ -317,15 +487,33 @@ def parse_item_cells(cells: List[str]) -> Optional[Item]:
     barcode   = dequarantine_code(barcode, "EAN/barcode", "table row")
     return Item(no=line_no, product_name=product_name, product_code=prod_code,
                 barcode=barcode, unit=unit or "PCS", quantity=quantity,
-                parse_method="table")
+                parse_method="table", condition=condition, sku_raw=sku_raw,
+                gtin_raw=gtin_raw, source_page=source_page,
+                gtin_valid=is_valid_gtin13(barcode))
 
-def parse_item_text(accumulated: str) -> Optional[Item]:
-    text = join_split_product_code(sanitize_ocr_cell(accumulated))
-    m_term = RE_TERMINAL.search(text)
-    if not m_term:
-        return None
-    unit     = m_term.group(1).upper()
-    quantity = parse_qty(m_term.group(2))
+def parse_item_text(accumulated: str, source_page: Optional[int] = None) -> Optional[Item]:
+    text = fix_unicode_artifacts(join_split_product_code(sanitize_ocr_cell(accumulated)))
+
+    # Bug #9, text-fallback path: a merged "Tinh trang So luong" fragment can
+    # also show up in the flattened text line (e.g. "... PCS Moi 12"). Try
+    # the merged terminal first; RE_TERMINAL (unit + bare qty) still covers
+    # the already-split case.
+    m_cq_term = re.search(rf'({UNIT_PAT})\s+(M[oớ]i|C[uũ]|New|Used|Refurbished)\s+([\d,\.]+)\s*$',
+                           text, re.IGNORECASE | re.UNICODE)
+    condition = ""
+    if m_cq_term:
+        unit = m_cq_term.group(1).upper()
+        cond_key = strip_accents(m_cq_term.group(2))
+        condition = CONDITION_CANON.get(cond_key, m_cq_term.group(2))
+        quantity = parse_qty(m_cq_term.group(3))
+        term_start = m_cq_term.start()
+    else:
+        m_term = RE_TERMINAL.search(text)
+        if not m_term:
+            return None
+        unit     = m_term.group(1).upper()
+        quantity = parse_qty(m_term.group(2))
+        term_start = m_term.start()
 
     line_no = ""
     m_no = re.match(r"^\s*(\d{1,4})\s+", text)
@@ -338,16 +526,18 @@ def parse_item_text(accumulated: str) -> Optional[Item]:
             barcode = m.group(1)
             break
     prod_code = ""
+    sku_raw = ""
     pc_end = 0
     for m in RE_PROD_CODE.finditer(text):
         pc = m.group(1).rstrip('-')
         if pc.count('-') >= 2:
-            prod_code = pc.upper()
+            sku_raw = m.group(1)
+            prod_code = normalize_code(pc)
             pc_end = m.end()
             break
     product_name = ""
-    if prod_code and pc_end < m_term.start():
-        region = text[pc_end : m_term.start()].strip()
+    if prod_code and pc_end < term_start:
+        region = text[pc_end:term_start].strip()
         region = RE_BARCODE.sub('', region).strip()
         parts = [w for w in region.split() if strip_accents(w) not in STATUS_WORDS]
         product_name = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
@@ -358,24 +548,58 @@ def parse_item_text(accumulated: str) -> Optional[Item]:
     barcode   = dequarantine_code(barcode, "EAN/barcode", "text line")
     return Item(no=line_no, product_name=product_name, product_code=prod_code,
                 barcode=barcode, unit=unit, quantity=quantity,
-                parse_method="text")
+                parse_method="text", condition=condition, sku_raw=sku_raw,
+                gtin_raw=barcode, source_page=source_page,
+                gtin_valid=is_valid_gtin13(barcode))
 
 # ── Parser state machine ───────────────────────────────────────────────────
 class Parser:
+    """Package state machine. Identity is the *normalized* package code
+    (bug #3/#17: continuation pages repeat the same "Ma kien hang" code —
+    the code must be reused, never treated as a new package, never
+    overwritten/reset). declared_total_qty is only ever set by an actual
+    "Tong cong" line (bug #4: a package that starts at the bottom of one
+    page and finishes on the next must keep accumulating across the page
+    boundary, which this class does simply by not closing `_cur` until a
+    real total line, or a different package header, or end-of-document is
+    seen)."""
+
     def __init__(self):
         self.packages: List[Package] = []
         self._cur: Optional[Package] = None
         self._buf: List[str] = []
         self._source_file    = ""
         self._reference_code = ""
+        self._page: Optional[int] = None
+        # Counters exposed to run_pipeline() so it can implement the
+        # per-page "table produced nothing new -> fall back to text" rule
+        # (spec section 5) without depending on internal state layout.
+        self.duplicate_items_skipped = 0
 
     def set_file(self, pdf_path: Path):
         self._source_file    = pdf_path.name
         self._reference_code = pdf_path.stem
 
+    def set_page(self, page_no: int):
+        self._page = page_no
+
+    def total_item_count(self) -> int:
+        """Snapshot used by run_pipeline() to detect whether a parsing pass
+        added any new item (see run_pipeline's per-page fallback logic)."""
+        n = sum(p.item_count for p in self.packages)
+        if self._cur is not None:
+            n += self._cur.item_count
+        return n
+
+    def total_package_count(self) -> int:
+        n = len(self.packages)
+        if self._cur is not None:
+            n += 1
+        return n
+
     def feed_table_row(self, cells: List[str]):
-        joined = " ".join(cells)
-        if not joined.strip() or is_table_hdr(cells):
+        joined = " ".join(c for c in cells if c)
+        if not joined.strip() or is_table_hdr(cells) or is_noise_row(cells):
             return
         m = RE_PKG_HEADER.search(joined)
         if m:
@@ -387,9 +611,16 @@ class Parser:
             return
         if self._cur is None:
             return
-        item = parse_item_cells(cells)
+        # Bug #6: a lone "-BOX"/"BOX" row is the continuation of the
+        # PREVIOUS row's SKU suffix, split onto its own line by the PDF
+        # layout -- not a new item.
+        non_empty = [c.strip() for c in cells if c and c.strip()]
+        if len(non_empty) == 1 and RE_SKU_SUFFIX_ROW.match(non_empty[0]) and self._cur.items:
+            self._append_sku_suffix(non_empty[0])
+            return
+        item = parse_item_cells(cells, source_page=self._page)
         if item:
-            self._cur.items.append(item)
+            self._add_item(item)
 
     def feed_text_line(self, line: str):
         line = line.strip()
@@ -407,23 +638,26 @@ class Parser:
             return
         if self._cur is None:
             return
+        if RE_SKU_SUFFIX_ROW.match(line) and self._cur.items and not self._buf:
+            self._append_sku_suffix(line)
+            return
         if RE_BARCODE.search(line):
             if self._buf:
-                item = parse_item_text(' '.join(self._buf))
+                item = parse_item_text(' '.join(self._buf), source_page=self._page)
                 if item:
-                    self._cur.items.append(item)
+                    self._add_item(item)
                 self._buf = []
             self._buf.append(line)
-            item = parse_item_text(' '.join(self._buf))
+            item = parse_item_text(' '.join(self._buf), source_page=self._page)
             if item:
-                self._cur.items.append(item)
+                self._add_item(item)
                 self._buf = []
             return
         if self._buf:
             self._buf.append(line)
-            item = parse_item_text(' '.join(self._buf))
+            item = parse_item_text(' '.join(self._buf), source_page=self._page)
             if item:
-                self._cur.items.append(item)
+                self._add_item(item)
                 self._buf = []
 
     def end_of_pdf(self):
@@ -435,21 +669,43 @@ class Parser:
             log.warning(f"EOF: {self._cur.package_code} never saw Tong cong")
             self._force_close()
 
+    def _append_sku_suffix(self, suffix_cell: str):
+        """Bug #6 fix: join a stray '-BOX' style continuation row onto the
+        most recently added item's SKU instead of dropping it or treating it
+        as a bogus new item."""
+        suffix = suffix_cell.lstrip('-').upper()
+        last = self._cur.items[-1]
+        joined = last.product_code if last.product_code.endswith('-' + suffix) else                  (last.product_code.rstrip('-') + '-' + suffix)
+        log.info(f"SKU suffix continuation: {last.product_code!r} -> {joined!r}")
+        last.product_code = joined
+        last.sku_raw = (last.sku_raw or '') + suffix_cell
+
     def _on_pkg_header(self, pkg_code: str, seq: str):
-        if self._cur is None:
-            self._cur = Package(package_code=pkg_code,
-                                source_file=self._source_file,
-                                reference_code=self._reference_code,
-                                pdf_package_seq=seq)
-        elif self._cur.package_code == pkg_code:
+        if self._cur is not None and self._cur.package_code == pkg_code:
             self._cur.header_count += 1
-        else:
+            return
+        if self._cur is not None:
             log.warning(f"INTERRUPTED: {self._cur.package_code} -> {pkg_code}")
             self._force_close()
-            self._cur = Package(package_code=pkg_code,
-                                source_file=self._source_file,
-                                reference_code=self._reference_code,
-                                pdf_package_seq=seq)
+        # Bug #17 defensive fix: if this code was already finalized earlier
+        # (e.g. a premature/duplicate "Tong cong" closed it, then more rows
+        # for the same package follow) re-open the SAME package object
+        # instead of creating a duplicate. declared_total_qty is cleared so
+        # it only gets set again by a real "Tong cong" line, per spec
+        # section 7 ("declared total chi cap nhat khi gap dong Tong cong
+        # hop le").
+        if self.packages and self.packages[-1].package_code == pkg_code:
+            log.warning(f"RE-OPENED package {pkg_code} after premature close "
+                        f"(more rows followed the earlier 'Tong cong')")
+            self._cur = self.packages.pop()
+            self._cur.declared_total_qty = None
+            self._cur.header_count += 1
+            return
+        self._cur = Package(package_code=pkg_code,
+                            source_file=self._source_file,
+                            reference_code=self._reference_code,
+                            pdf_package_seq=seq,
+                            first_page=self._page)
 
     def _on_total(self, declared: int):
         if self._cur is None:
@@ -466,13 +722,52 @@ class Parser:
 
     def _flush_buf(self):
         if self._buf and self._cur is not None:
-            item = parse_item_text(' '.join(self._buf))
+            item = parse_item_text(' '.join(self._buf), source_page=self._page)
             if item:
-                self._cur.items.append(item)
+                self._add_item(item)
         self._buf = []
 
+    def _add_item(self, item: Item):
+        """Append an item to the current package, deduplicating on full
+        context (spec section 5): package + page + line_no/position + GTIN
+        + normalized SKU + quantity + condition -- NOT just GTIN+quantity,
+        since the same SKU can legitimately repeat within a package (e.g.
+        the same color restocked in two different cartons of one package
+        is rare but the same SKU CAN legitimately appear twice on
+        genuinely different rows, which is why line_no/page is part of the
+        key rather than being ignored)."""
+        key = (self._page, item.no, normalize_sku_key(item.product_code),
+               item.barcode, item.quantity, item.condition)
+        if key in self._cur._seen_item_keys:
+            self.duplicate_items_skipped += 1
+            log.warning(f"DUPLICATE_ITEM_SUSPECTED skipped in {self._cur.package_code}: "
+                        f"sku={item.product_code!r} gtin={item.barcode!r} qty={item.quantity} "
+                        f"page={self._page} line_no={item.no!r}")
+            return
+        self._cur._seen_item_keys.add(key)
+        item.dedup_key = key
+        self._cur.items.append(item)
+
 # ── DIM mapper ─────────────────────────────────────────────────────────────
+RE_PACKAGE_CODE_DIM = re.compile(r'^PGKEC[A-Z0-9]+$', re.IGNORECASE)
+
+
 class DimMapper:
+    """DIM/weight lookup, keyed by normalized "reference|package_code".
+
+    Detection runs a strict priority order and never silently guesses past
+    it (spec section 10):
+      1) HEADER_MAPPING              -- every column found by header alias
+      2) PARTIAL_HEADER_POSITIONAL   -- ref+pkg found by header, L/W/H/Wt/CBM
+                                         filled positionally (pkg_col+1..+5)
+      3) PACKAGE_CODE_POSITIONAL_FALLBACK -- header detection failed entirely;
+                                         anchor on a cell matching ^PGKEC...$
+                                         and read the fixed 5 cells after it
+                                         (Length, Width, Height, Weight, CBM
+                                         -- this exact order, never changed)
+      4) FAIL_WITH_DIAGNOSTIC        -- neither worked; sheet contributes 0
+                                         rows and every reason is logged.
+    """
     _ALIASES: Dict[str, List[str]] = {
         "ref":    ["lo","lot","lohang","reference_code","reference","ref","job","shipment"],
         "pkg":    ["tracking","package_code","package","pkg","carton_code","carton","kien","makien"],
@@ -482,76 +777,290 @@ class DimMapper:
         "weight": ["kg","weight","wt","gross","gw","nang"],
         "cbm":    ["cbm","volume","vol","cubic","m3"],
     }
+    _POSITIONAL_ORDER = ["length", "width", "height", "weight", "cbm"]
 
     def __init__(self, xlsx_path: Path, sheet_name: Optional[str] = None):
         self._data: Dict[str, dict] = {}
+        self.diagnostics: List[dict] = []          # one row per DIM row processed (spec section 11)
+        self.detection_method = "FAIL_WITH_DIAGNOSTIC"
+        self.selected_sheet: Optional[str] = None
+        self.header_row: Optional[int] = None
+        self.headers_detected: List[str] = []
+        self.canonical_mapping: Dict[str, str] = {}
+        self.rows_scanned = 0
+        self.valid_rows = 0
+        self.duplicate_keys = 0
+        self.malformed_rows = 0
+        self.review_required = 0
+        self._known_refs: set = set()
+        self._known_pkgs: set = set()
         self._load(xlsx_path, sheet_name)
 
+    # ── loading ──────────────────────────────────────────────────────────
     def _load(self, path: Path, sheet_name: Optional[str] = None):
         log.info(f"Loading DIM <- {path.name}")
         try:
-            xl = pd.ExcelFile(str(path))
+            wb = openpyxl.load_workbook(str(path), data_only=True)
         except Exception as e:
             log.error(f"Cannot open DIM: {e}")
             return
 
-        if sheet_name:
-            if sheet_name in xl.sheet_names:
-                sheets_to_try = [sheet_name]
-            else:
-                log.warning(f"DIM sheet '{sheet_name}' not found. Available sheets: {xl.sheet_names}. Auto-detect instead.")
-                sheets_to_try = xl.sheet_names
+        if sheet_name and sheet_name in wb.sheetnames:
+            sheets_to_try = [sheet_name]
         else:
-            sheets_to_try = xl.sheet_names
+            if sheet_name:
+                log.warning(f"DIM sheet '{sheet_name}' not found. Available sheets: {wb.sheetnames}. Auto-detect instead.")
+            sheets_to_try = wb.sheetnames
 
         for sheet in sheets_to_try:
-            try:
-                df = pd.read_excel(path, sheet_name=sheet, dtype=str)
-                cols = [str(c).strip() for c in df.columns]
-                cm = self._detect(cols)
-                if cm is None:
-                    continue
-                loaded = 0
-                for _, row in df.iterrows():
-                    ref = normalize(str(row.get(cm["ref"], "")))
-                    pkg = normalize(str(row.get(cm["pkg"], "")))
-                    if not ref or not pkg or ref == "NAN" or pkg == "NAN":
-                        continue
-                    self._data[f"{ref}|{pkg}"] = {
-                        "length": safe_float(row.get(cm.get("length"))),
-                        "width":  safe_float(row.get(cm.get("width"))),
-                        "height": safe_float(row.get(cm.get("height"))),
-                        "weight": safe_float(row.get(cm.get("weight"))),
-                        "cbm":    safe_float(row.get(cm.get("cbm"))),
-                    }
-                    loaded += 1
-                log.info(f"  Sheet '{sheet}': {loaded} rows")
-                if loaded:
-                    break
-            except Exception as e:
-                log.warning(f"  Sheet '{sheet}' error: {e}")
+            ws = wb[sheet]
+            if self._load_sheet(ws, sheet):
+                self.selected_sheet = sheet
+                break
+
+        for key in self._data:
+            ref, pkg = key.split("|", 1)
+            self._known_refs.add(ref)
+            self._known_pkgs.add(pkg)
+
+        log.info(f"  DIM detection method: {self.detection_method} (sheet={self.selected_sheet!r})")
+        log.info(f"  Rows scanned={self.rows_scanned} valid={self.valid_rows} "
+                 f"malformed={self.malformed_rows} duplicate_keys={self.duplicate_keys} "
+                 f"review_required={self.review_required}")
         log.info(f"  Total DIM records: {len(self._data)}")
 
+    @staticmethod
+    def _merge_map(ws) -> Dict[Tuple[int, int], object]:
+        """Every cell coordinate covered by a merged range maps to the
+        top-left cell's value, so reading a merged-away cell (e.g. a
+        reference column merged down 2 rows) returns the real value instead
+        of None."""
+        m: Dict[Tuple[int, int], object] = {}
+        for rng in ws.merged_cells.ranges:
+            top_left = ws.cell(row=rng.min_row, column=rng.min_col).value
+            for r in range(rng.min_row, rng.max_row + 1):
+                for c in range(rng.min_col, rng.max_col + 1):
+                    m[(r, c)] = top_left
+        return m
+
+    @staticmethod
+    def _cell(ws, r: int, c: int, merge_map) -> object:
+        v = ws.cell(row=r, column=c).value
+        if v is None:
+            v = merge_map.get((r, c))
+        return v
+
+    def _load_sheet(self, ws, sheet_name: str) -> bool:
+        max_row, max_col = ws.max_row, ws.max_column
+        if max_row < 2 or max_col < 1:
+            return False
+        merge_map = self._merge_map(ws)
+
+        header_row_idx, cm = self._find_header_row(ws, merge_map, max_row, max_col)
+        if header_row_idx and cm and "ref" in cm and "pkg" in cm:
+            method = ("HEADER_MAPPING"
+                      if all(f in cm for f in self._ALIASES)
+                      else "PARTIAL_HEADER_POSITIONAL")
+            n = self._extract_with_header(ws, merge_map, header_row_idx, cm,
+                                           sheet_name, method, max_row, max_col)
+            if n:
+                self.detection_method = method
+                self.header_row = header_row_idx
+                self.headers_detected = [self._cell(ws, header_row_idx, c, merge_map)
+                                          for c in range(1, max_col + 1)]
+                self.canonical_mapping = dict(cm)
+                return True
+            log.warning(f"  Sheet '{sheet_name}': header row found (row {header_row_idx}) "
+                        f"but 0 valid rows extracted -- trying PACKAGE_CODE_POSITIONAL_FALLBACK.")
+
+        n = self._extract_positional_by_package_code(ws, merge_map, sheet_name, max_row, max_col)
+        if n:
+            self.detection_method = "PACKAGE_CODE_POSITIONAL_FALLBACK"
+            return True
+
+        log.error(f"  Sheet '{sheet_name}': FAIL_WITH_DIAGNOSTIC -- no header mapping "
+                  f"(ref+pkg columns) and no cell matching ^PGKEC...$ found anywhere "
+                  f"in {max_row}x{max_col} cells.")
+        return False
+
+    # ── tier 1 / 2: header-based ─────────────────────────────────────────
+    def _find_header_row(self, ws, merge_map, max_row, max_col):
+        """Scan the first few rows for one containing at least ref+pkg
+        header aliases (exact or substring match)."""
+        for r in range(1, min(6, max_row) + 1):
+            cols = [str(self._cell(ws, r, c, merge_map) or "").strip() for c in range(1, max_col + 1)]
+            if not any(cols):
+                continue
+            cm = self._detect(cols)
+            if cm and "ref" in cm and "pkg" in cm:
+                # cm values are column header strings; convert to 1-based column index
+                col_idx = {name: cols.index(hdr) + 1 for name, hdr in cm.items()}
+                return r, col_idx
+        return None, None
+
+    def _extract_with_header(self, ws, merge_map, header_row_idx, col_idx,
+                              sheet_name, method, max_row, max_col) -> int:
+        loaded = 0
+        last_ref = None
+        for r in range(header_row_idx + 1, max_row + 1):
+            self.rows_scanned += 1
+            raw_ref = self._cell(ws, r, col_idx["ref"], merge_map)
+            raw_pkg = self._cell(ws, r, col_idx["pkg"], merge_map)
+            ref_norm = normalize(str(raw_ref)) if raw_ref not in (None, "") else ""
+            if not ref_norm or ref_norm == "NAN":
+                # forward-fill a blank reference from the nearest row above
+                # (merged "Lo hang" cell) -- never fabricate a ref that was
+                # never actually present.
+                ref_norm = last_ref or ""
+            else:
+                last_ref = ref_norm
+            pkg_norm = normalize(str(raw_pkg)) if raw_pkg not in (None, "") else ""
+            if not ref_norm or not pkg_norm or pkg_norm == "NAN":
+                continue  # blank row / spacer row, not malformed
+            vals = {f: safe_float(self._cell(ws, r, col_idx[f], merge_map)) if f in col_idx else None
+                    for f in self._POSITIONAL_ORDER}
+            self._commit_row(sheet_name, r, method, col_idx.get("pkg"),
+                              raw_ref, ref_norm, raw_pkg, pkg_norm, vals)
+            loaded += 1
+        return loaded
+
+    # ── tier 3: PACKAGE_CODE_POSITIONAL_FALLBACK ─────────────────────────
+    def _extract_positional_by_package_code(self, ws, merge_map, sheet_name, max_row, max_col) -> int:
+        loaded = 0
+        last_ref = None
+        for r in range(1, max_row + 1):
+            pkg_col = None
+            raw_pkg = None
+            for c in range(1, max_col + 1):
+                v = self._cell(ws, r, c, merge_map)
+                if v is None:
+                    continue
+                candidate = normalize_code(str(v))
+                if RE_PACKAGE_CODE_DIM.match(candidate):
+                    pkg_col, raw_pkg = c, v
+                    break
+            if pkg_col is None:
+                continue
+            self.rows_scanned += 1
+            if pkg_col + 5 > max_col:
+                self.malformed_rows += 1
+                self.diagnostics.append(self._diag(
+                    sheet_name, r, "PACKAGE_CODE_POSITIONAL_FALLBACK", pkg_col,
+                    None, None, raw_pkg, normalize_code(str(raw_pkg)),
+                    {}, None, None, "INSUFFICIENT_POSITIONAL_FIELDS"))
+                log.warning(f"  Row {r}: INSUFFICIENT_POSITIONAL_FIELDS "
+                            f"(package code at col {pkg_col}, needs 5 cells after it, "
+                            f"sheet only has {max_col} columns)")
+                continue
+            # reference: nearest non-blank, non-purely-numeric cell to the
+            # LEFT of the package-code column on this row (spec: "khong lay
+            # nham STT hoac text header lam reference"); else forward-fill
+            # from the previous row that had one.
+            raw_ref = None
+            for c in range(pkg_col - 1, 0, -1):
+                v = self._cell(ws, r, c, merge_map)
+                if v is None or str(v).strip() == "":
+                    continue
+                if re.fullmatch(r'\d{1,3}', str(v).strip()):
+                    continue  # looks like an STT / row-index column, skip it
+                raw_ref = v
+                break
+            if raw_ref is not None:
+                ref_norm = normalize(str(raw_ref))
+                last_ref = ref_norm
+            else:
+                ref_norm = last_ref or ""
+            pkg_norm = normalize_code(str(raw_pkg))
+            if not ref_norm:
+                self.malformed_rows += 1
+                self.diagnostics.append(self._diag(
+                    sheet_name, r, "PACKAGE_CODE_POSITIONAL_FALLBACK", pkg_col,
+                    raw_ref, "", raw_pkg, pkg_norm, {}, None, None, "MISSING_REFERENCE"))
+                continue
+            vals = {}
+            for i, field_name in enumerate(self._POSITIONAL_ORDER, start=1):
+                vals[field_name] = safe_float(self._cell(ws, r, pkg_col + i, merge_map))
+            self._commit_row(sheet_name, r, "PACKAGE_CODE_POSITIONAL_FALLBACK", pkg_col,
+                              raw_ref, ref_norm, raw_pkg, pkg_norm, vals)
+            loaded += 1
+        return loaded
+
+    # ── shared row commit (validation, CBM cross-check, dedup) ──────────
+    def _commit_row(self, sheet_name, excel_row, method, pkg_col,
+                     raw_ref, ref_norm, raw_pkg, pkg_norm, vals: Dict[str, Optional[float]]):
+        length, width, height, weight, cbm = (vals.get(f) for f in self._POSITIONAL_ORDER)
+        missing = [f for f in self._POSITIONAL_ORDER if vals.get(f) is None]
+        non_positive = [f for f in self._POSITIONAL_ORDER
+                         if vals.get(f) is not None and vals[f] <= 0]
+        if missing or non_positive:
+            self.malformed_rows += 1
+            reason = "NON_NUMERIC_OR_MISSING_DIMENSION" if missing else "NON_POSITIVE_DIMENSION"
+            self.diagnostics.append(self._diag(sheet_name, excel_row, method, pkg_col,
+                                                raw_ref, ref_norm, raw_pkg, pkg_norm,
+                                                vals, None, None, reason))
+            log.warning(f"  Row {excel_row} ({ref_norm}|{pkg_norm}): {reason} "
+                        f"missing={missing} non_positive={non_positive}")
+            return
+
+        expected_cbm = (length * width * height) / 1_000_000 if length and width and height else None
+        cbm_diff = abs(cbm - expected_cbm) if (cbm is not None and expected_cbm is not None) else None
+        tolerance = max(0.001, expected_cbm * 0.05) if expected_cbm is not None else None
+        status = "OK"
+        if cbm_diff is not None and tolerance is not None and cbm_diff > tolerance:
+            status = "DIM_REVIEW_REQUIRED"
+            self.review_required += 1
+            log.warning(f"  Row {excel_row} ({ref_norm}|{pkg_norm}): DIM_REVIEW_REQUIRED "
+                        f"declared_cbm={cbm} expected_cbm={round(expected_cbm,6)} "
+                        f"diff={round(cbm_diff,6)} tolerance={round(tolerance,6)} "
+                        f"-- original CBM kept as-is, NOT overwritten.")
+
+        key = f"{ref_norm}|{pkg_norm}"
+        if key in self._data:
+            self.duplicate_keys += 1
+            log.warning(f"  Row {excel_row}: DUPLICATE DIM key {key!r} -- keeping the "
+                        f"first occurrence, this row is NOT applied (no silent overwrite).")
+            self.diagnostics.append(self._diag(sheet_name, excel_row, method, pkg_col,
+                                                raw_ref, ref_norm, raw_pkg, pkg_norm, vals,
+                                                expected_cbm, cbm_diff, "DUPLICATE_KEY"))
+            return
+
+        self._data[key] = {"length": length, "width": width, "height": height,
+                            "weight": weight, "cbm": cbm}
+        self.valid_rows += 1
+        self.diagnostics.append(self._diag(sheet_name, excel_row, method, pkg_col,
+                                            raw_ref, ref_norm, raw_pkg, pkg_norm, vals,
+                                            expected_cbm, cbm_diff, status, key=key))
+
+    @staticmethod
+    def _diag(sheet, excel_row, method, pkg_col, raw_ref, ref_norm, raw_pkg, pkg_norm,
+              vals, expected_cbm, cbm_diff, status, key=None):
+        return {
+            "sheet": sheet, "excel_row": excel_row, "detection_method": method,
+            "package_column_index": pkg_col,
+            "raw_reference": raw_ref, "normalized_reference": ref_norm,
+            "raw_package_code": raw_pkg, "normalized_package_code": pkg_norm,
+            "length": vals.get("length"), "width": vals.get("width"),
+            "height": vals.get("height"), "weight": vals.get("weight"), "cbm": vals.get("cbm"),
+            "expected_cbm": round(expected_cbm, 6) if expected_cbm is not None else None,
+            "cbm_diff": round(cbm_diff, 6) if cbm_diff is not None else None,
+            "validation_status": status,
+            "exact_dim_key": key,
+        }
+
+    # ── header alias detection (unchanged logic, kept as a static method) ─
     def _detect(self, cols: List[str]) -> Optional[Dict[str, str]]:
         def norm(s):
             return re.sub(r'[^a-z0-9]', '', strip_accents(s).lower())
-        nc = {norm(c): c for c in cols}
+        nc = {norm(c): c for c in cols if c}
         mapping: Dict[str, str] = {}
         claimed: set = set()
         for field_name, aliases in self._ALIASES.items():
             found = None
-            # 1) exact normalized match first (original, safest behaviour)
             for alias in aliases:
                 a = norm(alias)
                 if a in nc and nc[a] not in claimed:
                     found = nc[a]
                     break
-            # 2) fallback: alias appears anywhere inside the column name — needed
-            #    for real-world templates like "Lô Hàng (QRcode ở giữa)" or
-            #    "Mã Kiện (Barcode ở trên hoặc dưới)" where headers are full
-            #    descriptive phrases, not the bare alias token. Skip 1-char
-            #    aliases here (l/w/h) since substring matching on a single
-            #    letter is too prone to false positives.
             if found is None:
                 for alias in aliases:
                     a = norm(alias)
@@ -572,9 +1081,30 @@ class DimMapper:
             return None
         return mapping
 
+    # ── lookup (used by run_pipeline) ────────────────────────────────────
     def lookup(self, ref: str, pkg: str) -> Optional[dict]:
         key = f"{normalize(ref)}|{normalize(pkg)}"
         return self._data.get(key)
+
+    def diagnose_miss(self, source_file: str, raw_ref: str, raw_pkg: str) -> dict:
+        """Read-only diagnostic for a PDF package that found no exact DIM
+        match: nearest reference/package candidates are for REVIEW ONLY --
+        never used to auto-assign a DIM record (spec: no fuzzy auto-match)."""
+        ref_norm, pkg_norm = normalize(raw_ref), normalize(raw_pkg)
+        key = f"{ref_norm}|{pkg_norm}"
+        nearest_ref = difflib.get_close_matches(ref_norm, self._known_refs, n=1, cutoff=0.6)
+        nearest_pkg = difflib.get_close_matches(pkg_norm, self._known_pkgs, n=1, cutoff=0.6)
+        reason = ("NO_REFERENCE_IN_DIM" if ref_norm not in self._known_refs
+                  else "NO_PACKAGE_CODE_IN_DIM" if pkg_norm not in self._known_pkgs
+                  else "KEY_COMBINATION_NOT_FOUND")
+        return {
+            "source_file": source_file, "raw_pdf_reference": raw_ref,
+            "normalized_pdf_reference": ref_norm, "raw_pdf_package_code": raw_pkg,
+            "normalized_pdf_package_code": pkg_norm, "exact_lookup_key": key,
+            "nearest_reference_candidate": nearest_ref[0] if nearest_ref else "",
+            "nearest_package_candidate": nearest_pkg[0] if nearest_pkg else "",
+            "mismatch_reason": reason,
+        }
 
 # ── HS Code mapper ─────────────────────────────────────────────────────────
 def clean_excel_key(text: str) -> str:
@@ -1032,7 +1562,7 @@ def _resolve_notify_party(packages: List[Package], is_cn: bool) -> str:
 
 
 # ── Workbook writer ────────────────────────────────────────────────────────
-def write_workbook(output_path: Path, packages: List[Package]):
+def write_workbook(output_path: Path, packages: List[Package], run_meta: Optional[dict] = None):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -1148,6 +1678,106 @@ def write_workbook(output_path: Path, packages: List[Package]):
     _auto_w(ws2)
     ws2.freeze_panes = "A2"
 
+    # ── Raw_Data (spec section 12): one un-merged row per item, full audit
+    # trail. Unlike the "Packing List" sheet above, nothing here is merged,
+    # so every row is independently machine-readable / filterable, and DIM
+    # values are NOT solely carried by merged cells.
+    ws3 = wb.create_sheet("Raw_Data")
+    raw_headers = [
+        "source_filename", "source_page", "reference_raw", "reference_normalized",
+        "package_code_raw", "package_code_normalized", "package_sequence",
+        "gtin", "gtin_valid_13digit", "sku_raw", "sku_normalized", "description",
+        "uom", "condition", "quantity", "declared_total", "calculated_total",
+        "package_validation_status", "dim_match_status", "dim_source_method",
+        "length", "width", "height", "weight", "cbm", "diagnostic_reason",
+    ]
+    ws3.append(raw_headers)
+    for cell in ws3[1]:
+        cell.fill = MS_HDR_FILL
+        cell.font = MS_HDR_FONT
+    for pkg in packages:
+        pstatus = audit_status(pkg)
+        dim_status = "EXACT_MATCH" if pkg.dim_matched else "MISMATCH"
+        rows = pkg.items if pkg.items else [None]
+        for item in rows:
+            if item is None:
+                ws3.append([
+                    pkg.source_file, pkg.first_page, pkg.reference_code, normalize(pkg.reference_code),
+                    pkg.package_code, normalize_code(pkg.package_code), pkg.pdf_package_seq,
+                    "", "", "", "", "", "", "", "", pkg.declared_total_qty, pkg.calc_qty,
+                    pstatus, dim_status, pkg.dim_source_method,
+                    pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
+                    "ZERO_ITEMS_IN_PACKAGE",
+                ])
+            else:
+                ws3.append([
+                    pkg.source_file, item.source_page, pkg.reference_code, normalize(pkg.reference_code),
+                    pkg.package_code, normalize_code(pkg.package_code), pkg.pdf_package_seq,
+                    item.barcode, item.gtin_valid, item.sku_raw, item.product_code, item.product_name,
+                    item.unit, item.condition, item.quantity,
+                    pkg.declared_total_qty, pkg.calc_qty,
+                    pstatus, dim_status, pkg.dim_source_method,
+                    pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
+                    item.parse_method,
+                ])
+    _auto_w(ws3)
+    ws3.freeze_panes = "A2"
+
+    # ── Audit_Summary (spec section 12) ──────────────────────────────────
+    ws4 = wb.create_sheet("Audit_Summary")
+    meta = run_meta or {}
+    dim_obj = meta.get("dim")
+    summary_rows = [
+        ("Parser/core version", PARSER_VERSION),
+        ("Git commit SHA", GIT_COMMIT),
+        ("Run timestamp (UTC)", meta.get("run_started_at", "")),
+        ("Files processed", len({p.source_file for p in packages})),
+        ("Pages processed", sum(d["page_count"] for d in meta.get("pdf_diagnostics", []))),
+        ("Package count", len(packages)),
+        ("Item count", sum(p.item_count for p in packages)),
+        ("Duplicate items skipped (dedup)", meta.get("duplicate_items_skipped", 0)),
+        ("Total checks passed (audit_status=OK)", meta.get("audit_counts", {}).get("OK", 0)),
+        ("Total checks failed (audit_status!=OK)",
+         sum(n for st, n in meta.get("audit_counts", {}).items() if st != "OK")),
+        ("DIM detection method", dim_obj.detection_method if dim_obj else ""),
+        ("DIM sheet selected", dim_obj.selected_sheet if dim_obj else ""),
+        ("DIM rows loaded (valid)", dim_obj.valid_rows if dim_obj else 0),
+        ("DIM rows scanned", dim_obj.rows_scanned if dim_obj else 0),
+        ("DIM malformed rows", dim_obj.malformed_rows if dim_obj else 0),
+        ("DIM duplicate keys", dim_obj.duplicate_keys if dim_obj else 0),
+        ("DIM review-required (CBM tolerance)", dim_obj.review_required if dim_obj else 0),
+        ("DIM exact matches (packages)", sum(1 for p in packages if p.dim_matched)),
+        ("DIM mismatches (packages)", sum(1 for p in packages if not p.dim_matched)),
+        ("Warning count (duplicates + malformed + review)",
+         (dim_obj.malformed_rows + dim_obj.duplicate_keys + dim_obj.review_required
+          if dim_obj else 0) + meta.get("duplicate_items_skipped", 0)),
+        ("Error count (DIM FAIL_WITH_DIAGNOSTIC sheets)",
+         1 if (dim_obj and dim_obj.detection_method == "FAIL_WITH_DIAGNOSTIC") else 0),
+    ]
+    ws4.append(["Metric", "Value"])
+    for cell in ws4[1]:
+        cell.fill = MS_HDR_FILL
+        cell.font = MS_HDR_FONT
+    for label, value in summary_rows:
+        ws4.append([label, value])
+    _auto_w(ws4)
+
+    if meta.get("pdf_diagnostics"):
+        ws4.append([])
+        ws4.append(["Per-PDF reproduction report"])
+        ws4.append(["filename", "page_count", "text_layer_usable"])
+        for d in meta["pdf_diagnostics"]:
+            ws4.append([d["filename"], d["page_count"], d["text_layer_usable"]])
+
+    if meta.get("dim_mismatches"):
+        ws4.append([])
+        ws4.append(["DIM mismatches (review only -- nothing auto-assigned)"])
+        ws4.append(["source_file", "normalized_pdf_reference", "normalized_pdf_package_code",
+                    "nearest_reference_candidate", "nearest_package_candidate", "mismatch_reason"])
+        for m in meta["dim_mismatches"]:
+            ws4.append([m["source_file"], m["normalized_pdf_reference"], m["normalized_pdf_package_code"],
+                        m["nearest_reference_candidate"], m["nearest_package_candidate"], m["mismatch_reason"]])
+
     output_path = Path(output_path)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     try:
@@ -1185,9 +1815,11 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
                  master_data_file: Optional[Path] = None,
                  master_data_sheet: Optional[str] = None,
                  recursive: bool = False):
+    run_started_at = datetime.now(timezone.utc)
     if output_path is None:
         output_path = pl_folder / "PL_Output_v6_HS_DIM.xlsx"
 
+    log.info(f"pl_ocr_core {PARSER_VERSION} (commit {GIT_COMMIT})")
     dim = DimMapper(dim_xlsx, sheet_name=dim_sheet)
     hs_mapper = HsCodeMapper(master_data_file, sheet_name=master_data_sheet)
     pdf_iter = pl_folder.rglob("*.pdf") if recursive else pl_folder.glob("*.pdf")
@@ -1197,43 +1829,89 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
         return []
     log.info(f"PDFs ({len(pdf_files)}): {[f.name for f in pdf_files]}")
 
+    # Reproduction-report evidence (spec section 3), collected while parsing
+    # runs so before/after comparisons don't need a second pass.
+    pdf_diagnostics: List[dict] = []
+
     parser = Parser()
     for pdf_path in pdf_files:
         log.info(f"Parsing  {pdf_path.name}")
         parser.set_file(pdf_path)
+        page_diag = []
         with pdfplumber.open(str(pdf_path)) as pdf:
-            for page in pdf.pages:
+            text_layer_chars = 0
+            for page_idx, page in enumerate(pdf.pages, start=1):
+                parser.set_page(page_idx)
+                page_text = page.extract_text() or ""
+                text_layer_chars += len(page_text.strip())
                 tables = page.extract_tables(TABLE_CFG)
-                used_table = False
-                if tables:
-                    for table in tables:
-                        for row in table:
-                            if row is None or all(c is None for c in row):
-                                continue
-                            cells = [str(c).strip() if c else "" for c in row]
-                            if not any(cells):
-                                continue
-                            parser.feed_table_row(cells)
-                    used_table = True
-                if not used_table:
-                    for line in (page.extract_text() or "").splitlines():
+
+                items_before = parser.total_item_count()
+                closed_before = len(parser.packages)
+                for table in tables:
+                    for row in table:
+                        if row is None or all(c is None for c in row):
+                            continue
+                        cells = [str(c).strip() if c else "" for c in row]
+                        if not any(cells):
+                            continue
+                        parser.feed_table_row(cells)
+                items_after_table = parser.total_item_count()
+                closed_after_table = len(parser.packages)
+
+                # Bug #16 fix: the old rule was `if tables: used_table = True`
+                # -- ANY non-empty tables list disabled the text fallback for
+                # the rest of the page, even if every row in those tables
+                # failed to produce a single valid item (exactly what
+                # happened with the merged "Tinh trang So luong" cells, bug
+                # #9). The rule now falls back to the text-line pass only
+                # when the table pass produced NEITHER a new item NOR closed
+                # a package (a real "Tong cong" match) on this page -- a
+                # continuation page whose only content is a repeated header
+                # + its "Tong cong" line legitimately adds 0 items but DID
+                # finalize a package, and must NOT re-run the weaker text
+                # pass over the same page (that re-triggers the package
+                # header/total lines a second time for no benefit).
+                fell_back_to_text = False
+                if items_after_table == items_before and closed_after_table == closed_before:
+                    for line in page_text.splitlines():
                         parser.feed_text_line(line)
+                    fell_back_to_text = True
+
+                page_diag.append({
+                    "page": page_idx,
+                    "text_layer_chars": len(page_text.strip()),
+                    "tables_detected": len(tables),
+                    "items_from_table_pass": items_after_table - items_before,
+                    "used_text_fallback": fell_back_to_text,
+                })
+            pdf_diagnostics.append({
+                "filename": pdf_path.name,
+                "page_count": len(pdf.pages),
+                "text_layer_usable": text_layer_chars > 0,
+                "pages": page_diag,
+            })
         parser.end_of_pdf()
 
     parser.finalise()
     packages = parser.packages
     log.info(f"Total packages: {len(packages)}")
+    log.info(f"Duplicate items skipped (dedup): {parser.duplicate_items_skipped}")
 
     assign_global_numbers(packages)
 
     matched = 0
+    dim_mismatches: List[dict] = []
     for pkg in packages:
         d = dim.lookup(pkg.reference_code, pkg.package_code)
         if d:
             pkg.length, pkg.width, pkg.height = d["length"], d["width"], d["height"]
             pkg.weight, pkg.cbm = d["weight"], d["cbm"]
             pkg.dim_matched = True
+            pkg.dim_source_method = dim.detection_method
             matched += 1
+        else:
+            dim_mismatches.append(dim.diagnose_miss(pkg.source_file, pkg.reference_code, pkg.package_code))
     log.info(f"DIM matched: {matched}/{len(packages)}")
 
     hs_matched = 0
@@ -1255,12 +1933,27 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     classify_packages_for_port(packages, pl_folder, recursive)
 
     counts: Dict[str, int] = defaultdict(int)
+    audit_counts: Dict[str, int] = defaultdict(int)
     for pkg in packages:
         counts[overall_status(pkg)[0]] += 1
+        audit_counts[audit_status(pkg)] += 1
     for st, n in sorted(counts.items()):
         log.info(f"  {st:<30} {n}")
+    log.info(f"Audit-vocabulary status: {dict(audit_counts)}")
 
-    write_workbook(output_path, packages)
+    run_meta = {
+        "run_started_at": run_started_at.isoformat(),
+        "parser_version": PARSER_VERSION,
+        "git_commit": GIT_COMMIT,
+        "pdf_diagnostics": pdf_diagnostics,
+        "dim_mismatches": dim_mismatches,
+        "duplicate_items_skipped": parser.duplicate_items_skipped,
+        "audit_counts": dict(audit_counts),
+        "dim": dim,
+    }
+    global LAST_RUN_META
+    LAST_RUN_META = run_meta
+    write_workbook(output_path, packages, run_meta=run_meta)
     return packages
 
 # ── Entry point ────────────────────────────────────────────────────────────
@@ -1275,6 +1968,32 @@ packages = run_pipeline(
     master_data_sheet=MASTER_DATA_SHEET,
     recursive=RECURSIVE,
 )
+
+# ── UI summary (spec section 13) ─────────────────────────────────────────
+# Plain dict of JSON-serializable values, read by app.html via
+# `pyodide.globals.get('RUN_SUMMARY').toJs(...)` after this script finishes,
+# and also echoed to stdout (captured into the on-page log box) so it is
+# visible even if that JS read ever fails.
+_dim_obj = LAST_RUN_META.get("dim") if LAST_RUN_META else None
+RUN_SUMMARY = {
+    "parser_version": PARSER_VERSION,
+    "git_commit": GIT_COMMIT,
+    "pdf_files_processed": len({p.source_file for p in packages}) if packages else 0,
+    "packages_found": len(packages) if packages else 0,
+    "items_found": sum(p.item_count for p in packages) if packages else 0,
+    "qty_checks_passed": sum(1 for p in packages
+                              if p.declared_total_qty is not None and p.declared_total_qty == p.calc_qty) if packages else 0,
+    "qty_checks_failed": sum(1 for p in packages
+                              if p.declared_total_qty is not None and p.declared_total_qty != p.calc_qty) if packages else 0,
+    "dim_rows_loaded": _dim_obj.valid_rows if _dim_obj else 0,
+    "dim_detection_method": _dim_obj.detection_method if _dim_obj else "",
+    "dim_exact_matched": sum(1 for p in packages if p.dim_matched) if packages else 0,
+    "dim_review_required": _dim_obj.review_required if _dim_obj else 0,
+    "dim_mismatched": sum(1 for p in packages if not p.dim_matched) if packages else 0,
+    "duplicate_items_skipped": LAST_RUN_META.get("duplicate_items_skipped", 0) if LAST_RUN_META else 0,
+    "errors": sum(1 for p in packages if audit_status(p) != "OK") if packages else 0,
+}
+print("RUN_SUMMARY_JSON=" + json.dumps(RUN_SUMMARY))
 
 # =========================================================
 # AUTO SPLIT: TOTAL -> FACTORY -> CN PORT -> CN STORE
