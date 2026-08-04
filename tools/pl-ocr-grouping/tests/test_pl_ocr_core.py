@@ -838,6 +838,175 @@ test("per-Store scope: store identity is case-insensitive (Kerry == KERRY)",
      t_scoped_numbering_case_insensitive_store_identity_merges)
 
 
+# =========================================================================
+# v13 (FIX4/FIX5 real-file validation): end-to-end simulation of the real
+# 21-carton / 7-store production shipment (see audit notes -- Shipping
+# Marks + carton counts read directly from the real uploaded
+# SUBLIST_TOTAL.pdf, OR List rows from the real uploaded OR List.xlsx).
+# Confirms a Store's cartons across POP + VN + CN factories now share ONE
+# counting scope/denominator, numbered in POP -> VN -> CN business order --
+# previously POP+VN packages (no Store source at all pre-v13) were lumped
+# into one flat shared scope across ALL stores, and only CN packages were
+# split per-store.
+# =========================================================================
+import pl_or_list_import as _oli13
+import pl_group_export as _pge13
+
+_REAL_OR_LIST_ROWS_V13 = [
+    ("20260609 CN - Guangzhou Parc Central Replen", "po38070", "inv628037"),
+    ("20260609 CN - Hangzhou Mixc Replen", "po38068", "inv628036"),
+    ("20260609 CN - Iapm Replen", "po38072", "inv628039"),
+    ("20260609 CN - Kerry Center flagship Replen", "po38071", "inv628038"),
+    ("20260609 CN - Shanghai Hongqiao Airport Replen", "po38074", "inv628042"),
+    ("20260609 CN - Shanghai Taikooli (Shop B1-07b) Replen", "po38076", "inv628041"),
+    ("20260609 CN - Shenzhen Mixc City (Shop T228) Replen", "po38073", "inv628040"),
+]
+
+
+def _real_or_index_v13():
+    rows = [
+        _oli13.OrListRow(row_number=i + 2, store_raw=store, store_norm="",
+                          or_raw=or_v, or_norm=or_v.upper(), so_raw=so_v, so_norm=so_v.upper())
+        for i, (store, or_v, so_v) in enumerate(_REAL_OR_LIST_ROWS_V13)
+    ]
+    idx = {}
+    for r in rows:
+        idx.setdefault(r.or_norm, []).append(r)
+    return idx
+
+
+def t_real_shipment_cross_factory_store_scope_combines_pop_vn_cn():
+    real_marks = (
+        ["CN-1529_HZ_PVG_POP", "CN-1529_IAPM_PVG_POP", "CN-1529_KR_PVG_POP",
+         "CN-1529_SH-Airport_PVG_POP", "CN-1529_SH-Taikooli_PVG_POP",
+         "CN-1529_GZ_SZX_VN", "CN-1529_HZ_PVG_VN", "CN-1529_IAPM_PVG_VN",
+         "CN-1529_KR_PVG_VN", "CN-1529_SZ_SZX_VN"]
+        + ["CN-1529_GZ_SZX_CN"]
+        + ["CN-1529_HZ_PVG_CN"] * 2
+        + ["CN-1529_IAPM_PVG_CN"] * 2
+        + ["CN-1529_KR_PVG_CN"] * 2
+        + ["CN-1529_SH-Airport_PVG_CN v"] * 2
+        + ["CN-1529_SH-Taikooli_PVG_CN"]
+        + ["CN-1529_SZ_SZX_CN"]
+    )
+    assert len(real_marks) == 21
+
+    pkgs = []
+    for i, mk in enumerate(real_marks):
+        p = Package9(package_code=f"PKG{i}", source_file=f"{mk}.pdf", reference_code=mk, pdf_package_seq=0)
+        p.shipping_mark = mk
+        pkgs.append(p)
+
+    pkgs = D9["business_sort_packages"](pkgs)
+    D9["classify_packages_for_port"](pkgs, None, False)
+
+    or_index = _real_or_index_v13()
+    for pkg in pkgs:
+        m = _pge13.match_store_and_or(pkg, or_index)
+        pkg.or_list_store = m.matched_store
+        pkg.or_list_match_status = m.status
+        if m.status == "OK":
+            if not pkg.or_number:
+                pkg.or_number = m.matched_or
+            if not pkg.so_number:
+                pkg.so_number = m.matched_so
+
+    assign_counting_scope_keys(pkgs)
+    assign_global_numbers(pkgs)
+
+    n_ok = sum(1 for p in pkgs if p.or_list_match_status == "OK")
+    assert n_ok == 21, f"expected all 21 real cartons to match OK, got {n_ok}"
+
+    by_mark_factory = {}
+    for p in pkgs:
+        factory = _pge13.detect_factory(p.reference_code, p.source_file)
+        by_mark_factory.setdefault((p.reference_code, factory), []).append(p.carton_display)
+
+    # HZ / IAPM / KR: POP(1) + VN(1) + CN(2) -- ONE combined scope of 4,
+    # ordered POP -> VN -> CN (never separate 1/1's per factory).
+    for code in ("CN-1529_HZ_PVG", "CN-1529_IAPM_PVG", "CN-1529_KR_PVG"):
+        pop = by_mark_factory[(f"{code}_POP", "POP")]
+        vn = by_mark_factory[(f"{code}_VN", "VN")]
+        assert pop == ["1/4"], (code, pop)
+        assert vn == ["2/4"], (code, vn)
+
+    cn_hz = by_mark_factory[("CN-1529_HZ_PVG_CN", "CN")]
+    assert cn_hz == ["3/4", "4/4"], cn_hz
+
+    # SH-Airport: POP(1) + CN(2), no VN -- combined total 3.
+    sh_air_pop = by_mark_factory[("CN-1529_SH-Airport_PVG_POP", "POP")]
+    sh_air_cn = by_mark_factory[("CN-1529_SH-Airport_PVG_CN v", "CN")]
+    assert sh_air_pop == ["1/3"], sh_air_pop
+    assert sh_air_cn == ["2/3", "3/3"], sh_air_cn
+
+    # SH-Taikooli: POP(1) + CN(1), no VN -- combined total 2.
+    sh_tk_pop = by_mark_factory[("CN-1529_SH-Taikooli_PVG_POP", "POP")]
+    sh_tk_cn = by_mark_factory[("CN-1529_SH-Taikooli_PVG_CN", "CN")]
+    assert sh_tk_pop == ["1/2"] and sh_tk_cn == ["2/2"], (sh_tk_pop, sh_tk_cn)
+
+    # GZ / SZ: VN(1) + CN(1), no POP -- combined total 2.
+    for code in ("CN-1529_GZ_SZX", "CN-1529_SZ_SZX"):
+        vn = by_mark_factory[(f"{code}_VN", "VN")]
+        cn = by_mark_factory[(f"{code}_CN", "CN")]
+        assert vn == ["1/2"] and cn == ["2/2"], (code, vn, cn)
+
+    # Exact expected OR/SO per store (spec's required 100%-match gate).
+    expected_or_so = {
+        "GZ": ("po38070", "inv628037"), "HZ": ("po38068", "inv628036"),
+        "IAPM": ("po38072", "inv628039"), "KR": ("po38071", "inv628038"),
+        "SH-Airport": ("po38074", "inv628042"), "SH-Taikooli": ("po38076", "inv628041"),
+        "SZ": ("po38073", "inv628040"),
+    }
+    for p in pkgs:
+        for code, (exp_or, exp_so) in expected_or_so.items():
+            if f"_{code}_" in p.reference_code:
+                assert p.or_number == exp_or and p.so_number == exp_so,             (p.reference_code, p.or_number, p.so_number, exp_or, exp_so)
+
+
+test("real 21-carton/7-store shipment: POP+VN+CN combine under one per-Store scope, ordered POP->VN->CN, 100% OR/SO match",
+     t_real_shipment_cross_factory_store_scope_combines_pop_vn_cn)
+
+
+# =========================================================================
+# v13 (FIX6): Packing List sheet's B/C columns -- real production template
+# labels these "OR No." / "SO No." (confirmed against a real uploaded
+# PL_Total.xlsx), not "PO No." / "Invoice No." as previously hardcoded.
+# Header text AND data-cell fill are both covered here.
+# =========================================================================
+def t_packing_list_headers_are_or_no_so_no_not_po_invoice():
+    import openpyxl
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_headers_"))
+    try:
+        p1 = Package9(package_code="PKGA", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
+        p1.or_number, p1.so_number = "po38068", "inv628036"
+        p1.global_carton_num = "1/1"
+        p2 = Package9(package_code="PKGB", source_file="b.pdf", reference_code="b", pdf_package_seq=0)
+        # no OR List match at all -- must stay blank, never a guess.
+        p2.global_carton_num = "1/1"
+
+        out_path = out_dir / "PL_Total.xlsx"
+        D9["write_workbook"](out_path, [p1, p2])
+
+        wb = openpyxl.load_workbook(str(out_path))
+        ws = wb["Packing List"]
+        header_row = D9["TABLE_HDR_ROW1"]
+        assert ws.cell(row=header_row, column=2).value == "OR No.", ws.cell(row=header_row, column=2).value
+        assert ws.cell(row=header_row, column=3).value == "SO No.", ws.cell(row=header_row, column=3).value
+
+        first_item_row = D9["FIRST_ITEM_ROW"]
+        assert ws.cell(row=first_item_row, column=2).value == "po38068"
+        assert ws.cell(row=first_item_row, column=3).value == "inv628036"
+        # package with no OR List match: OR No./SO No. cells stay blank.
+        assert ws.cell(row=first_item_row + 1, column=2).value in (None, "")
+        assert ws.cell(row=first_item_row + 1, column=3).value in (None, "")
+    finally:
+        shutil.rmtree(out_dir)
+
+
+test("Packing List sheet: B/C headers are 'OR No.'/'SO No.' (matches real template), filled from matched OR/SO, blank when unmatched",
+     t_packing_list_headers_are_or_no_so_no_not_po_invoice)
+
+
 
 # ── summary ──────────────────────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")

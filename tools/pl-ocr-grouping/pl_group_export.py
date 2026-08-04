@@ -249,6 +249,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "contact_phone": "18084829907",
     },
     "SHENZHEN": {
+        "shipping_mark_tokens": ["SZ"],
         "port": "SZX",
         "receiver": "CN - Shenzhen Mixc City (Shop T228)",
         "aliases": ["Shenzhen", "Shenzhen MixC", "Mixc City", "T228"],
@@ -257,6 +258,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "contact_phone": "18565775002",
     },
     "GUANGZHOU": {
+        "shipping_mark_tokens": ["GZ"],
         "port": "SZX",
         "receiver": "Topologie CN - Guangzhou Central Parc",
         "aliases": ["Guangzhou", "Guangzhou Central Parc", "Guangzhou Parc Central", "B262-1"],
@@ -265,6 +267,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "contact_phone": "13662343374",
     },
     "HANGZHOU": {
+        "shipping_mark_tokens": ["HZ"],
         "port": "PVG",
         "receiver": "Topologie CN - Hangzhou Mixc",
         "aliases": ["Hangzhou", "Hangzhou MixC", "B1C03"],
@@ -273,6 +276,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "contact_phone": "15606539115",
     },
     "IAPM": {
+        "shipping_mark_tokens": ["IAPM"],
         "port": "PVG",
         "receiver": "Topologie CN - Iapm",
         "aliases": ["IAPM", "IAPM Mall", "L4-426"],
@@ -281,6 +285,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "contact_phone": "13621647004",
     },
     "KERRY": {
+        "shipping_mark_tokens": ["KR"],
         "port": "PVG",
         "receiver": "Topologie CN - Kerry Center flagship",
         "aliases": ["Kerry", "Kerry Center", "Kerry Centre", "NB1-23B"],
@@ -289,6 +294,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "contact_phone": "17602197790",
     },
     "SHANGHAI_TAIKOOLI": {
+        "shipping_mark_tokens": ["SHTAIKOOLI"],
         "port": "PVG",
         "receiver": "CN - Shanghai Taikooli (Shop B1-07b)",
         "aliases": ["Shanghai Taikooli", "Shanghai Taikoo Li", "B1-07b", "S-B1-07b"],
@@ -297,6 +303,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "contact_phone": "13621647004",
     },
     "SHANGHAI_HONGQIAO": {
+        "shipping_mark_tokens": ["SHAIRPORT"],
         "port": "PVG",
         "receiver": "CN - Shanghai Hongqiao Airport",
         "aliases": ["Shanghai Hongqiao", "Hongqiao Airport", "D60-6"],
@@ -451,6 +458,15 @@ def store_identity(store_text: str) -> str:
 _store_identity = store_identity  # backward-compat alias for internal callers
 
 
+_GENERIC_ALIAS_STOPWORDS = {
+    "TAIKOOLI", "TAIKOO", "MIXC", "CENTRAL", "PARC", "CENTER", "CENTRE",
+    "MALL", "CITY", "SHOP", "PLAZA", "TOWER", "FLOOR",
+}
+
+
+_STORE_MASTER_IDENTITIES = {_store_identity(k.replace("_", " ")) for k in STORE_MASTER}
+
+
 def _store_alias_token_index(or_list_store_values) -> Dict[str, set]:
     """token(uppercased, >=2 chars) -> set of distinct store IDENTITIES
     (see _store_identity above) it could mean. Built from BOTH
@@ -479,22 +495,84 @@ def _store_alias_token_index(or_list_store_values) -> Dict[str, set]:
         # with generic English tokens ("Shop", "City", "Tower", ...) that
         # collide across many stores and make everything "ambiguous". Only
         # the store's own short/distinctive name + explicitly configured
-        # aliases (e.g. "Kerry", "Kerry Center", "NB1-23B") are tokenized.
-        for alias in [store_key.replace("_", " ")] + list(info["aliases"]):
+        # aliases (e.g. "Kerry", "Kerry Center", "NB1-23B") + explicit
+        # shipping_mark_tokens (e.g. "GZ", "SHAIRPORT" -- v13) are tokenized.
+        alias_texts = [store_key.replace("_", " ")] + list(info["aliases"]) + list(info.get("shipping_mark_tokens", []))
+        for alias in alias_texts:
             for tok in _tokens(alias):
+                if tok in _GENERIC_ALIAS_STOPWORDS:
+                    continue
                 add(tok, identity)
     for store_raw in or_list_store_values:
-        identity = _store_identity(store_raw)
+        identity = _canonical_store_identity_for_or_row(store_raw)
+        if identity in _STORE_MASTER_IDENTITIES:
+            # v13 bugfix: this store already got its curated, collision-safe
+            # aliases indexed above (via STORE_MASTER's own alias +
+            # shipping_mark_tokens loop) -- do NOT also tokenize its raw OR
+            # List free-text description here. Real OR List descriptions
+            # share boilerplate words across EVERY row ("CN -", a leading
+            # date stamp, "Replen") -- indexing those would make e.g. the
+            # literal token "CN" resolve to all 7 stores at once, which then
+            # poisons matching for a real Shipping Mark like
+            # "CN-1529_HZ_PVG_POP" (its own "CN" token would collide with
+            # that same ambiguous entry even though "HZ" alone is a clean,
+            # unambiguous hit). Only stores STORE_MASTER doesn't know about
+            # at all still need their raw description tokenized here, since
+            # that free text is the ONLY signal available for them.
+            continue
         for tok in _tokens(store_raw):
             add(tok, identity)
     return idx
+
+
+def _canonical_store_identity_for_or_row(store_raw: str) -> str:
+    """v13 (FIX2): resolve an OR List's free-text Store description (e.g.
+    "20260609 CN - Guangzhou Parc Central Replen") to a CANONICAL
+    STORE_MASTER identity ("GUANGZHOU") by reusing match_store()'s existing
+    alias/fuzzy logic against STORE_MASTER -- never a bespoke new matcher.
+    Falls back to the old literal-text identity (_store_identity(store_raw))
+    when the description doesn't resolve to any STORE_MASTER store (e.g. a
+    POP/SBGEAR/QIFENG-only store STORE_MASTER doesn't know about at all) --
+    so non-CN-retail stores keep working exactly as before, just keyed by
+    their own literal text instead of a canonical enum key that doesn't
+    exist for them."""
+    store_key, _score, _suggestion = match_store(store_raw)
+    if store_key and store_key != "REVIEW":
+        # NOTE: _store_alias_token_index() (and match_store_and_or's own
+        # STORE_MASTER-anchored identities) use _store_identity(store_key.
+        # replace("_", " ")) as the canonical identity form for multi-word
+        # keys like "SHANGHAI_HONGQIAO" -> "SHANGHAI HONGQIAO" -- returning
+        # the raw underscored key here instead would silently create a
+        # SECOND, incompatible identity space for exactly those stores,
+        # breaking identity_to_raw lookups after an otherwise-successful
+        # exact-token Shipmark match. Must stay in lockstep with that form.
+        return _store_identity(store_key.replace("_", " "))
+    return _store_identity(store_raw)
+
+
+def _tokens_with_bigrams(text: str) -> List[str]:
+    """v13 (FIX3): unigram tokens PLUS every adjacent pair joined with no
+    separator -- e.g. "CN-1529_SH-Airport_PVG_POP" tokenizes to
+    ["CN","1529","SH","AIRPORT","PVG","POP"] and this adds "CN1529",
+    "1529SH", "SHAIRPORT", "AIRPORTPVG", "PVGPOP". Needed because a real
+    Shipping Mark can carry a compound short code split across a hyphen
+    ("SH-Airport", "SH-Taikooli") that would otherwise tokenize into two
+    generic, individually-ambiguous pieces ("SH" alone means nothing on its
+    own -- it's a prefix shared by both Shanghai stores in this shipment).
+    Joining "SH"+"AIRPORT" -> "SHAIRPORT" lets it match the single explicit
+    shipping_mark_tokens alias configured for that store (never a fuzzy
+    guess -- still an exact-string index lookup, just against a 2-token
+    joined key instead of a 1-token one)."""
+    toks = _tokens(text)
+    bigrams = [toks[i] + toks[i + 1] for i in range(len(toks) - 1)]
+    return toks + bigrams
 
 
 def _exact_token_store_match(text: str, token_index: Dict[str, set]):
     """Returns (store_or_None, ambiguous_candidates_or_None)."""
     hits: set = set()
     ambiguous: set = set()
-    for tok in _tokens(text):
+    for tok in _tokens_with_bigrams(text):
         stores = token_index.get(tok)
         if not stores:
             continue
@@ -559,9 +637,15 @@ def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") 
 
     all_rows = [r for rows in or_index.values() for r in rows]
     store_values = sorted({r.store_raw for r in all_rows})
+    # v13 (FIX2): key identity_to_raw by the CANONICAL store identity (via
+    # _canonical_store_identity_for_or_row), not the raw literal OR List
+    # text -- otherwise a Shipmark match resolved to canonical "GUANGZHOU"
+    # (via the explicit "GZ" shipping_mark_tokens alias) could never find
+    # its way back to the OR List's own raw row text, which is keyed by the
+    # full free-text description, not the canonical enum name.
     identity_to_raw: Dict[str, set] = {}
     for r in all_rows:
-        identity_to_raw.setdefault(_store_identity(r.store_raw), set()).add(r.store_raw)
+        identity_to_raw.setdefault(_canonical_store_identity_for_or_row(r.store_raw), set()).add(r.store_raw)
     token_idx = _store_alias_token_index(store_values)
 
     store_identity = None

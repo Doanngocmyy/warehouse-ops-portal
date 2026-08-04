@@ -89,6 +89,14 @@ class OrListRow:
     or_norm: str
     so_raw: str = ""
     so_norm: str = ""
+    # v13 (FIX1 traceability): which header-detection tier produced this
+    # row's column mapping -- "LITERAL_HEADER" (STORE/OR/SO aliases found
+    # directly) or "SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER" (duplicate
+    # "OR"/"OR"/"SO" header, first OR column reinterpreted as STORE). Lets
+    # the mapping report / UI show exactly how each row's Store came to be
+    # recognised instead of leaving it implicit.
+    detection_source: str = "LITERAL_HEADER"
+    source_sheet: str = ""
 
 
 @dataclass
@@ -96,6 +104,7 @@ class OrListImportResult:
     status: str = "NO_FILE"  # NO_FILE | OK | HEADER_NOT_FOUND | REQUIRED_FIELD_MISSING | LOAD_ERROR
     sheet_used: Optional[str] = None
     header_row: Optional[int] = None
+    detection_source: str = ""  # LITERAL_HEADER | SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER | "" (not detected)
     rows: List[OrListRow] = field(default_factory=list)
     duplicate_rows: List[OrListRow] = field(default_factory=list)  # exact-duplicate (store,or,so) rows, 2nd+ occurrence
     or_under_multiple_stores: Dict[str, List[str]] = field(default_factory=dict)  # or_norm -> [store_raw, ...]
@@ -123,21 +132,65 @@ class OrListImportResult:
 #    containing recognisable aliases, never assume a fixed row/sheet)
 # =========================================================================
 def _find_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 40):
-    """Returns (header_row_idx, {field: column_label}) or (None, None)."""
+    """Returns (header_row_idx, {field: column_position}, detection_source)
+    or (None, None, None).
+
+    Column POSITIONS (0-based int), not labels -- a real-world file can have
+    a header row like "OR" / "OR" / "SO" (duplicate literal text, no STORE
+    column at all -- see SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER below); pandas
+    mangles duplicate column names on read ("OR" -> "OR"/"OR.1"), so a
+    label-based map can't reliably say which physical column is meant.
+    Position-based mapping is unambiguous for both branches.
+
+    Tier 1 (LITERAL_HEADER, unchanged from before): a row with one column
+    matching a STORE alias AND one matching an OR alias -- exact, no
+    guessing.
+
+    Tier 2 (SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER, v13/FIX1): only tried
+    when NO row anywhere in the sheet has a literal STORE alias. A row with
+    >=2 columns matching an OR alias (by position) AND >=1 column matching
+    an SO alias is a recognisable, deterministic shape (confirmed against a
+    real production OR List: header literally reads "OR"/"OR"/"SO" with no
+    STORE label, and the first "OR"-labelled column holds free-text Store
+    descriptions, the second holds the actual PO/OR code, matching the
+    STORE/OR/SO column ORDER convention used everywhere else in this
+    workbook). The leftmost OR-aliased column is reinterpreted as STORE,
+    the next one as OR, SO stays SO. This is a structural/positional rule,
+    not a fuzzy content guess -- it never fires if a literal STORE header
+    exists anywhere in the sheet (that always wins), and it never fires for
+    a sheet with only ONE "OR"-aliased column (nothing to reinterpret as
+    STORE). Lowest priority: only used when the whole sheet has no literal
+    match anywhere."""
+    semantic_fallback = None  # (row_idx, {field: position}) -- first candidate seen, kept as fallback only
     for i in range(min(max_scan_rows, len(raw_df))):
         cells = [c for c in raw_df.iloc[i].tolist()]
-        norm_cells = {_norm_header(c): c for c in cells if _norm_header(c)}
-        if not norm_cells:
+        norm_positions = [(pos, _norm_header(c)) for pos, c in enumerate(cells)]
+        norm_map: Dict[str, int] = {}
+        for pos, n in norm_positions:
+            if n and n not in norm_map:  # keep the FIRST (leftmost) column for each normalized header text
+                norm_map[n] = pos
+        if not norm_map:
             continue
-        store_col = next((norm_cells[a] for a in _STORE_ALIASES_NORM if a in norm_cells), None)
-        or_col = next((norm_cells[a] for a in _OR_ALIASES_NORM if a in norm_cells), None)
-        so_col = next((norm_cells[a] for a in _SO_ALIASES_NORM if a in norm_cells), None)
-        if store_col is not None and or_col is not None:
-            mapping = {"store": store_col, "or": or_col}
-            if so_col is not None:
-                mapping["so"] = so_col
-            return i, mapping
-    return None, None
+        store_pos = next((norm_map[a] for a in _STORE_ALIASES_NORM if a in norm_map), None)
+        or_pos = next((norm_map[a] for a in _OR_ALIASES_NORM if a in norm_map), None)
+        so_pos = next((norm_map[a] for a in _SO_ALIASES_NORM if a in norm_map), None)
+        if store_pos is not None and or_pos is not None:
+            mapping = {"store": store_pos, "or": or_pos}
+            if so_pos is not None:
+                mapping["so"] = so_pos
+            return i, mapping, "LITERAL_HEADER"
+        if store_pos is None and semantic_fallback is None:
+            or_positions = [pos for pos, n in norm_positions if n in _OR_ALIASES_NORM]
+            so_positions = [pos for pos, n in norm_positions if n in _SO_ALIASES_NORM]
+            if len(or_positions) >= 2 and so_positions:
+                store_p, or_p = or_positions[0], or_positions[1]
+                so_p = so_positions[0]
+                if store_p < or_p:
+                    semantic_fallback = (i, {"store": store_p, "or": or_p, "so": so_p})
+    if semantic_fallback is not None:
+        i, mapping = semantic_fallback
+        return i, mapping, "SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER"
+    return None, None, None
 
 
 def _diagnose_sheet(raw_df: pd.DataFrame, sheet: str, max_scan_rows: int) -> str:
@@ -216,7 +269,7 @@ def load_or_list(path, sheet_name: Optional[str] = None) -> OrListImportResult:
         if raw.empty:
             _all_sheet_diagnostics.append(f"--- Sheet {sheet!r}: empty, no rows at all ---")
             continue
-        header_row_idx, mapping = _find_header_row(raw, max_scan_rows=_MAX_SCAN_ROWS)
+        header_row_idx, mapping, detection_source = _find_header_row(raw, max_scan_rows=_MAX_SCAN_ROWS)
         if header_row_idx is None:
             # Header not found on THIS sheet -- build the diagnostic block now
             # (sheet names, first 10 non-empty rows raw+normalized, candidate
@@ -225,23 +278,29 @@ def load_or_list(path, sheet_name: Optional[str] = None) -> OrListImportResult:
             _all_sheet_diagnostics.append(_diagnose_sheet(raw, sheet, _MAX_SCAN_ROWS))
             continue
 
-        df = pd.read_excel(path, sheet_name=sheet, header=header_row_idx, dtype=str)
-        df.columns = [str(c).strip() for c in df.columns]
-        store_col, or_col = mapping["store"], mapping["or"]
-        so_col = mapping.get("so")
-        if store_col not in df.columns or or_col not in df.columns:
+        # v13 (FIX1): read data rows POSITIONALLY straight off `raw` (already
+        # loaded with header=None) instead of re-reading via pandas with
+        # header=header_row_idx -- a duplicate-text header ("OR"/"OR"/"SO")
+        # would otherwise get silently mangled into "OR"/"OR.1" column
+        # labels by pandas, which the SEMANTIC_FALLBACK path's positional
+        # mapping was built to avoid depending on in the first place.
+        n_cols = raw.shape[1]
+        store_pos, or_pos = mapping["store"], mapping["or"]
+        so_pos = mapping.get("so")
+        if store_pos >= n_cols or or_pos >= n_cols:
             result.warnings.append(f"Sheet '{sheet}': header detected at row {header_row_idx + 1} "
-                                    f"but the mapped columns didn't survive the header re-read -- skipped.")
+                                    f"but the mapped column position(s) are out of range -- skipped.")
             continue
 
         rows: List[OrListRow] = []
-        for i, r in df.iterrows():
-            store_raw = _clean_excel_value(r.get(store_col))
-            or_raw = _clean_excel_value(r.get(or_col))
-            so_raw = _clean_excel_value(r.get(so_col)) if so_col else ""
+        for i in range(header_row_idx + 1, len(raw)):
+            row_vals = raw.iloc[i]
+            store_raw = _clean_excel_value(row_vals.iloc[store_pos])
+            or_raw = _clean_excel_value(row_vals.iloc[or_pos])
+            so_raw = _clean_excel_value(row_vals.iloc[so_pos]) if so_pos is not None and so_pos < n_cols else ""
             if not store_raw and not or_raw and not so_raw:
                 continue  # blank row -- ignored, not an error
-            excel_row_number = header_row_idx + 2 + i  # +1 for 0->1-based, +1 for the header row itself
+            excel_row_number = i + 1  # raw's 0-based row index -> 1-based Excel row number
             if not store_raw or not or_raw:
                 result.errors.append(
                     f"Sheet '{sheet}' row {excel_row_number}: STORE and OR are both required when an "
@@ -252,17 +311,26 @@ def load_or_list(path, sheet_name: Optional[str] = None) -> OrListImportResult:
                 store_raw=store_raw, store_norm=_norm_header(store_raw),
                 or_raw=or_raw, or_norm=_norm_header(or_raw),
                 so_raw=so_raw, so_norm=_norm_header(so_raw),
+                detection_source=detection_source, source_sheet=sheet,
             ))
+
+        if detection_source == "SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER":
+            result.warnings.append(
+                f"Sheet '{sheet}' row {header_row_idx + 1}: no STORE column header found, but a "
+                f"duplicate OR/OR/SO-shaped header was recognised -- the first OR-labelled column "
+                f"was reinterpreted as STORE (semantic fallback, see OrListRow.detection_source).")
 
         if not rows and result.errors:
             result.status = "REQUIRED_FIELD_MISSING"
             result.sheet_used = sheet
             result.header_row = header_row_idx + 1
+            result.detection_source = detection_source
             return result
         if rows:
             result.status = "OK"
             result.sheet_used = sheet
             result.header_row = header_row_idx + 1
+            result.detection_source = detection_source
             result.rows = rows
             _validate_rows(result)
             return result

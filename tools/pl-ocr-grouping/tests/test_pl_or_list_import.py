@@ -240,6 +240,106 @@ test("exact-duplicate rows are flagged in duplicate_rows, never silently dropped
 test("same OR value under two different Stores is flagged", t_or_under_multiple_stores_flagged)
 
 
+# =========================================================================
+# v13 (FIX1): semantic header fallback -- a real production OR List whose
+# header row literally reads "OR" / "OR" / "SO" (no STORE column at all),
+# with the first OR-labelled column holding free-text Store descriptions
+# and the second holding the actual PO/OR code.
+# =========================================================================
+def t_semantic_fallback_duplicate_or_header_loads_ok():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["OR", "OR", "SO"],
+            ["20260609 CN - Guangzhou Parc Central Replen", "po38070", "inv628037"],
+            ["20260609 CN - Hangzhou Mixc Replen", "po38068", "inv628036"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "OK", result.errors
+        assert result.detection_source == "SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER"
+        assert len(result.rows) == 2
+        r0 = result.rows[0]
+        assert r0.store_raw == "20260609 CN - Guangzhou Parc Central Replen"
+        assert r0.or_raw == "po38070"
+        assert r0.so_raw == "inv628037"
+        assert r0.detection_source == "SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER"
+        assert r0.source_sheet == "Sheet1"
+
+
+def t_semantic_fallback_matches_real_7_store_or_list_shape():
+    """Reproduces the exact real production OR List shape (7 stores,
+    duplicate OR/OR/SO header) -- see audit notes for the source file."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["OR", "OR", "SO"],
+            ["20260609 CN - Guangzhou Parc Central Replen", "po38070", "inv628037"],
+            ["20260609 CN - Hangzhou Mixc Replen", "po38068", "inv628036"],
+            ["20260609 CN - Iapm Replen", "po38072", "inv628039"],
+            ["20260609 CN - Kerry Center flagship Replen", "po38071", "inv628038"],
+            ["20260609 CN - Shanghai Hongqiao Airport Replen", "po38074", "inv628042"],
+            ["20260609 CN - Shanghai Taikooli (Shop B1-07b) Replen", "po38076", "inv628041"],
+            ["20260609 CN - Shenzhen Mixc City (Shop T228) Replen", "po38073", "inv628040"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "OK", result.errors
+        assert len(result.rows) == 7
+        by_or = {r.or_raw: r for r in result.rows}
+        assert by_or["po38074"].store_raw.startswith("20260609 CN - Shanghai Hongqiao")
+        assert by_or["po38074"].so_raw == "inv628042"
+
+
+def t_literal_store_header_always_wins_over_semantic_fallback():
+    """A sheet with a genuine STORE column elsewhere must never fall back to
+    the semantic OR/OR/SO reinterpretation, even if an earlier row happens
+    to look duplicate-OR-shaped."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["junk", "OR", "OR", "SO"],
+            ["STORE", "OR", "junk", "SO"],
+            ["Kerry", "OR1016", "", "SO4020"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "OK", result.errors
+        assert result.detection_source == "LITERAL_HEADER"
+        assert result.rows[0].store_raw == "Kerry"
+        assert result.rows[0].or_raw == "OR1016"
+
+
+def t_semantic_fallback_never_fires_with_only_one_or_column():
+    """A single OR column (no duplicate) with no STORE column has nothing to
+    reinterpret as STORE -- must stay HEADER_NOT_FOUND, never guess."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["OR", "SO"],
+            ["po38070", "inv628037"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "HEADER_NOT_FOUND"
+
+
+def t_semantic_fallback_never_fires_without_an_so_column():
+    """Two OR-aliased columns but no SO column at all is NOT the recognised
+    shape (spec: >=2 OR columns AND >=1 SO column) -- must not guess."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["OR", "OR"],
+            ["Kerry Center flagship", "po38071"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "HEADER_NOT_FOUND"
+
+
+test("semantic fallback: duplicate OR/OR/SO header (no STORE) loads OK, detection_source recorded", t_semantic_fallback_duplicate_or_header_loads_ok)
+test("semantic fallback: matches the real 7-store production OR List shape exactly", t_semantic_fallback_matches_real_7_store_or_list_shape)
+test("literal STORE header always wins over the semantic OR/OR/SO fallback", t_literal_store_header_always_wins_over_semantic_fallback)
+test("semantic fallback never fires with only one OR-aliased column (nothing to reinterpret)", t_semantic_fallback_never_fires_with_only_one_or_column)
+test("semantic fallback never fires without an SO column (not the recognised shape)", t_semantic_fallback_never_fires_without_an_so_column)
+
+
 print(f"\n{_passed} passed, {_failed} failed")
 if _failed:
     sys.exit(1)

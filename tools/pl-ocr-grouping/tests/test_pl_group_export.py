@@ -14,6 +14,7 @@ if str(TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(TOOL_DIR))
 
 import pl_group_export as pge
+import pl_or_list_import as oli
 
 _passed = 0
 _failed = 0
@@ -203,6 +204,136 @@ test("version-marker stripping does not alter legitimate codes with no version m
      t_factory_detection_version_marker_does_not_alter_legitimate_codes)
 test("carton_factory_rank_table() merges CARTON_FACTORY_ORDER_WITH_CO + CARTON_FACTORY_ORDER_NO_CO consistently",
      t_carton_factory_rank_table_merges_the_two_named_constants)
+
+
+# =========================================================================
+# v13 (FIX2/FIX3/FIX4): canonical Store identity from OR List free text +
+# explicit Shipping-Mark short-code aliases + tiered exact/fuzzy matching,
+# using the real production store descriptions and Shipping Mark shapes
+# (see audit notes -- real OR List.xlsx / SUBLIST_TOTAL.pdf).
+# =========================================================================
+print()
+print("== pl_group_export Store/OR/SO matching (v13) ==")
+
+_REAL_OR_ROWS = [
+    ("20260609 CN - Guangzhou Parc Central Replen", "po38070", "inv628037"),
+    ("20260609 CN - Hangzhou Mixc Replen", "po38068", "inv628036"),
+    ("20260609 CN - Iapm Replen", "po38072", "inv628039"),
+    ("20260609 CN - Kerry Center flagship Replen", "po38071", "inv628038"),
+    ("20260609 CN - Shanghai Hongqiao Airport Replen", "po38074", "inv628042"),
+    ("20260609 CN - Shanghai Taikooli (Shop B1-07b) Replen", "po38076", "inv628041"),
+    ("20260609 CN - Shenzhen Mixc City (Shop T228) Replen", "po38073", "inv628040"),
+]
+
+
+def _real_or_index():
+    rows = [
+        oli.OrListRow(row_number=i + 2, store_raw=store, store_norm="",
+                       or_raw=or_v, or_norm=or_v.upper(), so_raw=so_v, so_norm=so_v.upper())
+        for i, (store, or_v, so_v) in enumerate(_REAL_OR_ROWS)
+    ]
+    idx = {}
+    for r in rows:
+        idx.setdefault(r.or_norm, []).append(r)
+    return idx
+
+
+class _FakePkg:
+    def __init__(self, shipping_mark="", reference_code=""):
+        self.shipping_mark = shipping_mark
+        self.reference_code = reference_code
+
+
+def t_canonical_store_identity_resolves_all_7_real_descriptions():
+    expected = ["GUANGZHOU", "HANGZHOU", "IAPM", "KERRY",
+                "SHANGHAI_HONGQIAO", "SHANGHAI_TAIKOOLI", "SHENZHEN"]
+    for (store_text, _or, _so), exp_key in zip(_REAL_OR_ROWS, expected):
+        got = pge._canonical_store_identity_for_or_row(store_text)
+        assert got == pge._store_identity(exp_key.replace("_", " ")),             f"{store_text!r} -> {got!r}, expected canonical form of {exp_key!r}"
+
+
+def t_explicit_short_shipmark_codes_resolve_unambiguously():
+    """HZ/KR/GZ/SZ/IAPM are explicit shipping_mark_tokens aliases (v13) --
+    never fuzzy, always an exact single-store hit."""
+    idx = _real_or_index()
+    cases = {
+        "CN-1529_HZ_PVG_POP": ("po38068", "inv628036"),
+        "CN-1529_KR_PVG_VN": ("po38071", "inv628038"),
+        "CN-1529_GZ_SZX_CN": ("po38070", "inv628037"),
+        "CN-1529_SZ_SZX_VN": ("po38073", "inv628040"),
+        "CN-1529_IAPM_PVG_POP": ("po38072", "inv628039"),
+    }
+    for mark, (exp_or, exp_so) in cases.items():
+        m = pge.match_store_and_or(_FakePkg(shipping_mark=mark), idx)
+        assert m.status == "OK", f"{mark}: expected OK, got {m.status} ({m.review_reason})"
+        assert m.match_source == "SHIPMARK_TOKEN_EXACT"
+        assert m.matched_or == exp_or and m.matched_so == exp_so, f"{mark}: {m.matched_or}/{m.matched_so}"
+
+
+def t_compound_hyphenated_shipmark_codes_resolve_via_bigram():
+    """"SH-Airport" / "SH-Taikooli" tokenize into two generic pieces
+    (SH + AIRPORT/TAIKOOLI) -- must resolve via the adjacent-token bigram
+    join ("SHAIRPORT"/"SHTAIKOOLI"), each to its OWN distinct store, never
+    confused with each other."""
+    idx = _real_or_index()
+    m1 = pge.match_store_and_or(_FakePkg(shipping_mark="CN-1529_SH-Airport_PVG_POP"), idx)
+    assert m1.status == "OK" and m1.matched_or == "po38074", m1.review_reason
+    m2 = pge.match_store_and_or(_FakePkg(shipping_mark="CN-1529_SH-Taikooli_PVG_CN"), idx)
+    assert m2.status == "OK" and m2.matched_or == "po38076", m2.review_reason
+
+
+def t_generic_alias_word_does_not_create_false_ambiguity_with_chengdu():
+    """Regression test for a real bug found during audit: CHENGDU's own
+    alias "Chengdu Taikooli" shares the generic mall-brand word "Taikooli"
+    with SHANGHAI_TAIKOOLI -- that shared word must never make an otherwise
+    clean "SH-Taikooli" Shipmark match ambiguous with Chengdu (which isn't
+    even in this shipment)."""
+    idx = _real_or_index()
+    m = pge.match_store_and_or(_FakePkg(shipping_mark="CN-1529_SH-Taikooli_PVG_POP"), idx)
+    assert m.status == "OK", f"expected OK, got REVIEW: {m.review_reason}"
+    assert m.matched_or == "po38076"
+
+
+def t_store_resolves_for_pop_and_vn_factories_not_just_cn():
+    """FIX4: match_store_and_or itself is factory-agnostic (it only looks at
+    Shipmark/reference_code/receiver text) -- confirm POP and VN-tagged
+    Shipping Marks resolve exactly like CN ones."""
+    idx = _real_or_index()
+    for factory in ("POP", "VN", "CN"):
+        mark = f"CN-1529_KR_PVG_{factory}"
+        m = pge.match_store_and_or(_FakePkg(shipping_mark=mark), idx)
+        assert m.status == "OK", f"{mark}: {m.review_reason}"
+        assert m.matched_or == "po38071"
+
+
+def t_unconfigured_short_code_never_silently_guessed():
+    """A short 2-letter code that ISN'T one of the explicitly configured
+    shipping_mark_tokens must never fuzzy-guess a store -- short codes are
+    explicitly excluded from fuzzy matching by design (only explicit exact
+    aliases are trusted at that length)."""
+    idx = _real_or_index()
+    m = pge.match_store_and_or(_FakePkg(shipping_mark="CN-1529_XX_PVG_POP"), idx)
+    assert m.status != "OK", "an unconfigured short code must never resolve to a confident match"
+
+
+def t_no_or_list_returns_no_or_list_status():
+    m = pge.match_store_and_or(_FakePkg(shipping_mark="CN-1529_KR_PVG_POP"), {})
+    assert m.status == "NO_OR_LIST"
+
+
+test("canonical store identity resolves all 7 real OR List free-text descriptions to their STORE_MASTER key",
+     t_canonical_store_identity_resolves_all_7_real_descriptions)
+test("explicit short Shipmark codes (HZ/KR/GZ/SZ/IAPM) resolve unambiguously via SHIPMARK_TOKEN_EXACT",
+     t_explicit_short_shipmark_codes_resolve_unambiguously)
+test("compound hyphenated Shipmark codes (SH-Airport/SH-Taikooli) resolve via adjacent-token bigram match",
+     t_compound_hyphenated_shipmark_codes_resolve_via_bigram)
+test("a generic shared alias word (Taikooli) never creates false ambiguity between two different stores",
+     t_generic_alias_word_does_not_create_false_ambiguity_with_chengdu)
+test("Store resolves identically for POP/VN/CN factories (v13 FIX4: not CN-only any more)",
+     t_store_resolves_for_pop_and_vn_factories_not_just_cn)
+test("an unconfigured short code is never silently guessed into a wrong store",
+     t_unconfigured_short_code_never_silently_guessed)
+test("no OR List uploaded -> NO_OR_LIST status, never a crash", t_no_or_list_returns_no_or_list_status)
 
 
 print(f"\n{_passed} passed, {_failed} failed")

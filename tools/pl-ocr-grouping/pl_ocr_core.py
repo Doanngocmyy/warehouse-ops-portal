@@ -6,7 +6,7 @@ plain black grid, no bold/no color fill) + Match_Status (internal QC log,
 color-coded on purpose so mismatches stay easy to spot).
 Updates: No/Product Name split, robust HS Code lookup, revised Origin logic,
 Origin/HS Code repeated per item, Packing List sheet now mirrors the real
-PL template columns 1:1 (Item#, PO No., Invoice No., Product Name in
+PL template columns 1:1 (Item#, OR No., SO No., Product Name in
 English, SKU#, BarCode/UPC, UOM, Quantity, Carton#, Packaging code, Carton
 Dimensions L/W/H, Weight, CBM, Origin Country, Origin Country's HTSCODE,
 Shipping Mark, PORT, 中国标签名称) with a plain black-bordered grid
@@ -18,8 +18,9 @@ v9: Shipping Mark is now auto-filled with the source PDF's filename (no
 factories can now be typed once on the app.html page (MANUAL_CONSIGNEE /
 MANUAL_NOTIFY_PARTY) instead of edited by hand in every exported file; CN
 shipments keep auto-filling from STORE_MASTER regardless of what's typed
-there. PO No. / Invoice No. / 中国标签名称 are still intentionally left
-blank — fill them in manually.
+there. OR No. / SO No. are auto-filled from a matched OR List when one is
+uploaded (v13); 中国标签名称 is still intentionally left blank — fill it in
+manually.
 """
 from __future__ import annotations
 import re, sys, logging, unicodedata, difflib, json
@@ -1708,7 +1709,8 @@ def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recurs
     shipments by store/port (pl_group_export.py) — "quy luật chia port và
     store" the warehouse team already uses. Non-CN-factory packages (POP,
     SBGEAR, QIFENG, JION, or unclassifiable) are left with port="" / store=""
-    (blank) — fill in manually if needed, same as PO No. / Invoice No."""
+    (blank) — fill in manually if needed, same as OR No. / SO No. when no
+    OR List match is available."""
     try:
         import pl_group_export as pge
     except ImportError:
@@ -1778,15 +1780,25 @@ MS_HDR_FONT = Font(bold=True, color="FFFFFF", size=10)
 #  N Weight (KG)      O CBM
 #  P Origin Country   Q Origin Country's HTSCODE            R Shipping Mark
 #  S PORT             T 中国标签名称
+# v13 (FIX6): the real production PL template's columns B/C are labelled
+# "OR No." / "SO No." (confirmed against a real uploaded PL_Total.xlsx --
+# NOT "PO No." / "Invoice No." as this file previously assumed/hardcoded).
+# Now that pl_or_list_import.py + pl_group_export.match_store_and_or can
+# resolve a package's OR/SO from an uploaded OR List (v12 feature, extended
+# in v13 to work for every factory, not just CN), these columns are filled
+# from pkg.or_number / pkg.so_number instead of being left permanently
+# blank for manual entry -- "manual" is now only the fallback when no OR
+# List is uploaded or a package doesn't resolve (both leave the cell "",
+# same as before, never a guess).
 PL_HEADERS_EN = [
-    "Item#", "PO No.", "Invoice No.", "Product Name\nin English", "SKU#",
+    "Item#", "OR No.", "SO No.", "Product Name\nin English", "SKU#",
     "BarCode/UPC", "UOM", "Quantity", "Carton#", "Packaging code",
     "Carton Dimensions (cm)\n(Length*Weight*Height)", "", "",
     "Weight (KG)", "CBM", "Origin Country", "Origin Country's HTSCODE",
     "Shipping Mark", "PORT", "中国标签名称",
 ]
 PL_HEADERS_CN = [
-    "项目", "PO 编码", "Invoice 编码", "货品名称", "SKU编码",
+    "项目", "OR 编码", "SO 编码", "货品名称", "SKU编码",
     "条形码", "单位", "数量", "箱号", "包装条形码",
     "箱子尺寸", "", "",
     "", "", "原产国", "原产国",
@@ -2051,10 +2063,16 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         origin    = pkg.origin
         pkg_start = row_idx
 
+        # v13 (FIX6): OR No. / SO No. -- filled from a successful OR List
+        # match when available, left "" otherwise (never a guess; matches
+        # the same "manual" fallback the sheet has always had for anything
+        # this tool can't determine on its own).
+        pkg_or = pkg.or_number or ""
+        pkg_so = pkg.so_number or ""
         if not pkg.items:
             item_no += 1
             ws1.append([
-                item_no, "", "",                      # Item# / PO No. / Invoice No. (manual)
+                item_no, pkg_or, pkg_so,                # Item# / OR No. / SO No.
                 "", "", "", "", "",                     # Product/SKU/Barcode/UOM/Qty (no items)
                 pkg.global_carton_num, pkg.package_code,
                 pkg.length, pkg.width, pkg.height,
@@ -2067,7 +2085,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
             for item in pkg.items:
                 item_no += 1
                 ws1.append([
-                    item_no, "", "",                                  # Item# / PO No. / Invoice No.
+                    item_no, pkg_or, pkg_so,                          # Item# / OR No. / SO No.
                     item.product_name, item.product_code, item.barcode,
                     item.unit, item.quantity,
                     pkg.global_carton_num, pkg.package_code,
