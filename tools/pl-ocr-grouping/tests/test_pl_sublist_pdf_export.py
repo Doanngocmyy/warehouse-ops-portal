@@ -99,6 +99,126 @@ test("only Base-14 standard fonts used (no Calibri/font files shipped)", t_no_fo
 
 
 # =============================================================================
+# 1b. Visual-layout geometry regression tests (spec: metadata block moved
+#     to the upper-right, Total QTY placed dynamically after the last
+#     item row -- both caught during visual review of the first preview).
+# =============================================================================
+print("\n== Visual-layout geometry regression tests ==")
+
+
+def t_metadata_block_right_edge_is_in_the_right_half_of_the_page():
+    value_x, label_right_x = ppe._compute_metadata_x(
+        ["1/6", "CN-1666-PVG-KERRY-POP", "OR1016", "so402064", "35.68 KG", "PGKECO377R7J0320001"])
+    widest = "CN-1666-PVG-KERRY-POP"
+    from reportlab.pdfbase import pdfmetrics
+    value_width = pdfmetrics.stringWidth(widest, ppe.FONT_VALUE, ppe.SIZE_VALUE)
+    block_right_edge = value_x + value_width
+    assert block_right_edge <= ppe.CONTENT_RIGHT + 0.5, "value text must never overlap the right margin"
+    assert block_right_edge > ppe.CONTENT_RIGHT - 5, "block right edge should sit close to the right margin"
+
+
+def t_metadata_center_x_is_right_of_page_center():
+    value_x, label_right_x = ppe._compute_metadata_x(["1/4", "CN-1667-PVG-HANGZHOU", "OR2044", "so402064", "22.10 KG", "PGKECH0"])
+    from reportlab.pdfbase import pdfmetrics
+    value_width = pdfmetrics.stringWidth("CN-1667-PVG-HANGZHOU", ppe.FONT_VALUE, ppe.SIZE_VALUE)
+    label_width = pdfmetrics.stringWidth("Packing Code #", ppe.FONT_LABEL, ppe.SIZE_LABEL)
+    block_left_edge = label_right_x - label_width
+    block_right_edge = value_x + value_width
+    block_center_x = (block_left_edge + block_right_edge) / 2
+    page_center_x = ppe.PAGE_W / 2
+    assert block_center_x > page_center_x, \
+        f"metadata block center ({block_center_x:.1f}) must be right of page center ({page_center_x:.1f})"
+
+
+def t_label_value_gap_is_within_the_compact_threshold():
+    value_x, label_right_x = ppe._compute_metadata_x(["1/6", "short", "OR1", "so1", "1 KG", "PGKEC1"])
+    gap = value_x - label_right_x
+    # spec: "approximately 2-4mm only" -- allow a little slack either side.
+    gap_mm = gap * 25.4 / 72
+    assert 1.5 <= gap_mm <= 5.0, f"label/value gap is {gap_mm:.2f}mm, expected roughly 2-4mm"
+
+
+def t_metadata_values_never_overlap_right_margin_even_for_a_very_long_value():
+    long_packing_code = "PGKECO377R7J0320001-EXTRA-LONG-SUFFIX-FOR-STRESS-TEST"
+    value_x, label_right_x = ppe._compute_metadata_x(
+        ["1/6", "CN-1666-PVG-KERRY-POP", "OR1016", "so402064", "35.68 KG", long_packing_code])
+    from reportlab.pdfbase import pdfmetrics
+    widest_width = pdfmetrics.stringWidth(long_packing_code, ppe.FONT_VALUE, ppe.SIZE_VALUE)
+    assert value_x + widest_width <= ppe.CONTENT_RIGHT + 0.5, \
+        "even an unusually long value must not be pushed past the right margin"
+
+
+def t_metadata_block_moves_as_one_whole_block_not_just_values():
+    # Regression for the exact bug flagged in review: label and value must
+    # move TOGETHER -- the gap between them must stay constant regardless
+    # of which carton's data is being rendered (short vs. long values).
+    v1, l1 = ppe._compute_metadata_x(["1", "A", "B", "C", "D", "E"])
+    v2, l2 = ppe._compute_metadata_x(["999999", "A-MUCH-LONGER-VALUE-STRING", "B", "C", "D", "E"])
+    assert abs((v1 - l1) - (v2 - l2)) < 0.01, "label/value gap must be identical regardless of content length"
+
+
+test("metadata block right edge sits near the right margin, never overlapping it", t_metadata_block_right_edge_is_in_the_right_half_of_the_page)
+test("metadata block center X is right of page center X (upper-right placement)", t_metadata_center_x_is_right_of_page_center)
+test("label/value gap stays within the ~2-4mm compact threshold", t_label_value_gap_is_within_the_compact_threshold)
+test("even an unusually long value never overlaps the right margin", t_metadata_values_never_overlap_right_margin_even_for_a_very_long_value)
+test("metadata block moves as ONE whole block (constant label/value gap regardless of content)", t_metadata_block_moves_as_one_whole_block_not_just_values)
+
+
+def t_dynamic_total_5_items_immediately_follows_last_row():
+    rule_y, text_y = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, 5)
+    expected_last_item_bottom = ppe.ITEM_TABLE_START_Y - 5 * ppe.ROW_HEIGHT_ITEM
+    assert abs(rule_y - (expected_last_item_bottom - ppe.GAP_AFTER_ITEMS)) < 0.01
+    gap_between_last_item_and_rule = expected_last_item_bottom - rule_y
+    assert 0 < gap_between_last_item_and_rule <= ppe.ROW_HEIGHT_ITEM, \
+        "gap between last SKU row and the total rule must be small, not a large blank space"
+
+
+def t_dynamic_total_12_items_immediately_follows_last_row():
+    rule_y, text_y = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, 12)
+    expected_last_item_bottom = ppe.ITEM_TABLE_START_Y - 12 * ppe.ROW_HEIGHT_ITEM
+    assert 0 < (expected_last_item_bottom - rule_y) <= ppe.ROW_HEIGHT_ITEM
+
+
+def t_dynamic_total_26_items_immediately_follows_last_row():
+    rule_y, text_y = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, 26)
+    expected_last_item_bottom = ppe.ITEM_TABLE_START_Y - 26 * ppe.ROW_HEIGHT_ITEM
+    assert 0 < (expected_last_item_bottom - rule_y) <= ppe.ROW_HEIGHT_ITEM
+    # A full-capacity page's dynamic total must still land above the
+    # bottom margin -- this is the actual overflow-safety guarantee.
+    assert text_y - ppe.TOTAL_TEXT_PADDING >= ppe.MARGIN - 5
+
+
+def t_dynamic_total_gap_is_small_and_fixed_regardless_of_item_count():
+    # The gap between the last item row and the rule must be the SAME
+    # small fixed distance whether there are 3 items or 26 -- proving the
+    # total is not creeping toward some other anchor as item count changes.
+    for n in (1, 3, 5, 12, 20, 26):
+        rule_y, _ = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, n)
+        last_item_bottom = ppe.ITEM_TABLE_START_Y - n * ppe.ROW_HEIGHT_ITEM
+        gap = last_item_bottom - rule_y
+        assert abs(gap - ppe.GAP_AFTER_ITEMS) < 0.01, f"n={n}: gap={gap}, expected exactly GAP_AFTER_ITEMS"
+
+
+def t_total_qty_is_not_anchored_to_bottom_margin():
+    # For a lightly-filled carton (5 items), the total must sit FAR above
+    # the bottom margin, not pinned near it -- proving it's not anchored
+    # to a fixed bottom-page Y coordinate.
+    rule_y, text_y = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, 5)
+    distance_from_bottom_margin = text_y - ppe.MARGIN
+    distance_from_top = ppe.ITEM_TABLE_START_Y - text_y
+    assert distance_from_bottom_margin > 300, \
+        "a 5-item carton's total should be nowhere near the bottom margin"
+    assert distance_from_top < 150, "a 5-item carton's total should sit close to the top, right after its few items"
+
+
+test("dynamic total: 5-item carton -> Total QTY immediately follows item 5", t_dynamic_total_5_items_immediately_follows_last_row)
+test("dynamic total: 12-item carton -> Total QTY immediately follows item 12", t_dynamic_total_12_items_immediately_follows_last_row)
+test("dynamic total: 26-item (full page) carton -> Total QTY immediately follows item 26, still above margin", t_dynamic_total_26_items_immediately_follows_last_row)
+test("dynamic total: last-row-to-rule gap is small and identical regardless of item count", t_dynamic_total_gap_is_small_and_fixed_regardless_of_item_count)
+test("dynamic total: NOT anchored to the bottom page margin (verified via a lightly-filled carton)", t_total_qty_is_not_anchored_to_bottom_margin)
+
+
+# =============================================================================
 # 2. Pagination (_paginate_for_pdf) -- one carton per page/continuation
 # =============================================================================
 print("\n== Pagination unit tests ==")

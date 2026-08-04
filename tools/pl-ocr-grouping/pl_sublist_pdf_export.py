@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from reportlab.lib.pagesizes import A5
+from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 log = logging.getLogger("pl_sublist_pdf_export")
@@ -83,15 +84,22 @@ CONTENT_TOP = PAGE_H - MARGIN
 CONTENT_WIDTH = CONTENT_RIGHT - CONTENT_LEFT
 
 # Metadata block: label (right-aligned) + value (left-aligned), TIGHTLY
-# adjacent -- label column is only as wide as it needs to be for the
-# longest label ("Packing Code #"), value starts right after a small gap.
-# This deliberately does NOT stretch the value across to CONTENT_RIGHT --
-# spec: "khong bi day sat mep phai" (carton number / values must not be
-# pushed out to the page's far edge).
-LABEL_COL_WIDTH = 96
-VALUE_GAP = 10
-VALUE_X = CONTENT_LEFT + LABEL_COL_WIDTH + VALUE_GAP
+# adjacent, positioned in the page's UPPER-RIGHT (revision per visual
+# review: the first preview had this block left-biased -- corrected here).
+# The WHOLE two-column block moves together -- only its horizontal anchor
+# (metadata_right_x, near CONTENT_RIGHT) changes; label/value stay exactly
+# as tightly adjacent as before (small fixed gap, not stretched apart).
+#
+# Both column widths are measured from the ACTUAL text at draw time (see
+# _compute_metadata_x() below), not hardcoded, so the block's right edge
+# always lands near the page's right margin regardless of how long
+# "Shipping Mark" / "Packing Code #" values happen to be on a given
+# carton, and short values (e.g. "1/6") never get stranded out at the
+# margin with a huge gap back to their label.
 ROW_HEIGHT_META = 17
+VALUE_LABEL_GAP_MM = 3  # spec: "approximately 2-4 mm only"
+VALUE_LABEL_GAP = VALUE_LABEL_GAP_MM * 72 / 25.4  # ~8.5pt
+MIN_VALUE_COL_WIDTH = 30  # floor so an all-blank metadata row can't collapse the column to 0
 
 METADATA_ROWS = [
     ("carton", "Carton #"),
@@ -105,6 +113,25 @@ META_BLOCK_HEIGHT = len(METADATA_ROWS) * ROW_HEIGHT_META
 
 GAP_AFTER_METADATA = 14
 
+
+def _compute_metadata_x(value_texts) -> "tuple[float, float]":
+    """-> (metadata_value_x, metadata_label_right_x), both measured from
+    the actual value text widths so the block's right edge sits near
+    CONTENT_RIGHT (the page's right margin) and the label/value gap stays
+    a small fixed distance regardless of content length. Pure function --
+    no canvas needed (pdfmetrics.stringWidth uses the font's built-in
+    AFM/glyph-width table), so this is directly unit-testable.
+
+        metadata_right_x     = CONTENT_RIGHT               (page_width - right_margin)
+        metadata_value_x     = metadata_right_x - value_column_width
+        metadata_label_right_x = metadata_value_x - VALUE_LABEL_GAP
+    """
+    widths = [pdfmetrics.stringWidth(str(v or ""), FONT_VALUE, SIZE_VALUE) for v in value_texts]
+    value_column_width = max(widths + [MIN_VALUE_COL_WIDTH])
+    metadata_value_x = CONTENT_RIGHT - value_column_width
+    metadata_label_right_x = metadata_value_x - VALUE_LABEL_GAP
+    return metadata_value_x, metadata_label_right_x
+
 # Item table columns: Item No. (left) | EAN (left) | QTY (center).
 QTY_COL_WIDTH = 52
 _remaining = CONTENT_WIDTH - QTY_COL_WIDTH
@@ -117,27 +144,58 @@ COL_X_QTY_CENTER = COL_X_QTY + QTY_COL_WIDTH / 2
 
 ROW_HEIGHT_ITEM_HEADER = 16
 ROW_HEIGHT_ITEM = 14
-GAP_BEFORE_TOTAL = 6
-ROW_HEIGHT_TOTAL = 18
+
+# Total QTY row is now DYNAMIC -- placed immediately after the last
+# rendered item row (revision per visual review: the first preview
+# anchored it near the bottom margin, leaving a large empty gap on
+# lightly-filled cartons). GAP_AFTER_ITEMS is the small fixed gap between
+# the last item row and the rule above "TOTAL QTY"; TOTAL_TEXT_PADDING is
+# the fixed clearance between that rule and the total text's own baseline
+# (13pt -- this is the exact value that fixed the rule-strikes-through-
+# text overlap bug found during the first visual-validation pass; kept
+# unchanged here since that fix is independent of the total row's
+# position now being dynamic instead of fixed).
+GAP_AFTER_ITEMS = 8
+TOTAL_TEXT_PADDING = 13
 GAP_BEFORE_CONTINUED_NOTE = 4
 ROW_HEIGHT_CONTINUED_NOTE = 12
 
-# Fixed vertical budget consumed by everything EXCEPT the item rows
-# themselves, on a page that has neither a "Continued" note nor needs one
-# (worst case reserves the note's height too, so capacity never overflows
-# a continuation page that DOES need it).
-_FIXED_CHROME_HEIGHT = (
-    META_BLOCK_HEIGHT + GAP_AFTER_METADATA + ROW_HEIGHT_ITEM_HEADER
-    + GAP_BEFORE_TOTAL + ROW_HEIGHT_TOTAL
-    + GAP_BEFORE_CONTINUED_NOTE + ROW_HEIGHT_CONTINUED_NOTE
-)
-_AVAILABLE_FOR_ITEMS = (CONTENT_TOP - MARGIN) - _FIXED_CHROME_HEIGHT
+# y-position of the FIRST item row (immediately below the header) -- fixed
+# per page (metadata block height doesn't vary), items are what varies.
+ITEM_TABLE_START_Y = CONTENT_TOP - META_BLOCK_HEIGHT - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
+
+# Fixed vertical budget that must be reserved BELOW the item rows for the
+# total row + a possible "Continued" note, even though the total row's
+# actual draw position is now dynamic (see _compute_total_y()) -- this is
+# what still caps ITEMS_PER_PDF_PAGE so a full page's dynamic total can
+# never be pushed below the bottom margin.
+_RESERVED_BELOW_ITEMS = GAP_AFTER_ITEMS + TOTAL_TEXT_PADDING + GAP_BEFORE_CONTINUED_NOTE + ROW_HEIGHT_CONTINUED_NOTE
+_AVAILABLE_FOR_ITEMS = (ITEM_TABLE_START_Y - MARGIN) - _RESERVED_BELOW_ITEMS
 # Item capacity per A5 page, derived from actual page geometry above (not
 # copied from the Excel template's 18 -- see module docstring). Documented
 # here rather than silently picked: at MARGIN=28/ROW_HEIGHT_ITEM=14 this
-# works out to ~24 items/page; verified against a rendered sample (see
+# works out to ~24-26 items/page; verified against a rendered sample (see
 # tests/test_pl_sublist_pdf_export.py's visual-validation step).
 ITEMS_PER_PDF_PAGE = max(1, int(_AVAILABLE_FOR_ITEMS // ROW_HEIGHT_ITEM))
+
+
+def _compute_total_y(item_table_start_y: float, rendered_item_count: int) -> "tuple[float, float]":
+    """-> (total_rule_y, total_text_y). Pure function -- the exact formula
+    requested during visual review:
+
+        last_item_bottom_y = item_table_start_y - rendered_item_count * ROW_HEIGHT_ITEM
+        total_rule_y        = last_item_bottom_y - GAP_AFTER_ITEMS
+        total_text_y         = total_rule_y - TOTAL_TEXT_PADDING
+
+    Deliberately does NOT reference MARGIN/CONTENT_TOP/page bottom at all
+    -- the total's position is a function of how many items were actually
+    drawn on THIS page, never a fixed bottom-page Y coordinate. Works
+    identically for a normal page (5 items) and a continuation page (still
+    counts only the items rendered on that specific page)."""
+    last_item_bottom_y = item_table_start_y - rendered_item_count * ROW_HEIGHT_ITEM
+    total_rule_y = last_item_bottom_y - GAP_AFTER_ITEMS
+    total_text_y = total_rule_y - TOTAL_TEXT_PADDING
+    return total_rule_y, total_text_y
 
 
 # =========================================================================
@@ -186,11 +244,12 @@ def _paginate_for_pdf(cartons: list) -> List[PdfPageBlock]:
 # =========================================================================
 # 4) Single-page drawing
 # =========================================================================
-def _draw_metadata_row(c: canvas.Canvas, y: float, label: str, value: str):
+def _draw_metadata_row(c: canvas.Canvas, y: float, label: str, value: str,
+                        value_x: float, label_right_x: float):
     c.setFont(FONT_LABEL, SIZE_LABEL)
-    c.drawRightString(CONTENT_LEFT + LABEL_COL_WIDTH, y, label)
+    c.drawRightString(label_right_x, y, label)
     c.setFont(FONT_VALUE, SIZE_VALUE)
-    c.drawString(VALUE_X, y, value or "")
+    c.drawString(value_x, y, value or "")
 
 
 def _draw_page(c: canvas.Canvas, block: PdfPageBlock):
@@ -198,9 +257,11 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock):
     y = CONTENT_TOP
 
     # -- Metadata block (Carton# / Shipping Mark / OR# / SO Order# / GW /
-    #    Packing Code#) -- label right-aligned, value left-aligned, both
-    #    columns tightly adjacent near the page's LEFT side (never spread
-    #    across the full page width, never pushed to the right edge).
+    #    Packing Code#) -- label right-aligned, value left-aligned, TIGHTLY
+    #    adjacent, positioned in the page's UPPER-RIGHT (see
+    #    _compute_metadata_x() docstring for the exact formula) -- the
+    #    left side of the page stays visually open, matching the approved
+    #    reference layout.
     meta_values = {
         "carton": block.block_carton_label,
         "shipping_mark": carton.shipping_mark,
@@ -209,9 +270,11 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock):
         "gw": carton.gross_weight_display,
         "packing_code": carton.packing_code,
     }
+    value_texts = [meta_values.get(key, "") for key, _label in METADATA_ROWS]
+    metadata_value_x, metadata_label_right_x = _compute_metadata_x(value_texts)
     for key, label in METADATA_ROWS:
         y -= ROW_HEIGHT_META
-        _draw_metadata_row(c, y, label, meta_values.get(key, ""))
+        _draw_metadata_row(c, y, label, meta_values.get(key, ""), metadata_value_x, metadata_label_right_x)
 
     y -= GAP_AFTER_METADATA
 
@@ -223,6 +286,7 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock):
     c.setLineWidth(0.75)
     c.line(CONTENT_LEFT, y - 3, CONTENT_RIGHT, y - 3)
     y -= ROW_HEIGHT_ITEM_HEADER
+    assert abs(y - ITEM_TABLE_START_Y) < 0.01, "item_table_start_y drifted from the module constant"
 
     # -- Item rows: Item No. / EAN left-aligned, QTY centered --
     c.setFont(FONT_ITEM, SIZE_ITEM)
@@ -232,28 +296,27 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock):
         c.drawCentredString(COL_X_QTY_CENTER, y, str(row.qty))
         y -= ROW_HEIGHT_ITEM
 
-    # -- Total QTY: subtotal on a non-last continuation page, GRAND TOTAL
+    # -- Total QTY: placed DYNAMICALLY immediately after the last rendered
+    #    item row (see _compute_total_y()) -- never anchored to the page
+    #    bottom. Subtotal on a non-last continuation page, GRAND TOTAL
     #    (the full carton's total_qty) only on the carton's last page. --
-    y = MARGIN + ROW_HEIGHT_CONTINUED_NOTE + GAP_BEFORE_CONTINUED_NOTE + ROW_HEIGHT_TOTAL - 4
+    total_rule_y, total_text_y = _compute_total_y(ITEM_TABLE_START_Y, len(block.items))
     c.setLineWidth(0.75)
-    # Rule sits clearly ABOVE the text's ascent (10pt font ascent ~= 7-8pt)
-    # -- was previously only 6pt above the baseline, which struck through
-    # the tops of "TOTAL QTY" (caught during visual validation, spec
-    # section 21's required render-and-inspect step).
-    c.line(CONTENT_LEFT, y + 13, CONTENT_RIGHT, y + 13)
+    c.line(CONTENT_LEFT, total_rule_y, CONTENT_RIGHT, total_rule_y)
     c.setFont(FONT_TOTAL, SIZE_TOTAL)
     total_label = "TOTAL QTY" if block.is_last_block else "SUBTOTAL QTY"
-    c.drawRightString(CONTENT_LEFT + LABEL_COL_WIDTH, y, total_label)
-    c.drawString(VALUE_X, y, str(block.block_total_qty))
+    c.drawRightString(metadata_label_right_x, total_text_y, total_label)
+    c.drawString(metadata_value_x, total_text_y, str(block.block_total_qty))
 
-    # -- Continuation note (only on non-last blocks of a multi-page carton) --
+    # -- Continuation note (only on non-last blocks of a multi-page carton),
+    #    also placed dynamically right after the total row it follows. --
     if block.block_count > 1:
-        y -= (ROW_HEIGHT_CONTINUED_NOTE + GAP_BEFORE_CONTINUED_NOTE)
+        note_y = total_text_y - (ROW_HEIGHT_CONTINUED_NOTE + GAP_BEFORE_CONTINUED_NOTE - 4)
         c.setFont(FONT_CONTINUED, SIZE_CONTINUED)
         note = (f"Continued on next page ({block.block_index + 1}/{block.block_count})"
                 if not block.is_last_block else
                 f"Continued from previous page ({block.block_index + 1}/{block.block_count})")
-        c.drawString(CONTENT_LEFT, y, note)
+        c.drawString(CONTENT_LEFT, note_y, note)
 
 
 # =========================================================================
