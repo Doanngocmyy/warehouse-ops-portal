@@ -452,6 +452,38 @@ def t_continuation_does_not_inflate_carton_count():
     assert len(unique_cartons) == 1, "2 blocks, but still exactly 1 carton"
 
 
+def t_gw_prefers_pl_text_over_dim_weight():
+    # spec: "GW (from PL, kept separate from existing DIM-sourced weight)"
+    # -- pl_gross_weight (captured from the PL PDF text) must win over the
+    # DIM-lookup `weight` field whenever both are present.
+    items = [_mk_item("SKU1", "EAN1", 3)]
+    pkg = _mk_full_pkg(1, 1, items, weight=99.99)
+    pkg.pl_gross_weight = "35.68 KG"
+    model = pse.build_sublist_carton_model(pkg)
+    assert model.gross_weight_display == "35.68 KG", model.gross_weight_display
+    assert model.gross_weight_source == "PL_TEXT"
+
+
+def t_gw_falls_back_to_dim_weight_when_pl_text_missing():
+    items = [_mk_item("SKU1", "EAN1", 3)]
+    pkg = _mk_full_pkg(1, 1, items, weight=12.5)
+    pkg.pl_gross_weight = ""
+    model = pse.build_sublist_carton_model(pkg)
+    assert model.gross_weight_display == "12.50 KG", model.gross_weight_display
+    assert model.gross_weight_source == "DIM_FALLBACK"
+
+
+def t_gw_bare_number_without_unit_gets_kg_appended():
+    items = [_mk_item("SKU1", "EAN1", 3)]
+    pkg = _mk_full_pkg(1, 1, items)
+    pkg.pl_gross_weight = "35.68"  # no letters -> unit appended
+    model = pse.build_sublist_carton_model(pkg)
+    assert model.gross_weight_display == "35.68 KG", model.gross_weight_display
+
+
+test("GW prefers PL-text pl_gross_weight over DIM-sourced weight when both present", t_gw_prefers_pl_text_over_dim_weight)
+test("GW falls back to DIM-sourced weight when pl_gross_weight is empty", t_gw_falls_back_to_dim_weight_when_pl_text_missing)
+test("GW: bare numeric pl_gross_weight (no unit letters) gets 'KG' appended", t_gw_bare_number_without_unit_gets_kg_appended)
 test("build_sublist_carton_model maps all metadata fields correctly", t_build_carton_model_basic_fields)
 test("build_sublist_carton_model does not mutate the source package", t_build_carton_model_does_not_mutate_package)
 test("carton_display_mode='current_only' shows just the sequence number", t_current_only_display_mode)

@@ -145,6 +145,7 @@ class SublistCartonModel:
     so_source: str
     gross_weight: Optional[float]
     gross_weight_display: str
+    gross_weight_source: str
     packing_code: str
     items: List[SublistItemRow] = field(default_factory=list)
     total_qty: int = 0
@@ -161,9 +162,31 @@ class SublistCartonModel:
 def resolve_sublist_metadata(package) -> dict:
     """Pull the package-level Sublist metadata fields off a duck-typed
     package object (works against pl_ocr_core.Package or any test double
-    exposing the same attribute names). Never mutates `package`."""
-    gw = getattr(package, "weight", None)
-    gw_display = f"{gw:.2f} KG" if isinstance(gw, (int, float)) else ""
+    exposing the same attribute names). Never mutates `package`.
+
+    GW priority (spec: "GW (from PL, kept separate from existing DIM-
+    sourced weight)"): `pl_gross_weight` (captured straight from the PL
+    PDF's own text/table, e.g. "35.68 KG") always wins when present --
+    it's the field the Sublist's GW column is actually documented against.
+    Only when the PL text never gave us a gross weight at all does this
+    fall back to the DIM-lookup `weight` field, so the GW cell still shows
+    *something* useful rather than going blank. The two are never merged
+    or overwritten into one another -- pl_gross_weight is untouched either
+    way, this function just decides which one is DISPLAYED here."""
+    pl_gw = (getattr(package, "pl_gross_weight", "") or "").strip()
+    if pl_gw:
+        gw = pl_gw
+        # pl_gross_weight is captured raw text and may or may not already
+        # carry a unit (e.g. "35.68 KG" vs a bare "35.68") -- only append
+        # "KG" when the captured text has no letters of its own, so a
+        # differently-labelled unit in the source PDF is never overwritten.
+        gw_display = pl_gw if any(ch.isalpha() for ch in pl_gw) else f"{pl_gw} KG"
+        gw_source = "PL_TEXT"
+    else:
+        dim_gw = getattr(package, "weight", None)
+        gw = dim_gw
+        gw_display = f"{dim_gw:.2f} KG" if isinstance(dim_gw, (int, float)) else ""
+        gw_source = "DIM_FALLBACK" if dim_gw not in (None, "", 0) else ""
     shipping_mark = getattr(package, "shipping_mark", "") or getattr(package, "reference_code", "") or ""
     shipping_mark_source = getattr(package, "shipping_mark_source", "") or (
         "FILENAME_REFERENCE_CODE" if shipping_mark == getattr(package, "reference_code", "") else "")
@@ -176,6 +199,7 @@ def resolve_sublist_metadata(package) -> dict:
         "so_source": getattr(package, "so_source", "") or "",
         "gross_weight": gw,
         "gross_weight_display": gw_display,
+        "gross_weight_source": gw_source,
         "packing_code": getattr(package, "package_code", "") or "",
     }
 
@@ -215,6 +239,7 @@ def build_sublist_carton_model(package, *, carton_display_mode: str = "current_t
         so_source=meta["so_source"],
         gross_weight=meta["gross_weight"],
         gross_weight_display=meta["gross_weight_display"],
+        gross_weight_source=meta["gross_weight_source"],
         packing_code=meta["packing_code"],
         items=items,
         total_qty=sum(r.qty for r in items),
