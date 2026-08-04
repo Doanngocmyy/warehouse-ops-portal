@@ -74,11 +74,18 @@ OR_LIST_FILE = __OR_LIST_FILE__
 # None / "" when the user left the field blank.
 MANUAL_CONSIGNEE = __MANUAL_CONSIGNEE__
 MANUAL_NOTIFY_PARTY = __MANUAL_NOTIFY_PARTY__
-# v11: Sublist generation is on by default -- app.html's "Generate carton
-# sublist" checkbox is checked by default too (spec: "Mac dinh bat neu khong
-# anh huong performance dang ke"). Never required, never blocks Run/Export
-# if OFF or if it fails to import (see AUTO SPLIT section at the bottom).
+# v11: Sublist (Excel) generation -- OFF by default in v12+ (spec turn 5:
+# the mandatory Sublist output is now the A5 PDF below; this Excel version
+# is kept only as an optional SECONDARY output). Never required, never
+# blocks Run/Export if OFF or if it fails to import (see AUTO SPLIT
+# section at the bottom).
 GENERATE_SUBLIST = __GENERATE_SUBLIST__
+# v12: A5 carton Sublist PDF -- ON by default (spec: "Generate A5 carton
+# Sublist PDF" checkbox, default checked). This is now the primary/
+# mandatory Sublist deliverable (PL_SPLIT_OUTPUT/05_SUBLIST/SUBLIST_TOTAL.
+# pdf). Its failure must NEVER block the legacy ZIP/export -- see
+# SUBLIST_PDF_STATUS handling in the AUTO SPLIT section at the bottom.
+GENERATE_SUBLIST_PDF = __GENERATE_SUBLIST_PDF__
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -2584,13 +2591,25 @@ else:
     print(f'Control file: {control_file}')
 
 # =========================================================
-# v11: SUBLIST generation (spec: 05_SUBLIST/SUBLIST_TOTAL.xlsx)
-# Optional, on by default (GENERATE_SUBLIST) -- never blocks Run/Export:
-# if the module can't be imported, or generation/validation raises, this
-# is logged as a warning and the run still completes with every other
-# output (Packing List / Match_Status / Raw_Data / Audit_Summary /
-# PL_SPLIT_OUTPUT) fully intact, exactly as before this feature existed.
+# v11/v12: SUBLIST generation -- Excel (optional secondary output) + A5 PDF
+# (mandatory/default-on primary output, spec turn 5 section 8).
+#
+# NON-BLOCKING BY DESIGN (spec: "The current patch claims Sublist is
+# optional, but re-raises RuntimeError and PermissionError. Fix this."):
+# NEITHER Sublist output may ever raise out of this block. A failure here
+# is recorded into SUBLIST_XLSX_STATUS / SUBLIST_PDF_STATUS
+# (SUCCESS|FAILED|DISABLED), logged, and the run still completes with
+# every other output (Packing List / Match_Status / Raw_Data /
+# Audit_Summary / PL_SPLIT_OUTPUT / legacy ZIP) fully intact -- exactly as
+# if this feature didn't exist at all.
 # =========================================================
+SUBLIST_XLSX_STATUS = "DISABLED"
+SUBLIST_XLSX_PATH = None
+SUBLIST_XLSX_ERROR = ""
+SUBLIST_PDF_STATUS = "DISABLED"
+SUBLIST_PDF_PATH = None
+SUBLIST_PDF_ERROR = ""
+
 if GENERATE_SUBLIST:
     try:
         import pl_sublist_export
@@ -2602,27 +2621,93 @@ if GENERATE_SUBLIST:
         # run_pipeline(), before assign_global_numbers() -- see above) --
         # passing it straight through is what keeps Sublist order identical
         # to PL_TOTAL (spec requirement).
-        log.info("Generating Sublist...")
+        log.info("Generating Sublist (Excel, optional secondary output)...")
         sublist_result = pl_sublist_export.generate_sublist_workbook(packages, sublist_path)
-        log.info("Validating Sublist...")
         sublist_ok, sublist_report = pl_sublist_export.validate_sublist(packages, sublist_result)
         print("\n" + "=" * 70)
-        print("SUBLIST VALIDATION REPORT")
+        print("SUBLIST (XLSX) VALIDATION REPORT")
         print("=" * 70)
         print(sublist_report)
         print("=" * 70)
         if not sublist_ok:
-            print("XXXX SUBLIST VALIDATION FAILED -- see report above XXXX")
-            raise RuntimeError("Sublist reconciliation FAILED -- see the report printed above.")
-        print(f'Sublist completed: {sublist_path}')
+            SUBLIST_XLSX_STATUS = "FAILED"
+            SUBLIST_XLSX_ERROR = "Reconciliation FAILED -- see the report printed above."
+            log.warning(f"Sublist (Excel) reconciliation FAILED (non-blocking, every other "
+                        f"output is unaffected): {SUBLIST_XLSX_ERROR}")
+        else:
+            SUBLIST_XLSX_STATUS = "SUCCESS"
+            SUBLIST_XLSX_PATH = str(sublist_path)
+            print(f'Sublist (Excel) completed: {sublist_path}')
     except ImportError as e:
-        log.warning(f"pl_sublist_export not importable -- Sublist NOT generated this run "
-                    f"(every other output is unaffected): {e}")
-    except RuntimeError:
-        raise
-    except PermissionError as e:
-        print("XXXX SUBLIST FAILED — a target .xlsx is locked/open in Excel XXXX")
-        print(e)
-        raise
+        SUBLIST_XLSX_STATUS = "FAILED"
+        SUBLIST_XLSX_ERROR = f"pl_sublist_export not importable: {e}"
+        log.warning(f"Sublist (Excel) NOT generated this run (non-blocking, every other "
+                    f"output is unaffected): {SUBLIST_XLSX_ERROR}")
+    except Exception as e:
+        # Deliberately broad (was RuntimeError/PermissionError re-raised
+        # before -- both, and anything else, must now be caught here):
+        # an optional secondary output must NEVER take down the run.
+        SUBLIST_XLSX_STATUS = "FAILED"
+        SUBLIST_XLSX_ERROR = f"{type(e).__name__}: {e}"
+        log.warning(f"Sublist (Excel) generation FAILED (non-blocking, every other output "
+                    f"is unaffected): {SUBLIST_XLSX_ERROR}")
 else:
-    log.info("GENERATE_SUBLIST is off -- Sublist not generated this run.")
+    log.info("GENERATE_SUBLIST (Excel) is off -- Excel Sublist not generated this run.")
+
+if GENERATE_SUBLIST_PDF:
+    try:
+        import pl_sublist_pdf_export
+        importlib.reload(pl_sublist_pdf_export)
+        pdf_dir = SPLIT_OUTPUT_DIR / '05_SUBLIST'
+        pdf_path = pdf_dir / 'SUBLIST_TOTAL.pdf'
+        log.info("Generating A5 carton Sublist PDF...")
+        pdf_result = pl_sublist_pdf_export.generate_sublist_pdf(packages, pdf_path)
+        pdf_problems = pl_sublist_pdf_export.validate_sublist_pdf(packages, pdf_result)
+        print("\n" + "=" * 70)
+        print("SUBLIST (PDF) VALIDATION REPORT")
+        print("=" * 70)
+        print(f"status: {pdf_result.status}")
+        print(f"cartons_written: {pdf_result.cartons_written}  pages_written: {pdf_result.pages_written}  "
+              f"items_written: {pdf_result.items_written}")
+        if pdf_problems:
+            print("problems:")
+            for p in pdf_problems:
+                print(f"  - {p}")
+        print("=" * 70)
+        if pdf_result.status == "SUCCESS" and not pdf_problems:
+            SUBLIST_PDF_STATUS = "SUCCESS"
+            SUBLIST_PDF_PATH = str(pdf_path)
+            print(f'Sublist (PDF) completed: {pdf_path}')
+        elif pdf_result.status == "SUCCESS" and pdf_problems:
+            SUBLIST_PDF_STATUS = "FAILED"
+            SUBLIST_PDF_ERROR = "; ".join(pdf_problems)
+            log.warning(f"Sublist (PDF) reconciliation FAILED (non-blocking, every other "
+                        f"output is unaffected): {SUBLIST_PDF_ERROR}")
+        else:
+            SUBLIST_PDF_STATUS = pdf_result.status  # FAILED or DISABLED
+            SUBLIST_PDF_ERROR = pdf_result.error
+            log.warning(f"Sublist (PDF) NOT generated this run (non-blocking, every other "
+                        f"output is unaffected): status={pdf_result.status} error={pdf_result.error}")
+    except ImportError as e:
+        SUBLIST_PDF_STATUS = "FAILED"
+        SUBLIST_PDF_ERROR = f"pl_sublist_pdf_export not importable: {e}"
+        log.warning(f"Sublist (PDF) NOT generated this run (non-blocking, every other output "
+                    f"is unaffected): {SUBLIST_PDF_ERROR}")
+    except Exception as e:
+        # generate_sublist_pdf() itself never raises (spec: non-blocking by
+        # design) -- this outer catch is defense in depth for anything
+        # unexpected in this wiring block itself (e.g. validate_sublist_pdf).
+        SUBLIST_PDF_STATUS = "FAILED"
+        SUBLIST_PDF_ERROR = f"{type(e).__name__}: {e}"
+        log.warning(f"Sublist (PDF) generation FAILED (non-blocking, every other output is "
+                    f"unaffected): {SUBLIST_PDF_ERROR}")
+else:
+    log.info("GENERATE_SUBLIST_PDF is off -- A5 Sublist PDF not generated this run.")
+
+RUN_SUMMARY["sublist_xlsx_status"] = SUBLIST_XLSX_STATUS
+RUN_SUMMARY["sublist_xlsx_path"] = SUBLIST_XLSX_PATH
+RUN_SUMMARY["sublist_xlsx_error"] = SUBLIST_XLSX_ERROR
+RUN_SUMMARY["sublist_pdf_status"] = SUBLIST_PDF_STATUS
+RUN_SUMMARY["sublist_pdf_path"] = SUBLIST_PDF_PATH
+RUN_SUMMARY["sublist_pdf_error"] = SUBLIST_PDF_ERROR
+print("RUN_SUMMARY_JSON=" + json.dumps(RUN_SUMMARY))

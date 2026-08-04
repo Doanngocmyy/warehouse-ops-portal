@@ -51,7 +51,8 @@ _AUTO_SPLIT_MARKER = "# ========================================================
 
 def _substitute_placeholders(src: str, *, dim_sheet=None, master_sheet=None,
                               recursive=False, consignee=None, notify=None,
-                              generate_sublist=True, or_list_file=None) -> str:
+                              generate_sublist=True, or_list_file=None,
+                              generate_sublist_pdf=True) -> str:
     def lit(v):
         return "None" if v is None else repr(v)
     return (src
@@ -61,6 +62,7 @@ def _substitute_placeholders(src: str, *, dim_sheet=None, master_sheet=None,
             .replace("__MANUAL_CONSIGNEE__", lit(consignee))
             .replace("__MANUAL_NOTIFY_PARTY__", lit(notify))
             .replace("__GENERATE_SUBLIST__", "True" if generate_sublist else "False")
+            .replace("__GENERATE_SUBLIST_PDF__", "True" if generate_sublist_pdf else "False")
             .replace("__OR_LIST_FILE__", lit(str(or_list_file)) if or_list_file else "None")
             .replace("__GIT_COMMIT__", lit("test-suite")))
 
