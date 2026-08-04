@@ -306,8 +306,34 @@ await micropip.install("openpyxl")
 await micropip.install("pdfminer.six")
 await micropip.install("pdfplumber", deps=False)
 `);
-  depsInstalled = true;
   log('Đã cài xong thư viện xử lý PDF/Excel.\n');
+
+  // ReportLab (PDF engine for the A5 Sublist PDF) -- pinned to the EXACT
+  // version tested (both here and in the repo's CPython test suite) against
+  // this exact Pyodide build, so "works on my machine" can never again mean
+  // only the desktop/sandbox Python environment. reportlab ships a pure
+  // Python (py3-none-any) wheel with no C-extension requirement for the
+  // text/vector drawing this tool actually uses; its one native dependency,
+  // Pillow (needed for the small PNG logo via ImageReader/drawImage), has
+  // its own prebuilt Pyodide wasm wheel that micropip resolves automatically.
+  // Installation failure here is caught explicitly and logged clearly --
+  // it must NEVER silently degrade to "no PDF, no explanation" (spec: an
+  // optional PDF must still fail LOUDLY in the log even though it must not
+  // block the rest of the pipeline/ZIP).
+  log('Đang cài PDF engine (ReportLab) cho Sublist PDF...\n');
+  try {
+    await pyodideInstance.runPythonAsync(`
+import micropip
+await micropip.install("reportlab==4.5.1")
+`);
+    log('Đã cài xong ReportLab (PDF engine) — Sublist PDF sẵn sàng tạo.\n');
+  } catch (e) {
+    log('LỖI: Không cài được ReportLab (PDF engine): ' + e.message + '\n' +
+        '-> Sublist PDF (SUBLIST_TOTAL.pdf) sẽ KHÔNG tạo được ở lần chạy này; ' +
+        'Excel Sublist + toàn bộ export khác vẫn ra bình thường (không bị chặn).\n');
+  }
+
+  depsInstalled = true;
   return pyodideInstance;
 }
 
@@ -458,10 +484,38 @@ async function runPipeline() {
       // text, not the numeric stat() boxes above -- FAILED here must never
       // be styled/read as a pipeline-blocking error (it isn't one: the rest
       // of the run already completed by the time this renders).
-      const sublistLine = (label, status, path) => {
+      const sublistLine = (label, status, path, errorText) => {
         const cls = status === 'SUCCESS' ? 'ok' : (status === 'FAILED' ? 'err' : 'idle');
         const pathTxt = (status === 'SUCCESS' && path) ? ` — <code>${path.split('/').slice(-2).join('/')}</code>` : '';
-        return `<span class="stage-badge ${cls}" style="margin-left:0;margin-right:8px;">${label}: ${status}</span>${pathTxt}`;
+        // FAILED must show its actual reason inline, not just a bare badge --
+        // "reportlab not installed" and "bad output path" and "module
+        // unimportable" all look identical as just "FAILED" otherwise, which
+        // is exactly the kind of silent-degradation this was flagged for.
+        const errTxt = (status === 'FAILED' && errorText)
+          ? `<div style="color:#92400e;font-size:12.5px;margin:2px 0 4px 0;">↳ ${errorText}</div>` : '';
+        return `<span class="stage-badge ${cls}" style="margin-left:0;margin-right:8px;">${label}: ${status}</span>${pathTxt}${errTxt}`;
+      };
+      // OR List is OPTIONAL -- NO_FILE is the normal/expected case and gets
+      // NO banner at all (not an error, nothing to see). But a file that WAS
+      // uploaded and failed to parse must say so explicitly and distinctly
+      // from "no file" -- these previously looked identical to the user
+      // (or_index just came back empty either way, no visible difference).
+      const orListStatusLine = (status, sheetUsed, rowsLoaded, errorText) => {
+        if (!status || status === 'NO_FILE') return '';
+        if (status === 'OK') {
+          return `<div style="margin-top:8px;color:#065f46;">✓ OR List: đã đọc ${rowsLoaded} dòng ` +
+                 `từ sheet <code>${sheetUsed}</code>.</div>`;
+        }
+        const label = status === 'HEADER_NOT_FOUND' ? 'OR List đã upload nhưng KHÔNG nhận diện được dòng tiêu đề (header)'
+                    : status === 'REQUIRED_FIELD_MISSING' ? 'OR List đã upload nhưng thiếu STORE/OR ở mọi dòng'
+                    : status === 'LOAD_ERROR' ? 'OR List đã upload nhưng không mở được file'
+                    : `OR List đã upload nhưng không dùng được (status=${status})`;
+        return `<div style="margin-top:8px;padding:8px;border-radius:6px;background:#fef3c7;color:#92400e;">` +
+               `<b>${label}</b>` +
+               (errorText ? `<div style="font-size:12.5px;margin-top:4px;">↳ ${errorText}</div>` : '') +
+               `<div style="font-size:12.5px;margin-top:4px;">OR#/SO# sẽ không được tự điền từ OR List cho lần chạy này -- ` +
+               `PL_Total.xlsx / PL_SPLIT_OUTPUT chính vẫn ra bình thường, không bị chặn. ` +
+               `Xem log phía trên để biết chi tiết từng sheet đã quét.</div></div>`;
       };
       runSummaryEl.innerHTML =
         `<div class="version-line">pl_ocr_core <b>${runSummary.parser_version || '(unknown)'}</b>` +
@@ -481,9 +535,10 @@ async function runPipeline() {
         stat('Lỗi (errors)', runSummary.errors, runSummary.errors > 0) +
         `</div>` +
         `<div style="margin-top:10px;">` +
-        sublistLine('Sublist Excel', runSummary.sublist_xlsx_status || 'DISABLED', runSummary.sublist_xlsx_path) +
-        sublistLine('Sublist PDF (A5)', runSummary.sublist_pdf_status || 'DISABLED', runSummary.sublist_pdf_path) +
+        sublistLine('Sublist Excel', runSummary.sublist_xlsx_status || 'DISABLED', runSummary.sublist_xlsx_path, runSummary.sublist_xlsx_error) +
+        sublistLine('Sublist PDF (A5)', runSummary.sublist_pdf_status || 'DISABLED', runSummary.sublist_pdf_path, runSummary.sublist_pdf_error) +
         `</div>` +
+        orListStatusLine(runSummary.or_list_status, runSummary.or_list_sheet_used, runSummary.or_list_rows_loaded, runSummary.or_list_error) +
         ((runSummary.sublist_pdf_status === 'FAILED' || runSummary.sublist_xlsx_status === 'FAILED') ?
           `<div class="status" style="margin-top:6px;color:#92400e;">Sublist là output tuỳ chọn — FAILED ở đây ` +
           `<b>không</b> ảnh hưởng PL_Total.xlsx / PL_SPLIT_OUTPUT chính, xem chi tiết lỗi trong log phía trên.</div>` : '') +

@@ -139,6 +139,33 @@ _COPY_SUFFIX_RE = re.compile(
     re.IGNORECASE)
 
 
+# v12 (Turn 12 bug report): trailing version/revision marker -- "CN v",
+# "CN v1", "CN rev2" -- appended when a corrected Packing List is re-
+# uploaded under the same base name. Conservative on purpose: only a BARE
+# "V"/"V<digits>" or "REV<digits>", separated from what precedes it by
+# "_"/"-"/space, anchored to the very END of the string. This can never
+# match the real "VN" factory token (VN is a literal 2-letter token, not
+# "V" followed only by digits, so "V\d*$" never consumes the trailing "N")
+# and never touches a mid-string occurrence -- e.g. "CN-1529_SH-Airport_PVG"
+# on its own is untouched, only an actual trailing " v"/" v1"/" rev2" marker
+# is stripped. Same "flag explicitly, never guess" philosophy as
+# _strip_trailing_copy_suffix() below, and applied for the identical reason:
+# without this, "CN-1529_SH-Airport_PVG_CN v.pdf" reads its last token as
+# the literal string "V" (not a known factory token) and falls through to
+# REVIEW, even though the real, intended factory suffix "CN" is right there.
+_VERSION_SUFFIX_RE = re.compile(
+    r'^(?P<base>.+?)[_\-\s](?:V\d*|REV\d*)$',
+    re.IGNORECASE)
+
+
+def _strip_trailing_version_suffix(code: str) -> str:
+    """"...CN v" / "...CN v1" / "...CN rev2" -> "...CN" -- see
+    _VERSION_SUFFIX_RE's module-level comment for why this is conservative
+    and cannot mis-strip the real "VN" factory token or a mid-string value."""
+    m = _VERSION_SUFFIX_RE.match(code or "")
+    return m.group("base") if m and m.group("base") else (code or "")
+
+
 def _strip_trailing_copy_suffix(code: str) -> str:
     """"Kerry_POP_1" -> "Kerry_POP" (so factory detection sees the real
     "POP" suffix instead of the copy marker "1"); "Kerry_POP" (no suffix)
@@ -153,6 +180,14 @@ def _strip_trailing_copy_suffix(code: str) -> str:
 
 
 def _detect_factory_from_code(code: str) -> Optional[str]:
+    # Strip a version/revision marker BEFORE the copy-suffix marker so a
+    # name combining both (e.g. "Kerry_POP_v2_1") still resolves correctly
+    # -- order matters here because _strip_trailing_copy_suffix's own regex
+    # requires a digit directly after "_"/"-", which a trailing "_1" copy
+    # marker satisfies but a "_v2" version marker does not (no digit
+    # immediately after the separator, "v" is there instead), so running
+    # copy-suffix-strip first would leave the version marker behind.
+    code = _strip_trailing_version_suffix(code)
     code = _strip_trailing_copy_suffix(code)
     toks = _tokens(code)
     if not toks:

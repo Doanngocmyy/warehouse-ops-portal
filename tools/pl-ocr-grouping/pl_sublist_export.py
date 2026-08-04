@@ -50,7 +50,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, Side
@@ -157,6 +157,12 @@ class SublistCartonModel:
     # from block count (a >18-item carton spans multiple blocks but is still
     # exactly one carton).
     carton_identity: str = ""
+    # Per-Store/shipment numbering scope (pl_ocr_core.compute_counting_scope_key)
+    # -- carton_sequence is only unique WITHIN this scope, never globally.
+    # Kerry's carton 1/6 and Hangzhou's carton 1/4 legitimately share
+    # carton_sequence=1; validate_sublist() must key uniqueness on
+    # (counting_scope_key, carton_sequence), never on carton_sequence alone.
+    counting_scope_key: str = ""
 
 
 def resolve_sublist_metadata(package) -> dict:
@@ -248,6 +254,11 @@ def build_sublist_carton_model(package, *, carton_display_mode: str = "current_t
         package_code=getattr(package, "package_code", ""),
         pdf_package_seq=str(getattr(package, "pdf_package_seq", "") or ""),
         carton_identity=identity,
+        # Falls back to "" (one implicit shared scope, today's flat 1/N..N/N
+        # behaviour) for any caller/test that predates counting_scope_key --
+        # same backward-compat default pl_ocr_core.assign_global_numbers()
+        # itself uses.
+        counting_scope_key=getattr(package, "counting_scope_key", "") or "",
     )
 
 
@@ -481,13 +492,42 @@ def validate_sublist(packages: List, result: "SublistBuildResult"):
           len(unique_identities) == len(packages),
           f"unique={len(unique_identities)} packages={len(packages)}")
 
-    seqs = [c.carton_sequence for c in cartons if c.carton_sequence]
-    dup_seqs = sorted({s for s in seqs if seqs.count(s) > 1})
-    check("No duplicate carton_sequence", not dup_seqs, f"duplicates={dup_seqs}" if dup_seqs else "")
-    if seqs:
-        expected = set(range(1, (cartons[0].carton_total or len(cartons)) + 1))
-        missing = sorted(expected - set(seqs))
-        check("No missing carton_sequence", not missing, f"missing={missing}" if missing else "")
+    # carton_sequence is only unique WITHIN a counting_scope_key (per-Store/
+    # shipment numbering scope, spec section on per-Store carton numbering)
+    # -- e.g. Kerry's "1/6" and Hangzhou's "1/4" legitimately share
+    # carton_sequence=1 because they're two different Stores/scopes. Identity
+    # for BOTH duplicate- and missing-sequence checks must therefore be
+    # (counting_scope_key, carton_sequence), never carton_sequence alone --
+    # checking global carton_sequence uniqueness across scopes was the exact
+    # bug that made a correct, per-Store 1/2 2/2 / 1/2 2/2 layout look like a
+    # validation failure ("duplicates=[1, 2]"). carton_display (e.g. "1/6")
+    # is used only for human-readable reporting below, never as an identity
+    # key -- two different scopes' cartons can share a carton_display too.
+    scopes: Dict[str, List[SublistCartonModel]] = {}
+    for c in cartons:
+        scopes.setdefault(c.counting_scope_key, []).append(c)
+
+    all_dup_pairs: List[tuple] = []
+    all_missing_pairs: List[tuple] = []
+    for scope_key, scope_cartons in scopes.items():
+        scope_seqs = [c.carton_sequence for c in scope_cartons if c.carton_sequence]
+        dup_seqs = sorted({s for s in scope_seqs if scope_seqs.count(s) > 1})
+        if dup_seqs:
+            all_dup_pairs.append((scope_key or "(default scope)", dup_seqs))
+        if scope_seqs:
+            # Each scope has its own carton_total (e.g. Kerry=6, Hangzhou=4)
+            # -- never borrow another scope's total the way a single global
+            # cartons[0].carton_total did before.
+            scope_total = scope_cartons[0].carton_total or len(scope_cartons)
+            expected = set(range(1, scope_total + 1))
+            missing = sorted(expected - set(scope_seqs))
+            if missing:
+                all_missing_pairs.append((scope_key or "(default scope)", missing))
+
+    check("No duplicate carton_sequence within any counting_scope_key", not all_dup_pairs,
+          f"duplicates_by_scope={all_dup_pairs}" if all_dup_pairs else "")
+    check("No missing carton_sequence within any counting_scope_key", not all_missing_pairs,
+          f"missing_by_scope={all_missing_pairs}" if all_missing_pairs else "")
 
     for pkg, carton in zip(packages, cartons):
         pkg_items = getattr(pkg, "items", [])

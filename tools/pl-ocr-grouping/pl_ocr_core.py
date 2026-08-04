@@ -43,6 +43,10 @@ from openpyxl.utils import get_column_letter
 PARSER_VERSION = "v11.0-sublist-2026-08"
 GIT_COMMIT = __GIT_COMMIT__
 LAST_RUN_META: Optional[dict] = None  # populated by run_pipeline(), read by app.html for the UI summary
+LAST_OR_LIST_RESULT = None  # pl_or_list_import.OrListImportResult, populated by run_pipeline() -- read by
+                             # the RUN_SUMMARY block below so the UI can distinguish "no file uploaded" from
+                             # "file uploaded but header not recognized" (Turn 12 fix) instead of both looking
+                             # identical (or_index empty either way).
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -2408,6 +2412,8 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
         import pl_or_list_import as oli
         import pl_group_export as pge_mod
         or_list_result = oli.load_or_list(or_list_file)
+        global LAST_OR_LIST_RESULT
+        LAST_OR_LIST_RESULT = or_list_result
         if or_list_result.ok:
             or_index = oli.build_or_index(or_list_result)
             log.info(f"OR List loaded: {len(or_list_result.rows)} row(s) from "
@@ -2547,6 +2553,16 @@ RUN_SUMMARY = {
     "dim_mismatched": sum(1 for p in packages if not p.dim_matched) if packages else 0,
     "duplicate_items_skipped": LAST_RUN_META.get("duplicate_items_skipped", 0) if LAST_RUN_META else 0,
     "errors": sum(1 for p in packages if audit_status(p) != "OK") if packages else 0,
+    # OR List status (Turn 12 fix): distinguishes "no file uploaded" (NO_FILE,
+    # the normal/expected case for most runs -- OR List is optional) from "a
+    # file WAS uploaded but couldn't be parsed" (HEADER_NOT_FOUND /
+    # REQUIRED_FIELD_MISSING / LOAD_ERROR) -- previously both looked identical
+    # to the UI (or_index just came back empty either way), so a real upload
+    # mistake silently behaved as if no file had been given at all.
+    "or_list_status": LAST_OR_LIST_RESULT.status if LAST_OR_LIST_RESULT else "NO_FILE",
+    "or_list_sheet_used": LAST_OR_LIST_RESULT.sheet_used if LAST_OR_LIST_RESULT else None,
+    "or_list_rows_loaded": len(LAST_OR_LIST_RESULT.rows) if LAST_OR_LIST_RESULT else 0,
+    "or_list_error": ("; ".join(LAST_OR_LIST_RESULT.errors) if LAST_OR_LIST_RESULT and LAST_OR_LIST_RESULT.errors else ""),
 }
 print("RUN_SUMMARY_JSON=" + json.dumps(RUN_SUMMARY))
 

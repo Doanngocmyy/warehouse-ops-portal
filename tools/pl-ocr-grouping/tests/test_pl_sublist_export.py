@@ -372,7 +372,8 @@ def _mk_item(sku, ean, qty):
 
 def _mk_full_pkg(seq, total, items, shipping_mark="CN-1666-PVG-KERRY-POP",
                   or_number="OR1016", so_number="so402064", weight=35.68,
-                  package_code="PGKECO377R7J0320001", reference_code="Kerry_POP"):
+                  package_code="PGKECO377R7J0320001", reference_code="Kerry_POP",
+                  counting_scope_key=""):
     return SimpleNamespace(
         carton_sequence=seq, carton_total=total, carton_display=f"{seq}/{total}",
         global_carton_num=f"{seq}/{total}",
@@ -380,6 +381,7 @@ def _mk_full_pkg(seq, total, items, shipping_mark="CN-1666-PVG-KERRY-POP",
         or_number=or_number, or_source="PL_TEXT", so_number=so_number, so_source="PL_TEXT",
         weight=weight, package_code=package_code, items=items,
         source_file=reference_code + ".pdf", reference_code=reference_code, pdf_package_seq="1",
+        counting_scope_key=counting_scope_key,
     )
 
 
@@ -578,6 +580,76 @@ def t_generate_sublist_handles_zero_item_package():
         assert result.blocks[0].block_total_qty == 0
 
 
+# --- scope-aware carton_sequence validation (Turn 12: per-Store numbering
+#     legitimately repeats 1, 2, 3... across different counting_scope_key
+#     values -- validate_sublist() must key uniqueness/completeness on
+#     (counting_scope_key, carton_sequence), never carton_sequence alone) --
+def t_validate_sublist_two_stores_each_1_of_2_2_of_2_passes():
+    # HANGZHOU 1/2, 2/2 and KERRY 1/2, 2/2 -- both scopes independently
+    # complete and non-duplicated. Global carton_sequence looks like
+    # [1, 2, 1, 2] here -- must NOT be flagged as duplicates.
+    pkgs = [
+        _mk_full_pkg(1, 2, [_mk_item("H1", "EH1", 1)], reference_code="HZ1",
+                     package_code="PKG-HZ-1", counting_scope_key="UPLOAD_BATCH|HANGZHOU"),
+        _mk_full_pkg(2, 2, [_mk_item("H2", "EH2", 1)], reference_code="HZ2",
+                     package_code="PKG-HZ-2", counting_scope_key="UPLOAD_BATCH|HANGZHOU"),
+        _mk_full_pkg(1, 2, [_mk_item("K1", "EK1", 1)], reference_code="KR1",
+                     package_code="PKG-KR-1", counting_scope_key="UPLOAD_BATCH|KERRY"),
+        _mk_full_pkg(2, 2, [_mk_item("K2", "EK2", 1)], reference_code="KR2",
+                     package_code="PKG-KR-2", counting_scope_key="UPLOAD_BATCH|KERRY"),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook(pkgs, Path(td) / "s.xlsx")
+        ok, report = pse.validate_sublist(pkgs, result)
+        assert ok, report
+
+
+def t_validate_sublist_duplicate_within_same_scope_fails():
+    # Two DIFFERENT cartons both claiming carton_sequence=1 in the SAME
+    # scope (KERRY) is a real bug and must still FAIL.
+    pkgs = [
+        _mk_full_pkg(1, 2, [_mk_item("K1", "EK1", 1)], reference_code="KR1",
+                     package_code="PKG-KR-1", counting_scope_key="UPLOAD_BATCH|KERRY"),
+        _mk_full_pkg(1, 2, [_mk_item("K2", "EK2", 1)], reference_code="KR2",
+                     package_code="PKG-KR-2", counting_scope_key="UPLOAD_BATCH|KERRY"),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook(pkgs, Path(td) / "s.xlsx")
+        ok, report = pse.validate_sublist(pkgs, result)
+        assert not ok, "duplicate carton_sequence WITHIN one scope must fail validation"
+        assert "duplicate" in report.lower() and "UPLOAD_BATCH|KERRY" in report
+
+
+def t_validate_sublist_missing_within_one_scope_fails():
+    # KERRY claims carton_total=2 but only carton_sequence=1 exists --
+    # carton_sequence=2 is missing WITHIN that scope.
+    pkgs = [
+        _mk_full_pkg(1, 2, [_mk_item("K1", "EK1", 1)], reference_code="KR1",
+                     package_code="PKG-KR-1", counting_scope_key="UPLOAD_BATCH|KERRY"),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook(pkgs, Path(td) / "s.xlsx")
+        ok, report = pse.validate_sublist(pkgs, result)
+        assert not ok, "missing carton_sequence WITHIN one scope must fail validation"
+        assert "missing" in report.lower()
+
+
+def t_validate_sublist_repeated_1_across_different_scopes_passes():
+    # IAPM 1/1 and a totally separate UNRESOLVED-scope 1/1 both legitimately
+    # use carton_sequence=1 -- must PASS (this is the exact "duplicates=[1, 2]"
+    # false positive the business owner hit live).
+    pkgs = [
+        _mk_full_pkg(1, 1, [_mk_item("I1", "EI1", 1)], reference_code="IAPM1",
+                     package_code="PKG-IAPM-1", counting_scope_key="UPLOAD_BATCH|IAPM"),
+        _mk_full_pkg(1, 1, [_mk_item("U1", "EU1", 1)], reference_code="UN1",
+                     package_code="PKG-UN-1", counting_scope_key="UPLOAD_BATCH|UNRESOLVED"),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook(pkgs, Path(td) / "s.xlsx")
+        ok, report = pse.validate_sublist(pkgs, result)
+        assert ok, report
+
+
 test("generated workbook layout matches the real template's measured row/col positions",
      t_generate_workbook_layout_matches_real_template_measurements)
 test("5th carton correctly starts page 2 at the measured page-cycle row",
@@ -588,6 +660,10 @@ test("Sublist carton order exactly matches the order packages were passed in (==
      t_sublist_carton_order_matches_input_order)
 test("validate_sublist passes (OK) for well-formed input, full reconciliation", t_validate_sublist_passes_for_well_formed_input)
 test("zero-item package produces a valid (empty) carton block, not a crash", t_generate_sublist_handles_zero_item_package)
+test("scope-aware validation: two Stores each with their own 1/2, 2/2 -> PASS", t_validate_sublist_two_stores_each_1_of_2_2_of_2_passes)
+test("scope-aware validation: duplicate carton_sequence=1 WITHIN one Store's scope -> FAIL", t_validate_sublist_duplicate_within_same_scope_fails)
+test("scope-aware validation: missing carton_sequence=2 WITHIN one Store's scope -> FAIL", t_validate_sublist_missing_within_one_scope_fails)
+test("scope-aware validation: carton_sequence=1 repeated across DIFFERENT scopes -> PASS", t_validate_sublist_repeated_1_across_different_scopes_passes)
 
 
 # =============================================================================
@@ -611,13 +687,15 @@ def _make_empty_master_xlsx(path: Path):
     wb.save(str(path))
 
 
-def _run_full_module(pdf_dir, dim_xlsx, master_xlsx, out_dir, **kw):
+def _run_full_module(pdf_dir, dim_xlsx, master_xlsx, out_dir, or_list_path=None, **kw):
     src = CORE_PY.read_text(encoding="utf-8")
     src = _substitute(src)
     src = src.replace('PL_FOLDER = Path("/work/pdfs")', f'PL_FOLDER = Path({str(pdf_dir)!r})')
     src = src.replace('OUTPUT_XLSX = Path("/work/PL_Total.xlsx")', f'OUTPUT_XLSX = Path({str(out_dir / "PL_Total.xlsx")!r})')
     src = src.replace('DIM_WEIGHT_FILE = Path("/work/dim.xlsx")', f'DIM_WEIGHT_FILE = Path({str(dim_xlsx)!r})')
     src = src.replace('MASTER_DATA_FILE = Path("/work/master.xlsx")', f'MASTER_DATA_FILE = Path({str(master_xlsx)!r})')
+    if or_list_path is not None:
+        src = src.replace('OR_LIST_FILE = None', f'OR_LIST_FILE = Path({str(or_list_path)!r})')
     modname = "pl_ocr_core_e2e_test"
     mod = types.ModuleType(modname)
     mod.__file__ = str(CORE_PY)
@@ -738,8 +816,61 @@ def t_end_to_end_generate_sublist_off_still_produces_everything_else():
         assert not (split_dir / "05_SUBLIST").exists(),             "Sublist folder must not appear at all when GENERATE_SUBLIST=False"
 
 
+def t_end_to_end_or_list_header_not_found_surfaces_distinctly_in_run_summary():
+    # Turn 12 bug: a genuinely uploaded-but-unparseable OR List previously
+    # looked IDENTICAL to "no file uploaded" (or_index just came back empty
+    # either way). RUN_SUMMARY must now say HEADER_NOT_FOUND explicitly so
+    # the UI can show "OR List uploaded but header not recognized" instead
+    # of silently behaving as if nothing was supplied.
+    import openpyxl as _oxl
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        pdf_dir = td / "pdfs"
+        pdf_dir.mkdir()
+        for f in FIXTURES.glob("*.pdf"):
+            shutil.copy(f, pdf_dir / f.name)
+        master_xlsx = td / "master.xlsx"
+        _make_empty_master_xlsx(master_xlsx)
+
+        bad_or_list = td / "or_list.xlsx"
+        wb = _oxl.Workbook()
+        ws = wb.active
+        ws.append(["Warehouse", "Reference", "Notes"])  # no STORE/OR aliases at all
+        ws.append(["A", "B", "C"])
+        wb.save(str(bad_or_list))
+
+        result_ns = _run_full_module(pdf_dir, SYN_DIM, master_xlsx, td, or_list_path=bad_or_list)
+
+        assert result_ns["RUN_SUMMARY"]["or_list_status"] == "HEADER_NOT_FOUND", result_ns["RUN_SUMMARY"]
+        assert result_ns["RUN_SUMMARY"]["or_list_error"], "or_list_error must be populated, not blank"
+        # Must never be confused with "no file uploaded":
+        assert result_ns["RUN_SUMMARY"]["or_list_status"] != "NO_FILE"
+        # And the rest of the pipeline must be completely unaffected:
+        split_dir = pdf_dir / "PL_SPLIT_OUTPUT"
+        assert (split_dir / "01_PL_TOTAL" / "PL_TOTAL.xlsx").exists()
+
+
+def t_end_to_end_or_list_no_file_reports_no_file_status():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        pdf_dir = td / "pdfs"
+        pdf_dir.mkdir()
+        for f in FIXTURES.glob("*.pdf"):
+            shutil.copy(f, pdf_dir / f.name)
+        master_xlsx = td / "master.xlsx"
+        _make_empty_master_xlsx(master_xlsx)
+
+        result_ns = _run_full_module(pdf_dir, SYN_DIM, master_xlsx, td)  # no or_list_path at all
+
+        assert result_ns["RUN_SUMMARY"]["or_list_status"] == "NO_FILE"
+
+
 test("full run_pipeline + AUTO SPLIT produces 05_SUBLIST/SUBLIST_TOTAL.xlsx alongside every existing output",
      t_end_to_end_generates_sublist_alongside_existing_outputs)
+test("OR List uploaded but header not recognized -> RUN_SUMMARY.or_list_status=HEADER_NOT_FOUND, distinct from NO_FILE",
+     t_end_to_end_or_list_header_not_found_surfaces_distinctly_in_run_summary)
+test("no OR List uploaded -> RUN_SUMMARY.or_list_status=NO_FILE (the normal/expected case)",
+     t_end_to_end_or_list_no_file_reports_no_file_status)
 test("GENERATE_SUBLIST=False: legacy grouping output unaffected, no Sublist folder created, no error",
      t_end_to_end_generate_sublist_off_still_produces_everything_else)
 test("Sublist PDF module unimportable -> FAILED status, but legacy export + Excel Sublist still complete (non-blocking)",

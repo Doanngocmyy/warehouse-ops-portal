@@ -147,6 +147,34 @@ def t_literal_vn_factory_recognised():
     assert pge.detect_factory("KR100_CN", "x.pdf") == "CN"
 
 
+def t_factory_detection_survives_trailing_version_marker():
+    # Turn 12 bug report: "CN-1529_SH-Airport_PVG_CN v.pdf" -> was REVIEW
+    # because the last token "V" isn't a known factory token. A trailing
+    # version/revision marker (v, v1, rev2, ...) must be stripped before
+    # factory detection sees the real trailing factory suffix.
+    assert pge.detect_factory("", "CN-1529_SH-Airport_PVG_CN v.pdf") == "CN",         "bare trailing ' v' must be stripped as a version marker"
+    assert pge.detect_factory("", "CN-1529_SH-Airport_PVG_CN v1.pdf") == "CN",         "'v1' (v + digits, no space) must be stripped as a version marker"
+    assert pge.detect_factory("", "CN-1529_SH-Airport_PVG_CN rev2.pdf") == "CN",         "'rev2' must be stripped as a version marker"
+    assert pge.detect_factory("Kerry_POP v3", "x.pdf") == "POP",         "version marker after a non-CN factory token must also be stripped"
+
+
+def t_factory_detection_version_marker_never_eats_literal_vn():
+    # The exact same regex machinery must NEVER mis-strip the real "VN"
+    # factory token -- "VN" is a literal 2-letter suffix, not "V" followed
+    # only by digits, so "V\d*$" can never consume the trailing "N".
+    assert pge.detect_factory("KR100_VN", "x.pdf") == "VN"
+    assert pge.detect_factory("", "Shipment_KR100_VN.pdf") == "VN"
+
+
+def t_factory_detection_version_marker_does_not_alter_legitimate_codes():
+    # Sanity: codes that happen to contain "V" mid-string, or end in a real
+    # factory token with no version marker at all, must be completely
+    # unaffected.
+    assert pge.detect_factory("CN-1666-PVG-KERRY-POP", "x.pdf") == "POP"
+    assert pge.detect_factory("Kerry_POP", "x.pdf") == "POP"
+    assert pge.detect_factory("Kerry_POP_1", "Kerry_POP_1.pdf") == "POP",         "existing copy-suffix behaviour must be unaffected by the new version-suffix stripper"
+
+
 def t_carton_factory_rank_table_merges_the_two_named_constants():
     table = pge.carton_factory_rank_table()
     assert table == ["POP", "SBGEAR", "QIFENG", "JION", "VN", "CN"], table
@@ -167,6 +195,12 @@ test("mid-string number ('1666') is still never mistaken for a copy suffix",
      t_factory_detection_still_ignores_midstring_number)
 test("literal 'VN' suffix is recognised as its own factory, distinct from POP/SBGEAR/QIFENG/JION",
      t_literal_vn_factory_recognised)
+test("trailing version/revision marker (v, v1, rev2) is stripped before factory detection",
+     t_factory_detection_survives_trailing_version_marker)
+test("version-marker stripping never mis-strips the real literal 'VN' factory token",
+     t_factory_detection_version_marker_never_eats_literal_vn)
+test("version-marker stripping does not alter legitimate codes with no version marker",
+     t_factory_detection_version_marker_does_not_alter_legitimate_codes)
 test("carton_factory_rank_table() merges CARTON_FACTORY_ORDER_WITH_CO + CARTON_FACTORY_ORDER_NO_CO consistently",
      t_carton_factory_rank_table_merges_the_two_named_constants)
 
