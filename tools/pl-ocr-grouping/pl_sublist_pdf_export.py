@@ -122,6 +122,25 @@ def _draw_logo(c: canvas.Canvas, logo_path):
     except Exception as e:
         log.warning(f"Logo not drawn (non-blocking): {type(e).__name__}: {e}")
 
+
+def _logo_reserved_height(logo_path):
+    """Best-effort natural height of the logo at LOGO_MAX_WIDTH, used
+    only to reserve vertical space below it -- so the metadata block
+    never sits flush under the logo (business owner's feedback: the two
+    were too close). Falls back to 0 (no reservation) if the logo can't
+    be read, matching _draw_logo's own non-blocking failure behaviour."""
+    if not logo_path:
+        return 0
+    logo_path = Path(logo_path)
+    if not logo_path.exists():
+        return 0
+    try:
+        reader = ImageReader(str(logo_path))
+        iw, ih = reader.getSize()
+        return LOGO_MAX_WIDTH * (ih / iw)
+    except Exception:
+        return 0
+
 # =========================================================================
 # 2) Page geometry -- A5 portrait, no title/watermark/branding anywhere.
 # =========================================================================
@@ -132,6 +151,17 @@ CONTENT_LEFT = MARGIN
 CONTENT_RIGHT = PAGE_W - MARGIN
 CONTENT_TOP = PAGE_H - MARGIN
 CONTENT_WIDTH = CONTENT_RIGHT - CONTENT_LEFT
+
+# Metadata/item-table vertical start. Reserves the logo's own footprint
+# (LOGO_TOP_GAP + its natural height at LOGO_MAX_WIDTH) plus an explicit
+# breathing-room gap, so "Carton #" never sits close enough to read as
+# touching the logo -- computed once from the bundled default logo so
+# capacity math (ITEMS_PER_PDF_PAGE etc.) reflects the real, reserved
+# space rather than assuming the full CONTENT_TOP is available for text.
+GAP_AFTER_LOGO = 12
+_RESERVED_LOGO_HEIGHT = _logo_reserved_height(DEFAULT_LOGO_PATH)
+METADATA_TOP_Y = (PAGE_H - LOGO_TOP_GAP - _RESERVED_LOGO_HEIGHT - GAP_AFTER_LOGO
+                  if _RESERVED_LOGO_HEIGHT else CONTENT_TOP)
 
 # Metadata block: label (right-aligned) + value (left-aligned), TIGHTLY
 # adjacent, positioned in the page's UPPER-RIGHT (revision per visual
@@ -306,7 +336,7 @@ ROW_HEIGHT_CONTINUED_NOTE = 12
 # below. The ACTUAL per-page value used while drawing is dynamic (see
 # _draw_page(), which tracks the real `y` after however many metadata
 # lines that page's Shipping Mark/Packing Code actually wrapped to).
-ITEM_TABLE_START_Y = CONTENT_TOP - META_BLOCK_HEIGHT - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
+ITEM_TABLE_START_Y = METADATA_TOP_Y - META_BLOCK_HEIGHT - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
 
 # Fixed vertical budget that must be reserved BELOW the item rows for the
 # total row + a possible "Continued" note, even though the total row's
@@ -319,7 +349,7 @@ _RESERVED_BELOW_ITEMS = GAP_AFTER_ITEMS + TOTAL_TEXT_PADDING + GAP_BEFORE_CONTIN
 # Packing Code actually wraps still can't overflow past the bottom
 # margin. This makes ITEMS_PER_PDF_PAGE slightly conservative on the
 # (common) single-line case, which is the safe direction to be wrong in.
-_ITEM_TABLE_START_Y_RESERVED = CONTENT_TOP - META_BLOCK_HEIGHT_RESERVED - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
+_ITEM_TABLE_START_Y_RESERVED = METADATA_TOP_Y - META_BLOCK_HEIGHT_RESERVED - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
 _AVAILABLE_FOR_ITEMS = (_ITEM_TABLE_START_Y_RESERVED - MARGIN) - _RESERVED_BELOW_ITEMS
 # Item capacity per A5 page, derived from actual page geometry above (not
 # copied from the Excel template's 18 -- see module docstring). Documented
@@ -463,7 +493,7 @@ def _draw_continuation_page_marker(c: canvas.Canvas, block: PdfPageBlock):
 
 def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None):
     carton = block.carton
-    y = CONTENT_TOP
+    y = METADATA_TOP_Y
 
     _draw_logo(c, logo_path if logo_path is not None else DEFAULT_LOGO_PATH)
     _draw_continuation_page_marker(c, block)

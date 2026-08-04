@@ -190,9 +190,13 @@ def t_dynamic_total_12_items_immediately_follows_last_row():
     assert 0 < (expected_last_item_bottom - rule_y) <= ppe.ROW_HEIGHT_ITEM
 
 
-def t_dynamic_total_26_items_immediately_follows_last_row():
-    rule_y, text_y = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, 26)
-    expected_last_item_bottom = ppe.ITEM_TABLE_START_Y - 26 * ppe.ROW_HEIGHT_ITEM
+def t_dynamic_total_full_page_immediately_follows_last_row():
+    # "Full page" tracks the module's OWN capacity constant rather than a
+    # hardcoded item count, so this stays meaningful if page geometry
+    # (e.g. the logo reservation) ever shifts ITEMS_PER_PDF_PAGE.
+    n = ppe.ITEMS_PER_PDF_PAGE
+    rule_y, text_y = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, n)
+    expected_last_item_bottom = ppe.ITEM_TABLE_START_Y - n * ppe.ROW_HEIGHT_ITEM
     assert 0 < (expected_last_item_bottom - rule_y) <= ppe.ROW_HEIGHT_ITEM
     # A full-capacity page's dynamic total must still land above the
     # bottom margin -- this is the actual overflow-safety guarantee.
@@ -217,14 +221,18 @@ def t_total_qty_is_not_anchored_to_bottom_margin():
     rule_y, text_y = ppe._compute_total_y(ppe.ITEM_TABLE_START_Y, 5)
     distance_from_bottom_margin = text_y - ppe.MARGIN
     distance_from_top = ppe.ITEM_TABLE_START_Y - text_y
-    assert distance_from_bottom_margin > 300, \
+    # Threshold derived from the page's own available content height
+    # (not a hardcoded pt value) so it stays correct if metadata/logo
+    # reservations ever change how much vertical space a page has.
+    available_height = ppe.ITEM_TABLE_START_Y - ppe.MARGIN
+    assert distance_from_bottom_margin > available_height * 0.6, \
         "a 5-item carton's total should be nowhere near the bottom margin"
     assert distance_from_top < 150, "a 5-item carton's total should sit close to the top, right after its few items"
 
 
 test("dynamic total: 5-item carton -> Total QTY immediately follows item 5", t_dynamic_total_5_items_immediately_follows_last_row)
 test("dynamic total: 12-item carton -> Total QTY immediately follows item 12", t_dynamic_total_12_items_immediately_follows_last_row)
-test("dynamic total: 26-item (full page) carton -> Total QTY immediately follows item 26, still above margin", t_dynamic_total_26_items_immediately_follows_last_row)
+test("dynamic total: full-page carton -> Total QTY immediately follows last item, still above margin", t_dynamic_total_full_page_immediately_follows_last_row)
 test("dynamic total: last-row-to-rule gap is small and identical regardless of item count", t_dynamic_total_gap_is_small_and_fixed_regardless_of_item_count)
 test("dynamic total: NOT anchored to the bottom page margin (verified via a lightly-filled carton)", t_total_qty_is_not_anchored_to_bottom_margin)
 
