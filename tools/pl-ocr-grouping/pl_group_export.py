@@ -90,6 +90,16 @@ def _tokens(code: str) -> List[str]:
 # =========================================================================
 FACTORY_KEYWORDS = ["SBGEAR", "QIFENG", "POP", "JION", "CN"]  # longest-first for the flat-suffix fallback
 
+# v11: carton-NUMBERING business order (spec section 7.2) -- deliberately
+# separate from FACTORY_KEYWORDS above, which is only a longest-first
+# matching-priority list for detect_factory() and has nothing to do with the
+# order cartons should be numbered in. Centralised here (not scattered
+# across pl_ocr_core.py) so there is exactly one place to change if the
+# warehouse's factory order ever changes. All VN-based factories (POP,
+# SBGEAR, QIFENG, JION) precede CN -- this also satisfies the "no CO" rule
+# (VN before CN) for free, since it's the same ordered list either way.
+CARTON_FACTORY_ORDER_WITH_CO = ["POP", "SBGEAR", "QIFENG", "JION", "CN"]
+
 
 def _detect_factory_from_code(code: str) -> Optional[str]:
     toks = _tokens(code)

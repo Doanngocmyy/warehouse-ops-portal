@@ -67,6 +67,7 @@
         <input type="file" id="pdfZipInput" accept=".zip">
         <div class="file-list-mini" id="pdfFileList"></div>
         <label class="checkline"><input type="checkbox" id="recursiveCheck"> Quét cả thư mục con (subfolder)</label>
+        <label class="checkline"><input type="checkbox" id="generateSublistCheck" checked> Tạo Sublist theo carton (05_SUBLIST/SUBLIST_TOTAL.xlsx)</label>
       </div>
       <div class="panel">
         <h4>2. File DIM / khối lượng &amp; Master Data</h4>
@@ -131,8 +132,14 @@
       cùng thư mục <code>PL_SPLIT_OUTPUT/</code> (tách theo Factory / CN Port / CN Store, kèm
       <code>PL_SPLIT_CONTROL.csv</code> và báo cáo đối soát). Tóm tắt kết quả (số PDF/package/item, quantity check,
       DIM match...) hiện ngay trên trang sau khi chạy xong, kèm nút tải diagnostic log.<br>
-      Shipping Mark trong Packing List tự lấy theo tên file PDF (bỏ đuôi .pdf). PO No. / Invoice No. / 中国标签名称
-      vẫn để trống — điền tay sau.<br>
+      Shipping Mark trong Packing List tự lấy theo tên file PDF (bỏ đuôi .pdf), trừ khi tool đọc được dòng
+      "Shipping Mark:" thật trong PL thì dùng giá trị đó. OR #/SO Order # cũng được tool cố đọc từ PL (nếu có) —
+      không đọc được thì để trống, không báo lỗi. PO No. / Invoice No. / 中国标签名称 vẫn để trống — điền tay sau.<br>
+      Carton # nay được đánh theo đúng thứ tự nghiệp vụ (factory → tài liệu gốc → bản "_1"/"_2"... theo số, không
+      còn sort theo tên file kiểu chữ cái) thay vì theo tên file. Mặc định tool còn xuất thêm
+      <code>PL_SPLIT_OUTPUT/05_SUBLIST/SUBLIST_TOTAL.xlsx</code> — 1 block metadata + bảng item riêng cho từng
+      carton, theo đúng thứ tự carton trong PL_Total — có thể tắt ở ô "Tạo Sublist theo carton" phía trên nếu
+      không cần.<br>
       Parser core đã được audit lại và sửa nhiều lỗi table/text parsing + DIM matching so với bản notebook gốc, kèm
       bộ regression test trong repo (<code>tools/pl-ocr-grouping/tests/</code>). Số version thật của bản đang chạy
       trên trình duyệt của bạn hiện ngay trong ô tóm tắt phía trên sau khi bấm chạy — so số đó với lịch sử commit
@@ -152,6 +159,7 @@ const masterInput      = document.getElementById('masterInput');
 const dimSheetInput    = document.getElementById('dimSheetInput');
 const masterSheetInput = document.getElementById('masterSheetInput');
 const recursiveCheck   = document.getElementById('recursiveCheck');
+const generateSublistCheck = document.getElementById('generateSublistCheck');
 const manualConsigneeInput = document.getElementById('manualConsigneeInput');
 const manualNotifyInput    = document.getElementById('manualNotifyInput');
 const advToggle        = document.getElementById('advToggle');
@@ -349,6 +357,8 @@ async function runPipeline() {
     const _cacheBust = Date.now();
     const groupExportSrc = await (await fetch('pl_group_export.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     pyodide.FS.writeFile('/pl_group_export.py', groupExportSrc);
+    const sublistExportSrc = await (await fetch('pl_sublist_export.py?v=' + _cacheBust, { cache: 'no-store' })).text();
+    pyodide.FS.writeFile('/pl_sublist_export.py', sublistExportSrc);
     await pyodide.runPythonAsync('import sys\nif "/" not in sys.path: sys.path.insert(0, "/")');
 
     let coreSrc = await (await fetch('pl_ocr_core.py?v=' + _cacheBust, { cache: 'no-store' })).text();
@@ -358,6 +368,7 @@ async function runPipeline() {
       .replace('__RECURSIVE__', recursiveCheck.checked ? 'True' : 'False')
       .replace('__MANUAL_CONSIGNEE__', pyStrLiteral(manualConsigneeInput.value.trim()))
       .replace('__MANUAL_NOTIFY_PARTY__', pyStrLiteral(manualNotifyInput.value.trim()))
+      .replace('__GENERATE_SUBLIST__', generateSublistCheck.checked ? 'True' : 'False')
       // No build step serves this page (plain static file on GitHub Pages), so
       // there is no real git-commit-at-build-time value to inject here. Left
       // blank on purpose rather than faking a SHA -- PARSER_VERSION (shown in

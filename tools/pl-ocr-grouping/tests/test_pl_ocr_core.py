@@ -28,6 +28,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TOOL_DIR = HERE.parent
 CORE_PY = TOOL_DIR / "pl_ocr_core.py"
+if str(TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOL_DIR))
 FIXTURES = HERE / "fixtures"
 # SANITIZED SYNTHETIC fixtures only (see 2026-08-03 incident: the original
 # version of this test suite committed 8 REAL customer packing-list PDFs +
@@ -48,7 +50,8 @@ _AUTO_SPLIT_MARKER = "# ========================================================
 
 
 def _substitute_placeholders(src: str, *, dim_sheet=None, master_sheet=None,
-                              recursive=False, consignee=None, notify=None) -> str:
+                              recursive=False, consignee=None, notify=None,
+                              generate_sublist=True) -> str:
     def lit(v):
         return "None" if v is None else repr(v)
     return (src
@@ -57,6 +60,7 @@ def _substitute_placeholders(src: str, *, dim_sheet=None, master_sheet=None,
             .replace("__RECURSIVE__", "True" if recursive else "False")
             .replace("__MANUAL_CONSIGNEE__", lit(consignee))
             .replace("__MANUAL_NOTIFY_PARTY__", lit(notify))
+            .replace("__GENERATE_SUBLIST__", "True" if generate_sublist else "False")
             .replace("__GIT_COMMIT__", lit("test-suite")))
 
 

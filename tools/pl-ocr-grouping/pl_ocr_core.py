@@ -40,7 +40,7 @@ from openpyxl.utils import get_column_letter
 # Shown in the app.html run summary so it's possible to verify the browser is
 # actually running this revision (not a stale cached copy) and to tag every
 # exported Audit_Summary sheet with the exact code that produced it.
-PARSER_VERSION = "v10.1-audit-2026-08"
+PARSER_VERSION = "v11.0-sublist-2026-08"
 GIT_COMMIT = __GIT_COMMIT__
 LAST_RUN_META: Optional[dict] = None  # populated by run_pipeline(), read by app.html for the UI summary
 
@@ -69,6 +69,11 @@ RECURSIVE = __RECURSIVE__
 # None / "" when the user left the field blank.
 MANUAL_CONSIGNEE = __MANUAL_CONSIGNEE__
 MANUAL_NOTIFY_PARTY = __MANUAL_NOTIFY_PARTY__
+# v11: Sublist generation is on by default -- app.html's "Generate carton
+# sublist" checkbox is checked by default too (spec: "Mac dinh bat neu khong
+# anh huong performance dang ke"). Never required, never blocks Run/Export
+# if OFF or if it fails to import (see AUTO SPLIT section at the bottom).
+GENERATE_SUBLIST = __GENERATE_SUBLIST__
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -350,6 +355,32 @@ class Package:
     # dedup set used while items are being fed in (see Parser._add_item).
     first_page: Optional[int] = None
     dim_source_method: str = ""
+    # v11: OR / SO / Shipping Mark -- package-level metadata, parsed from a
+    # "LABEL: value" line/cell inside the PL itself (see parse_document_sequence
+    # helpers and Parser._maybe_capture_metadata below). Additive-only, every
+    # field defaults to "" so any existing caller/test that doesn't know these
+    # fields exist keeps working unmodified (dataclass field order stays the
+    # same for every pre-existing field above this block).
+    #
+    # IMPORTANT -- these are NOT the same thing:
+    #   or_number      = Customer OR (e.g. "OR1016"), a business/order reference
+    #   shipping_mark   = Warehouse "OR" (e.g. "CN-1666-PVG-KERRY-POP"), today
+    #                      defaulting to the source PDF filename (reference_code)
+    #                      exactly like before this change -- see run_pipeline().
+    # Never overwrite one with the other.
+    or_number: str = ""
+    or_source: str = ""             # PL_STRUCTURED_FIELD | PL_TEXT | ""
+    so_number: str = ""
+    so_source: str = ""             # PL_STRUCTURED_FIELD | PL_TEXT | ""
+    shipping_mark: str = ""
+    shipping_mark_source: str = ""  # PL_STRUCTURED_FIELD | PL_TEXT | FILENAME_REFERENCE_CODE | ""
+    # v11: structured carton-numbering fields backing the existing
+    # global_carton_num string (kept as-is, unchanged shape, for 100% backward
+    # compatibility with every current reader of that field) so callers never
+    # have to re-parse "1/10" back into numbers.
+    carton_sequence: int = 0
+    carton_total: int = 0
+    carton_display: str = ""
     _seen_item_keys: set = field(default_factory=set, repr=False, compare=False)
 
     @property
@@ -361,6 +392,158 @@ class Package:
     @property
     def origin(self) -> str:
         return get_origin(self.source_file, self.reference_code)
+
+# ── v11: OR # / SO Order # / Shipping Mark -- label-value line detection ───
+# These three fields are package-level metadata that MAY appear printed on
+# the PL itself as a "LABEL: value" line (its own text line, or a 2-cell
+# table row of [label, value]) -- e.g. "OR #: OR1016" / "SO Order #  so402064"
+# / "Shipping Mark  CN-1666-PVG-KERRY-POP". No real production PL sample with
+# this exact layout was available while writing this (see README/commit
+# message) -- the matcher below is intentionally conservative: bare 2-letter
+# aliases ("OR", "SO") only match when immediately followed by a punctuation
+# separator (#, :, .), never by whitespace alone, so an ordinary sentence
+# that happens to start with the English word "or"/"so" is never misread as
+# a label. Multi-word aliases ("SO Order #", "Shipping Mark", ...) are
+# unambiguous enough to also accept a plain space separator. Never widened
+# beyond the alias lists below without a real-file confirmation (spec:
+# "khong match qua rong dan den nhan nham field").
+OR_ALIASES_RAW = ["OR #", "OR NO.", "OR NO", "OR NUMBER", "OUTBOUND REQUEST", "OR"]
+SO_ALIASES_RAW = ["SO ORDER #", "SO ORDER", "SO #", "SO NO.", "SO NO",
+                   "SALES ORDER #", "SALES ORDER", "SO"]
+SHIPPING_MARK_ALIASES_RAW = ["SHIPPING MARKS", "SHIPPING MARK", "MARKS & NOS",
+                              "MARKS AND NUMBERS", "WAREHOUSE OR"]
+_BARE_2LETTER_ALIASES = {"OR", "SO"}
+
+
+def _alias_word_pattern(alias: str) -> str:
+    words = alias.strip().split()
+    return r'[\s#\.\-_]*'.join(re.escape(w) for w in words)
+
+
+def _build_label_matcher(aliases_raw):
+    # Longest-alias-first so "SO Order #" is tried before the bare "SO".
+    ordered = sorted(set(aliases_raw), key=len, reverse=True)
+    alts = []
+    for alias in ordered:
+        pat = _alias_word_pattern(alias)
+        sep = r'[:#\.]\s*' if alias.upper() in _BARE_2LETTER_ALIASES else r'[\s#\.\-_:]*\s*'
+        alts.append(pat + sep)
+    combined = r'^\s*(?:' + '|'.join(alts) + r')(\S.*?)\s*$'
+    return re.compile(combined, re.IGNORECASE | re.UNICODE)
+
+
+RE_OR_LABEL_LINE = _build_label_matcher(OR_ALIASES_RAW)
+RE_SO_LABEL_LINE = _build_label_matcher(SO_ALIASES_RAW)
+RE_SHIPPING_MARK_LABEL_LINE = _build_label_matcher(SHIPPING_MARK_ALIASES_RAW)
+
+_ALL_LABEL_ALIASES_NORM = {
+    re.sub(r'[^A-Z0-9]', '', a.upper())
+    for group in (OR_ALIASES_RAW, SO_ALIASES_RAW, SHIPPING_MARK_ALIASES_RAW)
+    for a in group
+}
+
+_METADATA_SOURCE_FIELD = {
+    "or_number": "or_source",
+    "so_number": "so_source",
+    "shipping_mark": "shipping_mark_source",
+}
+
+
+def _norm_label_cell(s: str) -> str:
+    return re.sub(r'[^A-Z0-9]', '', strip_accents(s).upper())
+
+
+def match_metadata_label_line(line: str):
+    """Try OR -> SO -> Shipping Mark (in that priority order) against one
+    flattened text line. Returns (field, value) or (None, None). Used for the
+    text-fallback parsing path (source=PL_TEXT)."""
+    line = (line or "").strip()
+    if not line:
+        return None, None
+    m = RE_OR_LABEL_LINE.match(line)
+    if m:
+        return "or_number", m.group(1).strip()
+    m = RE_SO_LABEL_LINE.match(line)
+    if m:
+        return "so_number", m.group(1).strip()
+    m = RE_SHIPPING_MARK_LABEL_LINE.match(line)
+    if m:
+        return "shipping_mark", m.group(1).strip()
+    return None, None
+
+
+def match_metadata_label_cells(cells):
+    """2-cell table row [label, value] case (source=PL_STRUCTURED_FIELD) --
+    safer than the line-prefix regex because the WHOLE first cell must
+    normalize to a known alias, not just a line prefix. Returns (field,
+    value) or (None, None)."""
+    non_empty = [c.strip() for c in cells if c and str(c).strip()]
+    if len(non_empty) != 2:
+        return None, None
+    label, value = non_empty
+    norm = _norm_label_cell(label)
+    if norm not in _ALL_LABEL_ALIASES_NORM:
+        return None, None
+    if norm in {"OR", "SO"} and len(value) < 1:
+        return None, None
+    if any(_norm_label_cell(a) == norm for a in OR_ALIASES_RAW):
+        return "or_number", value.strip()
+    if any(_norm_label_cell(a) == norm for a in SO_ALIASES_RAW):
+        return "so_number", value.strip()
+    if any(_norm_label_cell(a) == norm for a in SHIPPING_MARK_ALIASES_RAW):
+        return "shipping_mark", value.strip()
+    return None, None
+
+
+# ── v11: document (PDF file) sequence -- original vs _1 / _2 / ... copies ──
+# Copy-suffix is ONLY recognised when it is a trailing pattern anchored at
+# the very end of the reference_code/filename stem -- "CN-1666-PVG-KERRY-POP"
+# must NOT be read as sequence=1666 or copy=POP; there is no trailing
+# _N/-N/(N)/COPY-N pattern there at all, so it correctly falls through as an
+# ordinary "no suffix" (original, sequence 0) document.
+_SEQ_SUFFIX_RE = re.compile(
+    r'^(?P<base>.+?)(?:[_\-]\s*(?P<n1>\d{1,4})|\((?P<n2>\d{1,4})\)|\s+COPY\s+(?P<n3>\d{1,4}))$',
+    re.IGNORECASE)
+
+
+class DocumentSequence:
+    __slots__ = ("base_document_key", "document_sequence", "is_original", "sequence_source")
+
+    def __init__(self, base_document_key, document_sequence, is_original, sequence_source):
+        self.base_document_key = base_document_key
+        self.document_sequence = document_sequence
+        self.is_original = is_original
+        self.sequence_source = sequence_source
+
+    def __repr__(self):
+        return (f"DocumentSequence(base_document_key={self.base_document_key!r}, "
+                f"document_sequence={self.document_sequence!r}, is_original={self.is_original!r}, "
+                f"sequence_source={self.sequence_source!r})")
+
+    def __eq__(self, other):
+        return isinstance(other, DocumentSequence) and (
+            self.base_document_key, self.document_sequence, self.is_original, self.sequence_source
+        ) == (other.base_document_key, other.document_sequence, other.is_original, other.sequence_source)
+
+
+def parse_document_sequence(reference_code: str, source_file: str = "") -> DocumentSequence:
+    """Pure function: is this PDF the ORIGINAL of a document, or a numbered
+    copy (Kerry_POP -> sequence 0/original; Kerry_POP_1 -> sequence 1; ...)?
+
+    Only a trailing _N / -N / (N) / "COPY N" pattern counts as a copy
+    sequence (spec section 6.2) -- a number anywhere else in the code (e.g.
+    a shipment number in the middle of a Shipping Mark) is never mistaken
+    for one, because the pattern is anchored to the end of the string.
+    """
+    stem = (reference_code or "").strip()
+    if not stem:
+        stem = Path(source_file).stem if source_file else ""
+    m = _SEQ_SUFFIX_RE.match(stem)
+    if not m or not m.group("base"):
+        return DocumentSequence(stem, 0, True, "NO_SUFFIX_ORIGINAL")
+    n = m.group("n1") or m.group("n2") or m.group("n3")
+    return DocumentSequence(m.group("base"), int(n), False, "TRAILING_SUFFIX_PATTERN")
+
 
 # Spec-vocabulary status codes for the Raw_Data / Audit_Summary sheets and
 # the app.html run summary (kept separate from overall_status() below, which
@@ -611,6 +794,13 @@ class Parser:
             return
         if self._cur is None:
             return
+        # v11: package-level OR#/SO#/Shipping Mark as a 2-cell [label,value]
+        # table row -- checked before item parsing so a metadata row is
+        # never mistaken for a (necessarily malformed) item row.
+        field, value = match_metadata_label_cells(cells)
+        if field:
+            self._capture_metadata(field, value, "PL_STRUCTURED_FIELD")
+            return
         # Bug #6: a lone "-BOX"/"BOX" row is the continuation of the
         # PREVIOUS row's SKU suffix, split onto its own line by the PDF
         # layout -- not a new item.
@@ -637,6 +827,12 @@ class Parser:
             self._on_total(parse_qty(m.group(1)))
             return
         if self._cur is None:
+            return
+        # v11: package-level OR#/SO#/Shipping Mark as a "LABEL: value" text
+        # line -- checked before item parsing for the same reason as above.
+        field, value = match_metadata_label_line(line)
+        if field:
+            self._capture_metadata(field, value, "PL_TEXT")
             return
         if RE_SKU_SUFFIX_ROW.match(line) and self._cur.items and not self._buf:
             self._append_sku_suffix(line)
@@ -668,6 +864,23 @@ class Parser:
         if self._cur is not None:
             log.warning(f"EOF: {self._cur.package_code} never saw Tong cong")
             self._force_close()
+
+    def _capture_metadata(self, field: str, value: str, source: str):
+        """First match wins per package -- never overwrite an already-
+        captured OR#/SO#/Shipping Mark with a later, possibly-spurious
+        match (same 'never silently overwrite' philosophy as
+        declared_total_qty / DIM duplicate-key handling elsewhere in this
+        file). Scoped to the CURRENTLY OPEN package only -- never
+        forward-filled into a later/different package (spec: "khong duoc tu
+        forward-fill qua package khac tru khi parser state chung minh chung
+        thuoc cung package")."""
+        value = (value or "").strip()
+        if not value or self._cur is None:
+            return
+        if getattr(self._cur, field):
+            return
+        setattr(self._cur, field, value)
+        setattr(self._cur, _METADATA_SOURCE_FIELD[field], source)
 
     def _append_sku_suffix(self, suffix_cell: str):
         """Bug #6 fix: join a stray '-BOX' style continuation row onto the
@@ -1245,11 +1458,81 @@ class HsCodeMapper:
             return self._data_barcode[barcode_clean]
         return ""
 
+# ── v11: business document/carton ordering ─────────────────────────────────
+# Fixes the pre-v11 bug where PDFs (and therefore cartons) were ordered by
+# plain lexical filename sort -- "Kerry_POP_1" < "Kerry_POP_10" < "Kerry_POP_2"
+# alphabetically, which is wrong (spec section 4/7). Order is now:
+#   1) factory business order (CARTON_FACTORY_ORDER_WITH_CO in
+#      pl_group_export.py: POP -> SBGEAR -> QIFENG -> JION -> CN; unknown/
+#      REVIEW factories sort last, never crash the sort)
+#   2) within a factory, by base_document_key (e.g. "Kerry_POP") so an
+#      original PDF and all its "_1"/"_2" copies stay adjacent, never
+#      interleaved with a different base document
+#   3) within a base_document_key, by numeric document_sequence (original=0
+#      first, then _1, _2, ... _10 in NUMERIC order, never lexical)
+#   4) within one PDF, Python's sort is stable, so packages keep the exact
+#      relative order the parser produced them in (== pdf_package_seq order)
+#      without needing a separate explicit key.
+#
+# KNOWN LIMITATION (documented, not silently decided): full "CO" grouping
+# (spec 7.2 -- one retail Store spanning several Factories, carton numbers
+# continuous across the whole Store) needs a Store assigned to EVERY
+# package, including non-CN factories (POP/SBGEAR/QIFENG/JION). Today, Store
+# resolution (classify_packages_for_port / match_store) only runs for
+# factory=CN packages -- non-CN packages have no Store source at all in this
+# codebase yet (that requires the OR List Store-enrichment feature, not yet
+# wired in). So this implementation orders by FACTORY BUSINESS ORDER only
+# (which already satisfies "VN factories before CN" for the no-CO case, since
+# POP/SBGEAR/QIFENG/JION all precede CN in CARTON_FACTORY_ORDER_WITH_CO) --
+# it does not yet interleave-by-Store across factories for a true multi-
+# factory CO shipment. Numbering stays global/continuous either way (no
+# reset between factories/PDFs), which is the part of 7.2 this DOES fully
+# satisfy today.
+def business_sort_packages(packages: List[Package]) -> List[Package]:
+    try:
+        import pl_group_export as pge
+        factory_order = list(getattr(pge, "CARTON_FACTORY_ORDER_WITH_CO",
+                                      ["POP", "SBGEAR", "QIFENG", "JION", "CN"]))
+        detect_factory = pge.detect_factory
+    except ImportError:
+        log.warning("pl_group_export not importable -- carton business sort "
+                    "falls back to input order (parse/filename order) unchanged.")
+        return list(packages)
+
+    rank = {f: i for i, f in enumerate(factory_order)}
+    review_rank = len(factory_order)  # unknown/REVIEW factories sort last
+    log.info(f"Sorting {len(packages)} carton(s) by business order "
+             f"(factory {factory_order} -> document -> sequence)...")
+
+    def key(pkg: Package):
+        seq = parse_document_sequence(pkg.reference_code, pkg.source_file)
+        # IMPORTANT: detect factory from the BASE document key (copy-suffix
+        # already stripped), not the raw reference_code/filename. Found
+        # while writing this function's tests: pl_group_export.detect_factory
+        # is suffix-based and its last "token" for e.g. "Kerry_POP_1" is the
+        # literal "1", not "POP" -- called on the raw string it misreads
+        # every _1/_2/... copy as an unclassifiable factory (REVIEW), which
+        # would sort a copy PDF to the very end of the whole shipment
+        # instead of right next to its original. Not a bug introduced here;
+        # it's a pre-existing gap in detect_factory's suffix matching that
+        # this sort function works around locally by re-using the same
+        # base_document_key computed above (detect_factory() itself and the
+        # 02_BY_FACTORY export grouping in pl_group_export.py are
+        # deliberately left untouched -- out of scope for this change).
+        factory = detect_factory(seq.base_document_key, seq.base_document_key)
+        return (rank.get(factory, review_rank), seq.base_document_key, seq.document_sequence)
+
+    return sorted(packages, key=key)  # sorted() is stable -> ties keep parse order
+
+
 # ── Global carton numbers ──────────────────────────────────────────────────
 def assign_global_numbers(packages: List[Package]):
     total = len(packages)
     for i, pkg in enumerate(packages, start=1):
-        pkg.global_carton_num = f"{i}/{total}"
+        pkg.carton_sequence = i
+        pkg.carton_total = total
+        pkg.carton_display = f"{i}/{total}"
+        pkg.global_carton_num = pkg.carton_display  # unchanged shape/field, kept in sync
     log.info(f"Carton numbers: 1/{total} ... {total}/{total}")
 
 # ── v8: CN store/port classification (same rule as pl_group_export.py) ─────
@@ -1610,7 +1893,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                 pkg.global_carton_num, pkg.package_code,
                 pkg.length, pkg.width, pkg.height,
                 pkg.weight, pkg.cbm,
-                origin, "", pkg.reference_code,           # HTS (manual) / Shipping Mark = PDF filename, no .pdf
+                origin, "", (pkg.shipping_mark or pkg.reference_code),  # HTS (manual) / Shipping Mark (v11: parsed label, else PDF filename)
                 pkg.port, "",                             # PORT (auto for CN) / 中国标签名称 (manual)
             ])
             row_idx += 1
@@ -1624,7 +1907,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     pkg.global_carton_num, pkg.package_code,
                     pkg.length, pkg.width, pkg.height,
                     pkg.weight, pkg.cbm,
-                    origin, item.hs_code, pkg.reference_code,           # Shipping Mark = PDF filename, no .pdf
+                    origin, item.hs_code, (pkg.shipping_mark or pkg.reference_code),  # Shipping Mark (v11: parsed label, else PDF filename)
                     pkg.port, "",                                       # PORT / 中国标签名称
                 ])
                 row_idx += 1
@@ -1921,6 +2204,29 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     log.info(f"Total packages: {len(packages)}")
     log.info(f"Duplicate items skipped (dedup): {parser.duplicate_items_skipped}")
 
+    # v11: resolve Shipping Mark BEFORE sorting/numbering (sorting itself
+    # doesn't need it, but this keeps every downstream consumer -- sort,
+    # numbering, write_workbook, Sublist -- looking at the same fully-
+    # resolved field instead of each doing its own "pkg.shipping_mark or
+    # pkg.reference_code" fallback). Never overwrites an explicit label
+    # already captured by the parser (Parser._capture_metadata / v11).
+    log.info("Resolving OR# / SO# / Shipping Mark for every package...")
+    for pkg in packages:
+        if not pkg.shipping_mark:
+            pkg.shipping_mark = pkg.reference_code
+            pkg.shipping_mark_source = "FILENAME_REFERENCE_CODE"
+    log.info(f"  OR# found (from PL text): {sum(1 for p in packages if p.or_number)}/{len(packages)}")
+    log.info(f"  SO# found (from PL text): {sum(1 for p in packages if p.so_number)}/{len(packages)}")
+    log.info(f"  Shipping Mark from PL text (not filename fallback): "
+             f"{sum(1 for p in packages if p.shipping_mark_source not in ('', 'FILENAME_REFERENCE_CODE'))}/{len(packages)}")
+
+    # v11: business sort (natural _1/_2/... order + factory order) BEFORE
+    # carton numbers are assigned -- numbering must never be computed first
+    # and then have the sort order changed under it (spec section 6: "Carton
+    # numbering phai duoc thuc hien sau khi hoan tat business sorting").
+    packages = business_sort_packages(packages)
+    parser.packages = packages
+
     assign_global_numbers(packages)
 
     matched = 0
@@ -2057,3 +2363,47 @@ except PermissionError as e:
 else:
     print(f'Completed: {SPLIT_OUTPUT_DIR}')
     print(f'Control file: {control_file}')
+
+# =========================================================
+# v11: SUBLIST generation (spec: 05_SUBLIST/SUBLIST_TOTAL.xlsx)
+# Optional, on by default (GENERATE_SUBLIST) -- never blocks Run/Export:
+# if the module can't be imported, or generation/validation raises, this
+# is logged as a warning and the run still completes with every other
+# output (Packing List / Match_Status / Raw_Data / Audit_Summary /
+# PL_SPLIT_OUTPUT) fully intact, exactly as before this feature existed.
+# =========================================================
+if GENERATE_SUBLIST:
+    try:
+        import pl_sublist_export
+        importlib.reload(pl_sublist_export)
+        sublist_dir = SPLIT_OUTPUT_DIR / '05_SUBLIST'
+        sublist_path = sublist_dir / 'SUBLIST_TOTAL.xlsx'
+        # `packages` is already in the exact same order write_workbook() used
+        # for PL_Total.xlsx (business_sort_packages() ran once, inside
+        # run_pipeline(), before assign_global_numbers() -- see above) --
+        # passing it straight through is what keeps Sublist order identical
+        # to PL_TOTAL (spec requirement).
+        log.info("Generating Sublist...")
+        sublist_result = pl_sublist_export.generate_sublist_workbook(packages, sublist_path)
+        log.info("Validating Sublist...")
+        sublist_ok, sublist_report = pl_sublist_export.validate_sublist(packages, sublist_result)
+        print("\n" + "=" * 70)
+        print("SUBLIST VALIDATION REPORT")
+        print("=" * 70)
+        print(sublist_report)
+        print("=" * 70)
+        if not sublist_ok:
+            print("XXXX SUBLIST VALIDATION FAILED -- see report above XXXX")
+            raise RuntimeError("Sublist reconciliation FAILED -- see the report printed above.")
+        print(f'Sublist completed: {sublist_path}')
+    except ImportError as e:
+        log.warning(f"pl_sublist_export not importable -- Sublist NOT generated this run "
+                    f"(every other output is unaffected): {e}")
+    except RuntimeError:
+        raise
+    except PermissionError as e:
+        print("XXXX SUBLIST FAILED — a target .xlsx is locked/open in Excel XXXX")
+        print(e)
+        raise
+else:
+    log.info("GENERATE_SUBLIST is off -- Sublist not generated this run.")
