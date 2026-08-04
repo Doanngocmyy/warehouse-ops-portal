@@ -43,6 +43,7 @@ module's own A5 page geometry (see the "Page geometry" section).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -87,6 +88,12 @@ _MODULE_DIR = Path(__file__).resolve().parent
 DEFAULT_LOGO_PATH = _MODULE_DIR / "assets" / "topologie_logo.png"
 LOGO_MAX_WIDTH = 50       # "nho nho" (small) -- a modest fraction of the 419pt page width
 LOGO_TOP_GAP = 10         # distance from the true page top edge to the logo's top edge
+
+# Top-left "page N/M" marker for a carton that spans multiple PDF pages
+# (business owner's follow-up request) -- see _draw_continuation_page_marker().
+CONTINUATION_MARKER_FONT = "Helvetica-Bold"
+CONTINUATION_MARKER_SIZE = 12
+CONTINUATION_MARKER_TOP_GAP = 22  # from the true page top edge, roughly level with the logo
 
 
 def _draw_logo(c: canvas.Canvas, logo_path):
@@ -138,6 +145,21 @@ ROW_HEIGHT_META = 17
 VALUE_LABEL_GAP_MM = 3  # spec: "approximately 2-4 mm only"
 VALUE_LABEL_GAP = VALUE_LABEL_GAP_MM * 72 / 25.4  # ~8.5pt
 MIN_VALUE_COL_WIDTH = 30  # floor so an all-blank metadata row can't collapse the column to 0
+# Cap the value column's width -- beyond this, a value (typically Shipping
+# Mark or Packing Code #) WRAPS onto additional lines instead of growing
+# the column arbitrarily wide (business owner's follow-up request: "neu
+# dai qua ky tu thi phai tu wrap text"). 200pt comfortably fits within the
+# page while keeping the block's left edge well short of the item table's
+# own columns, and fits ~35-40 characters of 10pt Helvetica per line --
+# generous for the business codes actually seen in Shipping Mark values.
+VALUE_COL_MAX_WIDTH = 200
+# Reserved for ITEMS_PER_PDF_PAGE's worst-case capacity math (see below):
+# how many EXTRA wrapped lines (beyond the normal 1-per-row) to budget
+# for across the whole metadata block. Real Shipping Mark / Packing Code
+# values wrapping to 2 lines each (i.e. +1 extra line per field) is
+# already a generous assumption for the codes this tool actually sees;
+# documented rather than silently picked.
+MAX_RESERVED_WRAP_EXTRA_LINES = 2
 
 METADATA_ROWS = [
     ("carton", "Carton #"),
@@ -147,24 +169,85 @@ METADATA_ROWS = [
     ("gw", "GW"),
     ("packing_code", "Packing Code #"),
 ]
-META_BLOCK_HEIGHT = len(METADATA_ROWS) * ROW_HEIGHT_META
+META_BLOCK_HEIGHT = len(METADATA_ROWS) * ROW_HEIGHT_META  # single-line ("no wrap") reference height
+META_BLOCK_HEIGHT_RESERVED = (len(METADATA_ROWS) + MAX_RESERVED_WRAP_EXTRA_LINES) * ROW_HEIGHT_META
 
 GAP_AFTER_METADATA = 14
 
 
+def _wrap_text_to_width(text: str, font: str, size: float, max_width: float) -> "list[str]":
+    """Wraps `text` into lines that each fit within `max_width`, breaking
+    on whitespace AND hyphens (Shipping Mark / reference codes are
+    typically hyphen-separated with no spaces at all, e.g.
+    'CN-1666-PVG-KERRY-POP') -- a plain whitespace-only wrapper would
+    never break such a string at all. Falls back to hard character-wrap
+    for the rare case where a single unbreakable token is itself still
+    wider than max_width, so a line can never overflow past max_width no
+    matter what. Pure function, no canvas needed. Always returns at least
+    one line (possibly empty)."""
+    text = str(text or "")
+    if not text:
+        return [""]
+    if pdfmetrics.stringWidth(text, font, size) <= max_width:
+        return [text]
+
+    tokens = re.findall(r'[^\s-]+-?|\s+', text)
+    lines: "list[str]" = []
+    current = ""
+    for tok in tokens:
+        candidate = current + tok
+        if not current or pdfmetrics.stringWidth(candidate, font, size) <= max_width:
+            current = candidate
+        else:
+            lines.append(current.rstrip())
+            current = tok.lstrip() if tok.strip() else ""
+    if current.strip():
+        lines.append(current.rstrip())
+
+    final: "list[str]" = []
+    for line in lines:
+        if pdfmetrics.stringWidth(line, font, size) <= max_width:
+            final.append(line)
+        else:
+            # Hard character-wrap for a single token still too wide.
+            chunk = ""
+            for ch in line:
+                candidate = chunk + ch
+                if pdfmetrics.stringWidth(candidate, font, size) <= max_width or not chunk:
+                    chunk = candidate
+                else:
+                    final.append(chunk)
+                    chunk = ch
+            if chunk:
+                final.append(chunk)
+    return final or [""]
+
+
+def _wrap_metadata_values(value_texts) -> "list[list[str]]":
+    """value_texts (6 raw strings, in METADATA_ROWS order) -> wrapped
+    lines per row, each capped at VALUE_COL_MAX_WIDTH. Pure function --
+    the single source of truth both _compute_metadata_x() (sizing) and
+    _draw_page() (actual drawing) use, so the computed column width and
+    what actually gets drawn can never disagree."""
+    return [_wrap_text_to_width(v, FONT_VALUE, SIZE_VALUE, VALUE_COL_MAX_WIDTH) for v in value_texts]
+
+
 def _compute_metadata_x(value_texts) -> "tuple[float, float]":
-    """-> (metadata_value_x, metadata_label_right_x), both measured from
-    the actual value text widths so the block's right edge sits near
-    CONTENT_RIGHT (the page's right margin) and the label/value gap stays
-    a small fixed distance regardless of content length. Pure function --
-    no canvas needed (pdfmetrics.stringWidth uses the font's built-in
-    AFM/glyph-width table), so this is directly unit-testable.
+    """-> (metadata_value_x, metadata_label_right_x), measured from the
+    actual (possibly wrapped) value text so the block's right edge sits
+    near CONTENT_RIGHT (the page's right margin) and the label/value gap
+    stays a small fixed distance regardless of content length -- a value
+    wider than VALUE_COL_MAX_WIDTH wraps onto more lines rather than
+    growing the column past that cap. Pure function -- no canvas needed
+    (pdfmetrics.stringWidth uses the font's built-in AFM/glyph-width
+    table), so this is directly unit-testable.
 
         metadata_right_x     = CONTENT_RIGHT               (page_width - right_margin)
         metadata_value_x     = metadata_right_x - value_column_width
         metadata_label_right_x = metadata_value_x - VALUE_LABEL_GAP
     """
-    widths = [pdfmetrics.stringWidth(str(v or ""), FONT_VALUE, SIZE_VALUE) for v in value_texts]
+    wrapped = _wrap_metadata_values(value_texts)
+    widths = [pdfmetrics.stringWidth(line, FONT_VALUE, SIZE_VALUE) for lines in wrapped for line in lines]
     value_column_width = max(widths + [MIN_VALUE_COL_WIDTH])
     metadata_value_x = CONTENT_RIGHT - value_column_width
     metadata_label_right_x = metadata_value_x - VALUE_LABEL_GAP
@@ -212,8 +295,12 @@ TOTAL_TEXT_PADDING = 13
 GAP_BEFORE_CONTINUED_NOTE = 4
 ROW_HEIGHT_CONTINUED_NOTE = 12
 
-# y-position of the FIRST item row (immediately below the header) -- fixed
-# per page (metadata block height doesn't vary), items are what varies.
+# y-position of the FIRST item row (immediately below the header), for the
+# SINGLE-LINE (no metadata wrapping) reference case -- used as the default
+# in pure-function tests and as the base for META_BLOCK_HEIGHT_RESERVED
+# below. The ACTUAL per-page value used while drawing is dynamic (see
+# _draw_page(), which tracks the real `y` after however many metadata
+# lines that page's Shipping Mark/Packing Code actually wrapped to).
 ITEM_TABLE_START_Y = CONTENT_TOP - META_BLOCK_HEIGHT - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
 
 # Fixed vertical budget that must be reserved BELOW the item rows for the
@@ -222,11 +309,18 @@ ITEM_TABLE_START_Y = CONTENT_TOP - META_BLOCK_HEIGHT - GAP_AFTER_METADATA - ROW_
 # what still caps ITEMS_PER_PDF_PAGE so a full page's dynamic total can
 # never be pushed below the bottom margin.
 _RESERVED_BELOW_ITEMS = GAP_AFTER_ITEMS + TOTAL_TEXT_PADDING + GAP_BEFORE_CONTINUED_NOTE + ROW_HEIGHT_CONTINUED_NOTE
-_AVAILABLE_FOR_ITEMS = (ITEM_TABLE_START_Y - MARGIN) - _RESERVED_BELOW_ITEMS
+# Capacity is computed against the WORST-CASE (wrapped) metadata block
+# height, not the single-line one -- so a page whose Shipping Mark/
+# Packing Code actually wraps still can't overflow past the bottom
+# margin. This makes ITEMS_PER_PDF_PAGE slightly conservative on the
+# (common) single-line case, which is the safe direction to be wrong in.
+_ITEM_TABLE_START_Y_RESERVED = CONTENT_TOP - META_BLOCK_HEIGHT_RESERVED - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
+_AVAILABLE_FOR_ITEMS = (_ITEM_TABLE_START_Y_RESERVED - MARGIN) - _RESERVED_BELOW_ITEMS
 # Item capacity per A5 page, derived from actual page geometry above (not
 # copied from the Excel template's 18 -- see module docstring). Documented
 # here rather than silently picked: at MARGIN=28/ROW_HEIGHT_ITEM=14 this
-# works out to ~24-26 items/page; verified against a rendered sample (see
+# works out to the low-20s items/page (down from ~26 before the wrap-
+# safety reserve was added); verified against a rendered sample (see
 # tests/test_pl_sublist_pdf_export.py's visual-validation step).
 ITEMS_PER_PDF_PAGE = max(1, int(_AVAILABLE_FOR_ITEMS // ROW_HEIGHT_ITEM))
 
@@ -296,12 +390,20 @@ def _paginate_for_pdf(cartons: list) -> List[PdfPageBlock]:
 # =========================================================================
 # 4) Single-page drawing
 # =========================================================================
-def _draw_metadata_row(c: canvas.Canvas, y: float, label: str, value: str,
-                        value_x: float, label_right_x: float):
+def _draw_metadata_row(c: canvas.Canvas, y: float, label: str, value_lines: "list[str]",
+                        value_x: float, label_right_x: float) -> float:
+    """Draws one metadata row -- label right-aligned on the FIRST line
+    only (a wrapped 2nd+ line has no label repeated, matching how a
+    label normally applies to its whole field, not each wrapped
+    fragment), value lines left-aligned, one per line, top to bottom.
+    Returns the y AFTER this row (i.e. y minus however many lines it
+    took), so multi-line rows correctly push the next row down."""
     c.setFont(FONT_LABEL, SIZE_LABEL)
     c.drawRightString(label_right_x, y, label)
     c.setFont(FONT_VALUE, SIZE_VALUE)
-    c.drawString(value_x, y, value or "")
+    for i, line in enumerate(value_lines or [""]):
+        c.drawString(value_x, y - i * ROW_HEIGHT_META, line)
+    return y - (len(value_lines or [""]) - 1) * ROW_HEIGHT_META
 
 
 def _draw_item_table_grid(c: canvas.Canvas, header_bottom_y: float, n_rows: int):
@@ -338,11 +440,29 @@ def _draw_item_table_grid(c: canvas.Canvas, header_bottom_y: float, n_rows: int)
     c.line(col_x_qty_line, table_bottom, col_x_qty_line, table_top)
 
 
+def _draw_continuation_page_marker(c: canvas.Canvas, block: PdfPageBlock):
+    """Small 'page N/M' marker in the page's TOP-LEFT corner -- business
+    owner's follow-up request: "voi sublist neu bi dai qua thi tach ra
+    ghi ben goc trai la 1/2 2/2 (vi du)". Only drawn when a carton actually
+    spans more than one page (block_count > 1); a normal single-page
+    carton gets no marker at all, matching the "neu bi dai qua" (only
+    when it's actually too long) condition. Distinct from the existing
+    'Continued on/from...' sentence near the bottom of the page -- this
+    is the quick-glance top-left version, the bottom note stays as the
+    fuller-context version; both point at the same block_index/block_count."""
+    if block.block_count <= 1:
+        return
+    c.setFont(CONTINUATION_MARKER_FONT, CONTINUATION_MARKER_SIZE)
+    c.drawString(CONTENT_LEFT, PAGE_H - CONTINUATION_MARKER_TOP_GAP,
+                 f"{block.block_index + 1}/{block.block_count}")
+
+
 def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None):
     carton = block.carton
     y = CONTENT_TOP
 
     _draw_logo(c, logo_path if logo_path is not None else DEFAULT_LOGO_PATH)
+    _draw_continuation_page_marker(c, block)
 
     # -- Metadata block (Carton# / Shipping Mark / OR# / SO Order# / GW /
     #    Packing Code#) -- label right-aligned, value left-aligned, TIGHTLY
@@ -359,13 +479,16 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None):
         "packing_code": carton.packing_code,
     }
     value_texts = [meta_values.get(key, "") for key, _label in METADATA_ROWS]
+    wrapped_values = _wrap_metadata_values(value_texts)
     metadata_value_x, metadata_label_right_x = _compute_metadata_x(value_texts)
-    for key, label in METADATA_ROWS:
+    for (key, label), lines in zip(METADATA_ROWS, wrapped_values):
         y -= ROW_HEIGHT_META
-        _draw_metadata_row(c, y, label, meta_values.get(key, ""), metadata_value_x, metadata_label_right_x)
+        y = _draw_metadata_row(c, y, label, lines, metadata_value_x, metadata_label_right_x)
 
     y -= GAP_AFTER_METADATA
-    content_start_y = y  # top of where the item table (or nothing) begins
+    content_start_y = y  # top of where the item table (or nothing) begins -- reflects
+                          # the ACTUAL metadata block height on this page, including any
+                          # wrapped Shipping Mark/Packing Code lines.
 
     n_items = len(block.items)
     if n_items > 0:
@@ -375,8 +498,14 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None):
         # header's light-gray fill would otherwise paint over its own
         # "Item No."/"EAN"/"QTY" labels if drawn after them (caught during
         # visual review of this exact change).
+        # header_bottom_y (== this page's actual item_table_start_y) is now
+        # DYNAMIC -- it equals the fixed ITEM_TABLE_START_Y constant only
+        # when no metadata value wrapped to extra lines on this page; when
+        # Shipping Mark/Packing Code DID wrap, everything below shifts
+        # down by exactly that many extra ROW_HEIGHT_META increments,
+        # which is exactly what `y` (tracked through the metadata loop
+        # above) already reflects.
         header_bottom_y = y - ROW_HEIGHT_ITEM_HEADER
-        assert abs(header_bottom_y - ITEM_TABLE_START_Y) < 0.01, "item_table_start_y drifted from the module constant"
         _draw_item_table_grid(c, header_bottom_y, n_items)
 
         # -- Item table header text (bordered, light-gray fill -- spec:
@@ -408,7 +537,7 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None):
         #    to the page bottom. Subtotal on a non-last continuation page,
         #    GRAND TOTAL (the full carton's total_qty) only on the
         #    carton's last page. --
-        total_rule_y, total_text_y = _compute_total_y(ITEM_TABLE_START_Y, n_items)
+        total_rule_y, total_text_y = _compute_total_y(header_bottom_y, n_items)
     else:
         # spec: "co SKU data moi ke bang, con khong thi thoi, khong co ke,
         # de so total ngay ben duoi" -- zero items: skip the header AND

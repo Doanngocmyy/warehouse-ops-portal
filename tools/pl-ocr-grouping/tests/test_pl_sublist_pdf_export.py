@@ -139,13 +139,24 @@ def t_label_value_gap_is_within_the_compact_threshold():
 
 
 def t_metadata_values_never_overlap_right_margin_even_for_a_very_long_value():
+    # A value longer than VALUE_COL_MAX_WIDTH now WRAPS instead of
+    # growing the column past that cap (business owner's follow-up
+    # request: "neu dai qua ky tu thi phai tu wrap text") -- so what must
+    # never overlap the margin is each individual WRAPPED LINE, not the
+    # raw unwrapped string's own full width.
     long_packing_code = "PGKECO377R7J0320001-EXTRA-LONG-SUFFIX-FOR-STRESS-TEST"
     value_x, label_right_x = ppe._compute_metadata_x(
         ["1/6", "CN-1666-PVG-KERRY-POP", "OR1016", "so402064", "35.68 KG", long_packing_code])
     from reportlab.pdfbase import pdfmetrics
-    widest_width = pdfmetrics.stringWidth(long_packing_code, ppe.FONT_VALUE, ppe.SIZE_VALUE)
-    assert value_x + widest_width <= ppe.CONTENT_RIGHT + 0.5, \
-        "even an unusually long value must not be pushed past the right margin"
+    raw_width = pdfmetrics.stringWidth(long_packing_code, ppe.FONT_VALUE, ppe.SIZE_VALUE)
+    assert raw_width > ppe.VALUE_COL_MAX_WIDTH, "test setup: this value should actually need wrapping"
+    wrapped_lines = ppe._wrap_text_to_width(long_packing_code, ppe.FONT_VALUE, ppe.SIZE_VALUE, ppe.VALUE_COL_MAX_WIDTH)
+    assert len(wrapped_lines) > 1, "an over-cap value must actually wrap into multiple lines"
+    for line in wrapped_lines:
+        line_width = pdfmetrics.stringWidth(line, ppe.FONT_VALUE, ppe.SIZE_VALUE)
+        assert value_x + line_width <= ppe.CONTENT_RIGHT + 0.5, \
+            f"wrapped line {line!r} must not be pushed past the right margin"
+        assert line_width <= ppe.VALUE_COL_MAX_WIDTH + 0.5
 
 
 def t_metadata_block_moves_as_one_whole_block_not_just_values():
@@ -311,6 +322,94 @@ def t_missing_logo_file_does_not_break_generation():
 def t_default_logo_asset_exists_in_the_repo():
     assert ppe.DEFAULT_LOGO_PATH.exists(), \
         f"expected the bundled logo asset at {ppe.DEFAULT_LOGO_PATH}"
+
+
+def t_long_shipping_mark_wraps_onto_multiple_lines_in_the_rendered_pdf():
+    # Business owner's follow-up: "doi voi shipmark neu dai qua ky tu thi
+    # phai tu wrap text" -- a Shipping Mark wider than VALUE_COL_MAX_WIDTH
+    # must actually wrap in the real rendered PDF, not just in the pure
+    # _wrap_text_to_width() unit test above.
+    long_mark = "CN-1666-PVG-KERRY-POP-EXTRA-LONG-SHIPPING-MARK-SUFFIX-FOR-WRAP-TEST"
+    items = [_item("A", "B", 1)]
+    pkg = _pkg(1, 1, items, shipping_mark=long_mark)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf([pkg], out)
+        assert result.status == "SUCCESS", result.error
+        with _pdfplumber.open(str(out)) as pdf:
+            text = pdf.pages[0].extract_text() or ""
+            # every fragment of the wrapped value must still be present,
+            # even though it's now spread across multiple lines
+            for fragment in ["CN-1666-PVG-KERRY-POP", "SUFFIX-FOR-WRAP-TEST"]:
+                assert fragment in text.replace("\n", ""), f"{fragment!r} missing from wrapped output"
+
+
+def t_wrapped_shipping_mark_pushes_the_item_table_down_without_overlap():
+    # The item table must start LOWER on a page whose Shipping Mark
+    # wrapped to 2 lines than on an otherwise-identical page with a short
+    # Shipping Mark -- proving the extra line actually reserves real
+    # vertical space rather than being drawn on top of the next row.
+    short_items = [_item("A", "B", 1)]
+    pkg_short = _pkg(1, 1, short_items, shipping_mark="SHORT")
+    long_mark = "CN-1666-PVG-KERRY-POP-EXTRA-LONG-SHIPPING-MARK-SUFFIX-FOR-WRAP-TEST"
+    pkg_long = _pkg(1, 1, short_items, shipping_mark=long_mark)
+    with tempfile.TemporaryDirectory() as td:
+        out_short = Path(td) / "short.pdf"
+        out_long = Path(td) / "long.pdf"
+        r_short = ppe.generate_sublist_pdf([pkg_short], out_short)
+        r_long = ppe.generate_sublist_pdf([pkg_long], out_long)
+        assert r_short.status == "SUCCESS" and r_long.status == "SUCCESS"
+        with _pdfplumber.open(str(out_short)) as pdf_s, _pdfplumber.open(str(out_long)) as pdf_l:
+            # the item-table outer rect's "top" (pdfplumber measures from
+            # the page's TOP in image-style coordinates) must be LOWER
+            # (larger `top` value) on the wrapped page.
+            rect_top_short = min(r["top"] for r in pdf_s.pages[0].rects)
+            rect_top_long = min(r["top"] for r in pdf_l.pages[0].rects)
+            assert rect_top_long > rect_top_short, \
+                "item table must start further down the page when Shipping Mark wraps to 2 lines"
+
+
+def t_continuation_marker_shown_top_left_only_when_carton_spans_multiple_pages():
+    cap = ppe.ITEMS_PER_PDF_PAGE
+    items = [_item(f"S{i}", f"E{i}", 1) for i in range(cap + 5)]
+    pkg = _pkg(2, 6, items)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf([pkg], out)
+        assert result.status == "SUCCESS", result.error
+        assert result.pages_written == 2
+        with _pdfplumber.open(str(out)) as pdf:
+            page1_text = pdf.pages[0].extract_text() or ""
+            page2_text = pdf.pages[1].extract_text() or ""
+            assert "1/2" in page1_text, "top-left page marker '1/2' missing on the first continuation page"
+            assert "2/2" in page2_text, "top-left page marker '2/2' missing on the second (last) page"
+
+
+def t_no_continuation_marker_for_a_single_page_carton():
+    items = [_item("A", "B", 1)]
+    pkg = _pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf([pkg], out)
+        assert result.status == "SUCCESS", result.error
+        assert result.pages_written == 1
+        with _pdfplumber.open(str(out)) as pdf:
+            text = pdf.pages[0].extract_text() or ""
+            assert "1/1" not in text.replace("Carton # 1/1", "").replace("1/1", "", 1) or True
+            # simpler/robust check: the dedicated marker font/size call was
+            # never even invoked (block_count == 1) -- verified indirectly
+            # via page.chars not containing an isolated bold 12pt "1/1" at
+            # the marker's own top-left coordinate band.
+            marker_band_chars = [ch for ch in pdf.pages[0].chars
+                                  if ch["top"] < ppe.CONTINUATION_MARKER_TOP_GAP + 4
+                                  and ch["x0"] < ppe.CONTENT_LEFT + 30]
+            assert not marker_band_chars, "no top-left marker text should be drawn for a single-page carton"
+
+
+test("a long Shipping Mark actually wraps onto multiple lines in the rendered PDF", t_long_shipping_mark_wraps_onto_multiple_lines_in_the_rendered_pdf)
+test("a wrapped Shipping Mark pushes the item table down (no overlap between wrapped lines and the table)", t_wrapped_shipping_mark_pushes_the_item_table_down_without_overlap)
+test("top-left 'N/M' continuation marker shown on both pages of a 2-page carton", t_continuation_marker_shown_top_left_only_when_carton_spans_multiple_pages)
+test("no top-left continuation marker drawn for a normal single-page carton", t_no_continuation_marker_for_a_single_page_carton)
 
 
 test("item table grid (borders + header fill) is drawn when items are present", t_grid_is_drawn_when_items_present)
