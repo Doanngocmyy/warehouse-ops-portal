@@ -91,9 +91,14 @@ LOGO_TOP_GAP = 10         # distance from the true page top edge to the logo's t
 
 # Top-left "page N/M" marker for a carton that spans multiple PDF pages
 # (business owner's follow-up request) -- see _draw_continuation_page_marker().
-CONTINUATION_MARKER_FONT = "Helvetica-Bold"
-CONTINUATION_MARKER_SIZE = 12
-CONTINUATION_MARKER_TOP_GAP = 22  # from the true page top edge, roughly level with the logo
+# Deliberately smaller than SIZE_LABEL (10, used for "Carton #") and in the
+# oblique style shared with the bottom "Continued on/from" note -- so this
+# top-left page marker reads as an annotation, never as a data value, and
+# can't be mistaken for the Store's own carton number (e.g. "1/6") shown
+# in the metadata block.
+CONTINUATION_MARKER_FONT = "Helvetica-Oblique"
+CONTINUATION_MARKER_SIZE = 8
+CONTINUATION_MARKER_TOP_GAP = 20  # from the true page top edge, roughly level with the logo
 
 
 def _draw_logo(c: canvas.Canvas, logo_path):
@@ -372,12 +377,11 @@ def _paginate_for_pdf(cartons: list) -> List[PdfPageBlock]:
         block_count = len(chunks)
         for idx, chunk in enumerate(chunks):
             is_last = idx == block_count - 1
-            if block_count == 1:
-                label = carton.carton_display
-            elif idx == 0:
-                label = carton.carton_display
-            else:
-                label = f"{carton.carton_display} - Continued {idx}"
+            # Carton # must read identically on every page of the same carton
+            # (e.g. always "1/6") -- continuation is conveyed solely by the
+            # top-left "N/M" marker and the bottom "Continued on/from" note,
+            # never by mutating the Carton # metadata value itself.
+            label = carton.carton_display
             block_total = carton.total_qty if is_last else sum(r.qty for r in chunk)
             blocks.append(PdfPageBlock(
                 carton=carton, block_index=idx, block_count=block_count,

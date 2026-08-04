@@ -463,7 +463,10 @@ def t_paginate_over_capacity_splits_no_item_lost():
     assert not blocks[0].is_last_block and blocks[1].is_last_block
     assert blocks[0].block_total_qty == sum(r.qty for r in blocks[0].items), "non-last block shows a SUBTOTAL"
     assert blocks[1].block_total_qty == carton.total_qty, "last block shows the carton's GRAND TOTAL, not just its own rows"
-    assert blocks[1].block_carton_label == "2/6 - Continued 1"
+    # Carton # must read IDENTICALLY on every page of the same carton --
+    # continuation is conveyed by the top-left marker/bottom note only.
+    assert blocks[1].block_carton_label == "2/6"
+    assert blocks[0].block_carton_label == blocks[1].block_carton_label == carton.carton_display
 
 
 def t_paginate_continuation_never_inflates_carton_identity():
@@ -481,6 +484,39 @@ test("<=capacity items -> single page, no continuation", t_paginate_under_capaci
 test("exactly at ITEMS_PER_PDF_PAGE -> still a single page", t_paginate_exact_capacity_single_block)
 test(">capacity items -> splits across pages, zero items lost, subtotal then grand total", t_paginate_over_capacity_splits_no_item_lost)
 test("continuation across pages never inflates the unique-carton identity", t_paginate_continuation_never_inflates_carton_identity)
+
+
+def t_continuation_marker_smaller_than_carton_hash_label():
+    # Turn 9 requirement: the top-left "N/M" page marker must be visually
+    # SMALLER than "Carton #" so it can never be mistaken for the Store's
+    # own carton number (e.g. "1/6") shown in the metadata block.
+    assert ppe.CONTINUATION_MARKER_SIZE < ppe.SIZE_LABEL, (
+        f"marker size {ppe.CONTINUATION_MARKER_SIZE} must be < Carton # label size {ppe.SIZE_LABEL}"
+    )
+    assert ppe.CONTINUATION_MARKER_SIZE < ppe.SIZE_VALUE, (
+        f"marker size {ppe.CONTINUATION_MARKER_SIZE} must be < Carton # value size {ppe.SIZE_VALUE}"
+    )
+    # Distinct font style (oblique) from the bold label / regular value,
+    # so it reads as an annotation rather than a data field.
+    assert ppe.CONTINUATION_MARKER_FONT != ppe.FONT_LABEL
+    assert ppe.CONTINUATION_MARKER_FONT != ppe.FONT_VALUE
+
+
+def t_carton_hash_label_unchanged_across_all_continuation_pages():
+    cap = ppe.ITEMS_PER_PDF_PAGE
+    items = [_item(f"S{i}", f"E{i}", 1) for i in range(cap * 2 + 5)]
+    pkg = _pkg(1, 1, items)
+    carton = pse.build_sublist_carton_model(pkg)
+    blocks = ppe._paginate_for_pdf([carton])
+    assert len(blocks) == 3
+    labels = {b.block_carton_label for b in blocks}
+    assert labels == {carton.carton_display}, (
+        f"Carton # must be identical on every page, got {labels}"
+    )
+
+
+test("continuation marker is visually smaller than Carton # (size + font style)", t_continuation_marker_smaller_than_carton_hash_label)
+test("Carton # label stays unchanged across all continuation pages", t_carton_hash_label_unchanged_across_all_continuation_pages)
 
 
 # =============================================================================
