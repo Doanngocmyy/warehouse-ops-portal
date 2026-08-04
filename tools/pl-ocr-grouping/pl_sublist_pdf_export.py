@@ -48,6 +48,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from reportlab.lib.pagesizes import A5
+from reportlab.lib.colors import Color
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
@@ -71,6 +73,42 @@ SIZE_ITEM_HEADER = 9
 SIZE_ITEM = 9
 SIZE_TOTAL = 10
 SIZE_CONTINUED = 8
+
+# =========================================================================
+# 1b) Brand logo (small, top-center) -- per business owner's explicit
+#     request with a reference screenshot showing the real Sublist
+#     template's own small "topologie" wordmark at the top of the page.
+#     This is the CUSTOMER'S brand mark on their own shipping document,
+#     not app/tool branding -- distinct from the earlier "no app
+#     branding/watermark" rule, which was about not stamping this tool's
+#     own name/logo onto the customer's paperwork.
+# =========================================================================
+_MODULE_DIR = Path(__file__).resolve().parent
+DEFAULT_LOGO_PATH = _MODULE_DIR / "assets" / "topologie_logo.png"
+LOGO_MAX_WIDTH = 50       # "nho nho" (small) -- a modest fraction of the 419pt page width
+LOGO_TOP_GAP = 10         # distance from the true page top edge to the logo's top edge
+
+
+def _draw_logo(c: canvas.Canvas, logo_path):
+    """Draws a small centered logo near the top of the page. Never raises
+    and never blocks page generation -- a missing/unreadable logo file
+    just means no logo is drawn (same non-blocking philosophy as the rest
+    of this module; the logo is a visual nicety, not load-bearing data)."""
+    if not logo_path:
+        return
+    logo_path = Path(logo_path)
+    if not logo_path.exists():
+        return
+    try:
+        reader = ImageReader(str(logo_path))
+        iw, ih = reader.getSize()
+        width = LOGO_MAX_WIDTH
+        height = width * (ih / iw)
+        x = (PAGE_W - width) / 2
+        y = PAGE_H - LOGO_TOP_GAP - height
+        c.drawImage(reader, x, y, width=width, height=height, mask="auto")
+    except Exception as e:
+        log.warning(f"Logo not drawn (non-blocking): {type(e).__name__}: {e}")
 
 # =========================================================================
 # 2) Page geometry -- A5 portrait, no title/watermark/branding anywhere.
@@ -144,6 +182,20 @@ COL_X_QTY_CENTER = COL_X_QTY + QTY_COL_WIDTH / 2
 
 ROW_HEIGHT_ITEM_HEADER = 16
 ROW_HEIGHT_ITEM = 14
+
+# Grid-line cell geometry: each row's text baseline sits ROW_ASCENT above
+# the cell's bottom border and ROW_DESCENT below its top border, so
+# ROW_ASCENT + ROW_DESCENT == the row's own height and adjacent cells tile
+# with no gap/overlap (row i's bottom border == row i+1's top border).
+# Same idea for the (taller, bold) header row with its own ASCENT/DESCENT.
+ROW_ASCENT = 10
+ROW_DESCENT = 4
+HEADER_ASCENT = 10
+HEADER_DESCENT = 6
+assert ROW_ASCENT + ROW_DESCENT == ROW_HEIGHT_ITEM
+assert HEADER_ASCENT + HEADER_DESCENT == ROW_HEIGHT_ITEM_HEADER
+HEADER_FILL_COLOR = Color(0.90, 0.90, 0.90)
+GRID_LINE_WIDTH = 0.5
 
 # Total QTY row is now DYNAMIC -- placed immediately after the last
 # rendered item row (revision per visual review: the first preview
@@ -252,9 +304,45 @@ def _draw_metadata_row(c: canvas.Canvas, y: float, label: str, value: str,
     c.drawString(value_x, y, value or "")
 
 
-def _draw_page(c: canvas.Canvas, block: PdfPageBlock):
+def _draw_item_table_grid(c: canvas.Canvas, header_bottom_y: float, n_rows: int):
+    """Draws the bordered grid (outer box + column separators + row
+    separators + a light-gray header fill) for the item table -- ONLY
+    called when there is at least 1 item row (spec: "co SKU data moi ke
+    bang, con khong thi thoi" -- an empty table is never drawn at all).
+    header_bottom_y is the y where the header cell ends / row 0 begins
+    (== ITEM_TABLE_START_Y + ROW_ASCENT, i.e. the same header/body split
+    used by the text-drawing loop -- kept as one source of truth so the
+    grid lines and the text they frame can never drift apart)."""
+    table_top = header_bottom_y + ROW_HEIGHT_ITEM_HEADER
+    table_bottom = header_bottom_y - n_rows * ROW_HEIGHT_ITEM
+
+    # Header fill (light gray), drawn before the border strokes so the
+    # border lines stay crisp on top of it.
+    c.setFillColor(HEADER_FILL_COLOR)
+    c.rect(CONTENT_LEFT, header_bottom_y, CONTENT_WIDTH, ROW_HEIGHT_ITEM_HEADER, stroke=0, fill=1)
+    c.setFillColor(Color(0, 0, 0))
+
+    c.setLineWidth(GRID_LINE_WIDTH)
+    # Outer border (header + all item rows together).
+    c.rect(CONTENT_LEFT, table_bottom, CONTENT_WIDTH, table_top - table_bottom, stroke=1, fill=0)
+    # Header / body separator.
+    c.line(CONTENT_LEFT, header_bottom_y, CONTENT_RIGHT, header_bottom_y)
+    # Row separators between item rows (n_rows - 1 internal lines).
+    for i in range(1, n_rows):
+        y_line = header_bottom_y - i * ROW_HEIGHT_ITEM
+        c.line(CONTENT_LEFT, y_line, CONTENT_RIGHT, y_line)
+    # Column separators, spanning the FULL table height (header + rows).
+    col_x_ean_line = COL_X_EAN - (VALUE_LABEL_GAP / 2)
+    col_x_qty_line = COL_X_QTY - (VALUE_LABEL_GAP / 2)
+    c.line(col_x_ean_line, table_bottom, col_x_ean_line, table_top)
+    c.line(col_x_qty_line, table_bottom, col_x_qty_line, table_top)
+
+
+def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None):
     carton = block.carton
     y = CONTENT_TOP
+
+    _draw_logo(c, logo_path if logo_path is not None else DEFAULT_LOGO_PATH)
 
     # -- Metadata block (Carton# / Shipping Mark / OR# / SO Order# / GW /
     #    Packing Code#) -- label right-aligned, value left-aligned, TIGHTLY
@@ -277,30 +365,57 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock):
         _draw_metadata_row(c, y, label, meta_values.get(key, ""), metadata_value_x, metadata_label_right_x)
 
     y -= GAP_AFTER_METADATA
+    content_start_y = y  # top of where the item table (or nothing) begins
 
-    # -- Item table header --
-    c.setFont(FONT_ITEM_HEADER, SIZE_ITEM_HEADER)
-    c.drawString(COL_X_ITEM_NO, y, "Item No.")
-    c.drawString(COL_X_EAN, y, "EAN")
-    c.drawCentredString(COL_X_QTY_CENTER, y, "QTY")
-    c.setLineWidth(0.75)
-    c.line(CONTENT_LEFT, y - 3, CONTENT_RIGHT, y - 3)
-    y -= ROW_HEIGHT_ITEM_HEADER
-    assert abs(y - ITEM_TABLE_START_Y) < 0.01, "item_table_start_y drifted from the module constant"
+    n_items = len(block.items)
+    if n_items > 0:
+        # Grid (fill + border lines) is drawn FIRST, text on TOP of it --
+        # drawing order matters with reportlab's painter model (whatever
+        # is drawn later covers whatever was drawn earlier), and the
+        # header's light-gray fill would otherwise paint over its own
+        # "Item No."/"EAN"/"QTY" labels if drawn after them (caught during
+        # visual review of this exact change).
+        header_bottom_y = y - ROW_HEIGHT_ITEM_HEADER
+        assert abs(header_bottom_y - ITEM_TABLE_START_Y) < 0.01, "item_table_start_y drifted from the module constant"
+        _draw_item_table_grid(c, header_bottom_y, n_items)
 
-    # -- Item rows: Item No. / EAN left-aligned, QTY centered --
-    c.setFont(FONT_ITEM, SIZE_ITEM)
-    for row in block.items:
-        c.drawString(COL_X_ITEM_NO, y, str(row.item_no))
-        c.drawString(COL_X_EAN, y, str(row.ean))
-        c.drawCentredString(COL_X_QTY_CENTER, y, str(row.qty))
-        y -= ROW_HEIGHT_ITEM
+        # -- Item table header text (bordered, light-gray fill -- spec:
+        #    "dung de bang trong tron", draw real grid lines, not just a
+        #    bare underline) --
+        c.setFont(FONT_ITEM_HEADER, SIZE_ITEM_HEADER)
+        # baseline sits HEADER_ASCENT below the cell's TOP edge (== y here,
+        # before decrementing) so header text is vertically centered-ish
+        # inside its shaded/bordered cell.
+        header_baseline_y = y - HEADER_ASCENT
+        c.drawString(COL_X_ITEM_NO + 4, header_baseline_y, "Item No.")
+        c.drawString(COL_X_EAN + 4, header_baseline_y, "EAN")
+        c.drawCentredString(COL_X_QTY_CENTER, header_baseline_y, "QTY")
+        y -= ROW_HEIGHT_ITEM_HEADER
 
-    # -- Total QTY: placed DYNAMICALLY immediately after the last rendered
-    #    item row (see _compute_total_y()) -- never anchored to the page
-    #    bottom. Subtotal on a non-last continuation page, GRAND TOTAL
-    #    (the full carton's total_qty) only on the carton's last page. --
-    total_rule_y, total_text_y = _compute_total_y(ITEM_TABLE_START_Y, len(block.items))
+        # -- Item rows: Item No. / EAN left-aligned, QTY centered --
+        c.setFont(FONT_ITEM, SIZE_ITEM)
+        for row in block.items:
+            # baseline sits ROW_ASCENT below the cell's TOP edge (== y
+            # here, before decrementing) -- same convention as the header.
+            row_baseline_y = y - ROW_ASCENT
+            c.drawString(COL_X_ITEM_NO + 4, row_baseline_y, str(row.item_no))
+            c.drawString(COL_X_EAN + 4, row_baseline_y, str(row.ean))
+            c.drawCentredString(COL_X_QTY_CENTER, row_baseline_y, str(row.qty))
+            y -= ROW_HEIGHT_ITEM
+
+        # -- Total QTY: placed DYNAMICALLY immediately after the last
+        #    rendered item row (see _compute_total_y()) -- never anchored
+        #    to the page bottom. Subtotal on a non-last continuation page,
+        #    GRAND TOTAL (the full carton's total_qty) only on the
+        #    carton's last page. --
+        total_rule_y, total_text_y = _compute_total_y(ITEM_TABLE_START_Y, n_items)
+    else:
+        # spec: "co SKU data moi ke bang, con khong thi thoi, khong co ke,
+        # de so total ngay ben duoi" -- zero items: skip the header AND
+        # the grid entirely, place Total QTY directly below the metadata
+        # block instead (nothing to reconcile a table against).
+        total_rule_y, total_text_y = _compute_total_y(content_start_y, 0)
+
     c.setLineWidth(0.75)
     c.line(CONTENT_LEFT, total_rule_y, CONTENT_RIGHT, total_rule_y)
     c.setFont(FONT_TOTAL, SIZE_TOTAL)
@@ -341,13 +456,20 @@ class SublistPdfBuildResult:
 
 def generate_sublist_pdf(packages: list, output_path: Path, *,
                           carton_display_mode: str = "current_total",
-                          enabled: bool = True) -> SublistPdfBuildResult:
+                          enabled: bool = True,
+                          logo_path=None) -> SublistPdfBuildResult:
     """packages -> A5 PDF at `output_path`, one page per carton block.
     NEVER raises -- any failure is captured into the returned result's
     status="FAILED" (spec: Sublist PDF is optional, its failure must never
     break the legacy ZIP/export). Mirrors generate_sublist_workbook()'s
     signature intentionally so app.html/run_pipeline call both the same
-    way."""
+    way.
+
+    logo_path: small brand logo drawn top-center on every page (business
+    owner's request). Defaults to None, which means "use the bundled
+    DEFAULT_LOGO_PATH if it exists" (see _draw_page/_draw_logo) -- pass an
+    explicit falsy sentinel like False to suppress the logo entirely if
+    ever needed (kept flexible, not hardcoded to always-on)."""
     result = SublistPdfBuildResult()
     if not enabled:
         result.status = "DISABLED"
@@ -377,7 +499,7 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
         c.setCreator("")
 
         for block in blocks:
-            _draw_page(c, block)
+            _draw_page(c, block, logo_path=logo_path)
             c.showPage()
         c.save()
 

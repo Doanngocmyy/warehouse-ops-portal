@@ -388,6 +388,25 @@ async function runPipeline() {
     pyodide.FS.writeFile('/pl_or_list_import.py', orListImportSrc);
     const sublistPdfExportSrc = await (await fetch('pl_sublist_pdf_export.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     pyodide.FS.writeFile('/pl_sublist_pdf_export.py', sublistPdfExportSrc);
+
+    // Small brand logo drawn top-center on every Sublist PDF page
+    // (business owner's request). Written next to pl_sublist_pdf_export.py
+    // at 'assets/topologie_logo.png' so DEFAULT_LOGO_PATH (computed there
+    // as `Path(__file__).parent / "assets" / "topologie_logo.png"`)
+    // resolves correctly inside the Pyodide virtual FS. Never blocks the
+    // run if this fetch fails -- the PDF module itself already treats a
+    // missing logo file as a no-op, not an error.
+    try {
+      const logoResp = await fetch('assets/topologie_logo.png?v=' + _cacheBust, { cache: 'no-store' });
+      if (logoResp.ok) {
+        const logoBytes = new Uint8Array(await logoResp.arrayBuffer());
+        pyodide.FS.mkdirTree('/assets');
+        pyodide.FS.writeFile('/assets/topologie_logo.png', logoBytes);
+      }
+    } catch (e) {
+      log('(Không tải được logo topologie — Sublist PDF vẫn tạo bình thường, chỉ là không có logo: ' + e.message + ')\n');
+    }
+
     await pyodide.runPythonAsync('import sys\nif "/" not in sys.path: sys.path.insert(0, "/")');
 
     let coreSrc = await (await fetch('pl_ocr_core.py?v=' + _cacheBust, { cache: 'no-store' })).text();

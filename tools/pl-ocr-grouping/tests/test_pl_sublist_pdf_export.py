@@ -219,6 +219,110 @@ test("dynamic total: NOT anchored to the bottom page margin (verified via a ligh
 
 
 # =============================================================================
+# 1c. Item table GRID (borders + header fill) + brand LOGO regression
+#     tests -- per business owner's follow-up review with a real reference
+#     screenshot: the table must have visible borders (not a bare
+#     underline), a table is only drawn when there is at least 1 SKU row,
+#     and a small "topologie" logo sits top-center on every page.
+# =============================================================================
+print("\n== Item table grid + logo regression tests ==")
+
+import pdfplumber as _pdfplumber
+
+
+def t_grid_is_drawn_when_items_present():
+    items = [_item(f"S{i}", f"E{i}", i + 1) for i in range(5)]
+    pkg = _pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf([pkg], out)
+        assert result.status == "SUCCESS", result.error
+        with _pdfplumber.open(str(out)) as pdf:
+            page = pdf.pages[0]
+            assert len(page.rects) >= 2, "expected at least the header fill + outer border rects"
+            # header/body separator + (n-1) row separators + 2 column
+            # separators + 1 total rule = n + 3 lines for n items.
+            assert len(page.lines) == 5 + 3, f"expected {5 + 3} grid lines for 5 items, got {len(page.lines)}"
+
+
+def t_grid_is_skipped_entirely_when_no_items():
+    pkg = _pkg(1, 1, [])
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf([pkg], out)
+        assert result.status == "SUCCESS", result.error
+        with _pdfplumber.open(str(out)) as pdf:
+            page = pdf.pages[0]
+            assert len(page.rects) == 0, "no table grid (fill/border rects) should be drawn for zero items"
+            assert len(page.lines) == 1, "only the Total QTY rule line should be drawn, no header/row separators"
+            text = page.extract_text() or ""
+            assert "TOTAL QTY" in text and "Item No." not in text, \
+                "empty carton must show Total QTY directly, with no Item No./EAN/QTY header at all"
+
+
+def t_grid_row_count_matches_item_count_for_various_sizes():
+    for n in (1, 3, 12, 18):
+        items = [_item(f"S{i}", f"E{i}", 1) for i in range(n)]
+        pkg = _pkg(1, 1, items)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "SUBLIST_TOTAL.pdf"
+            result = ppe.generate_sublist_pdf([pkg], out)
+            assert result.status == "SUCCESS", result.error
+            with _pdfplumber.open(str(out)) as pdf:
+                page = pdf.pages[0]
+                assert len(page.lines) == n + 3, f"n={n}: expected {n + 3} lines, got {len(page.lines)}"
+
+
+def t_logo_is_drawn_by_default_on_every_page():
+    items = [_item(f"S{i}", f"E{i}", 1) for i in range(3)]
+    pkgs = [_pkg(1, 2, items), _pkg(2, 2, items)]
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf(pkgs, out)
+        assert result.status == "SUCCESS", result.error
+        with _pdfplumber.open(str(out)) as pdf:
+            assert len(pdf.pages) == 2
+            for page in pdf.pages:
+                assert len(page.images) == 1, "logo should be drawn once per page by default"
+
+
+def t_logo_can_be_explicitly_suppressed():
+    items = [_item("S", "E", 1)]
+    pkg = _pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf([pkg], out, logo_path=False)
+        assert result.status == "SUCCESS", result.error
+        with _pdfplumber.open(str(out)) as pdf:
+            assert len(pdf.pages[0].images) == 0
+
+
+def t_missing_logo_file_does_not_break_generation():
+    items = [_item("S", "E", 1)]
+    pkg = _pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "SUBLIST_TOTAL.pdf"
+        result = ppe.generate_sublist_pdf([pkg], out, logo_path=Path("/nonexistent/logo.png"))
+        assert result.status == "SUCCESS", "a missing logo file must never fail PDF generation"
+        with _pdfplumber.open(str(out)) as pdf:
+            assert len(pdf.pages[0].images) == 0
+
+
+def t_default_logo_asset_exists_in_the_repo():
+    assert ppe.DEFAULT_LOGO_PATH.exists(), \
+        f"expected the bundled logo asset at {ppe.DEFAULT_LOGO_PATH}"
+
+
+test("item table grid (borders + header fill) is drawn when items are present", t_grid_is_drawn_when_items_present)
+test("item table grid is skipped ENTIRELY when a carton has zero items (total shown directly below metadata)", t_grid_is_skipped_entirely_when_no_items)
+test("grid line count matches item count for several carton sizes (1/3/12/18 items)", t_grid_row_count_matches_item_count_for_various_sizes)
+test("logo is drawn once per page by default (multi-page batch)", t_logo_is_drawn_by_default_on_every_page)
+test("logo can be explicitly suppressed via logo_path=False", t_logo_can_be_explicitly_suppressed)
+test("a missing/invalid logo file never breaks PDF generation (non-blocking)", t_missing_logo_file_does_not_break_generation)
+test("the bundled default logo asset exists in the repo", t_default_logo_asset_exists_in_the_repo)
+
+
+# =============================================================================
 # 2. Pagination (_paginate_for_pdf) -- one carton per page/continuation
 # =============================================================================
 print("\n== Pagination unit tests ==")
