@@ -67,7 +67,8 @@
         <input type="file" id="pdfZipInput" accept=".zip">
         <div class="file-list-mini" id="pdfFileList"></div>
         <label class="checkline"><input type="checkbox" id="recursiveCheck"> Quét cả thư mục con (subfolder)</label>
-        <label class="checkline"><input type="checkbox" id="generateSublistCheck" checked> Tạo Sublist theo carton (05_SUBLIST/SUBLIST_TOTAL.xlsx)</label>
+        <label class="checkline"><input type="checkbox" id="generateSublistCheck" checked> Tạo Sublist Excel theo carton (05_SUBLIST/SUBLIST_TOTAL.xlsx, tuỳ chọn)</label>
+        <label class="checkline"><input type="checkbox" id="generateSublistPdfCheck" checked> Tạo Sublist PDF khổ A5 theo carton (05_SUBLIST/SUBLIST_TOTAL.pdf)</label>
       </div>
       <div class="panel">
         <h4>2. File DIM / khối lượng &amp; Master Data</h4>
@@ -76,6 +77,9 @@
         <br><br>
         <label class="small">Master Data — SKU + HS Code (.xlsx)</label><br>
         <input type="file" id="masterInput" accept=".xlsx,.xls">
+        <br><br>
+        <label class="small">OR List — STORE / OR / SO (.xlsx) — <b>tuỳ chọn</b>, không có vẫn chạy bình thường</label><br>
+        <input type="file" id="orListInput" accept=".xlsx,.xls">
 
         <button type="button" class="adv-toggle" id="advToggle">Tuỳ chọn nâng cao (chỉ định sheet) ▾</button>
         <div class="adv-box" id="advBox">
@@ -136,10 +140,17 @@
       "Shipping Mark:" thật trong PL thì dùng giá trị đó. OR #/SO Order # cũng được tool cố đọc từ PL (nếu có) —
       không đọc được thì để trống, không báo lỗi. PO No. / Invoice No. / 中国标签名称 vẫn để trống — điền tay sau.<br>
       Carton # nay được đánh theo đúng thứ tự nghiệp vụ (factory → tài liệu gốc → bản "_1"/"_2"... theo số, không
-      còn sort theo tên file kiểu chữ cái) thay vì theo tên file. Mặc định tool còn xuất thêm
-      <code>PL_SPLIT_OUTPUT/05_SUBLIST/SUBLIST_TOTAL.xlsx</code> — 1 block metadata + bảng item riêng cho từng
-      carton, theo đúng thứ tự carton trong PL_Total — có thể tắt ở ô "Tạo Sublist theo carton" phía trên nếu
-      không cần.<br>
+      còn sort theo tên file kiểu chữ cái) thay vì theo tên file, và được đánh <b>riêng theo từng Store/lô hàng</b>
+      (vd: Kerry 6 carton → 1/6...6/6, Hangzhou 4 carton → 1/4...4/4 — không gộp chung thành 1/10...10/10).
+      Mặc định tool xuất thêm 2 file Sublist theo carton (bật/tắt riêng từng file ở ô 1):
+      <code>PL_SPLIT_OUTPUT/05_SUBLIST/SUBLIST_TOTAL.pdf</code> (khổ A5, 1 carton/trang — đây là output Sublist
+      chính) và <code>SUBLIST_TOTAL.xlsx</code> (bản Excel, tuỳ chọn phụ). Carton hơn số item chứa được trên 1
+      trang/block sẽ tự tách "Continued" sang trang/block kế tiếp, không mất item nào.<br>
+      <b>OR List (tuỳ chọn)</b> — upload file Excel có cột STORE/OR/SO ở mục 2 để tool tự điền OR #/SO Order # theo
+      đúng Store (khớp theo Shipping Mark → tên file → nội dung Receiver, ưu tiên khớp chính xác trước khi thử mờ;
+      trường hợp không chắc sẽ đánh dấu REVIEW thay vì tự đoán). OR #/SO # đọc được trực tiếp từ PL vẫn được ưu
+      tiên hơn OR List. <b>Không upload OR List thì tool vẫn chạy đầy đủ bình thường</b>, không báo lỗi, không khoá
+      nút chạy.<br>
       Parser core đã được audit lại và sửa nhiều lỗi table/text parsing + DIM matching so với bản notebook gốc, kèm
       bộ regression test trong repo (<code>tools/pl-ocr-grouping/tests/</code>). Số version thật của bản đang chạy
       trên trình duyệt của bạn hiện ngay trong ô tóm tắt phía trên sau khi bấm chạy — so số đó với lịch sử commit
@@ -156,10 +167,12 @@ const pdfZipInput      = document.getElementById('pdfZipInput');
 const pdfFileList      = document.getElementById('pdfFileList');
 const dimInput         = document.getElementById('dimInput');
 const masterInput      = document.getElementById('masterInput');
+const orListInput      = document.getElementById('orListInput');
 const dimSheetInput    = document.getElementById('dimSheetInput');
 const masterSheetInput = document.getElementById('masterSheetInput');
 const recursiveCheck   = document.getElementById('recursiveCheck');
 const generateSublistCheck = document.getElementById('generateSublistCheck');
+const generateSublistPdfCheck = document.getElementById('generateSublistPdfCheck');
 const manualConsigneeInput = document.getElementById('manualConsigneeInput');
 const manualNotifyInput    = document.getElementById('manualNotifyInput');
 const advToggle        = document.getElementById('advToggle');
@@ -350,7 +363,19 @@ async function runPipeline() {
     const masterBytes = await readAsUint8(masterInput.files[0]);
     pyodide.FS.writeFile('/work/master.xlsx', masterBytes);
 
-    // pl_group_export.py must be importable
+    // OR List is OPTIONAL (spec: never a fatal error, Run/Export never
+    // disabled if it's missing -- see checkReady(), which deliberately does
+    // NOT check orListInput.files). Only written into the virtual FS / only
+    // wired into OR_LIST_FILE when the user actually picked a file.
+    let orListFileLiteral = 'None';
+    if (orListInput.files[0]) {
+      const orListBytes = await readAsUint8(orListInput.files[0]);
+      pyodide.FS.writeFile('/work/or_list.xlsx', orListBytes);
+      orListFileLiteral = 'Path("/work/or_list.xlsx")';
+    }
+
+    // pl_group_export.py / pl_sublist_export.py / pl_or_list_import.py /
+    // pl_sublist_pdf_export.py must all be importable.
     // cache: 'no-store' + timestamp query param — these Python source files
     // are updated over time; without forcing a fresh fetch, the browser (or
     // an intermediate CDN cache) can silently serve a stale pre-fix copy.
@@ -359,6 +384,10 @@ async function runPipeline() {
     pyodide.FS.writeFile('/pl_group_export.py', groupExportSrc);
     const sublistExportSrc = await (await fetch('pl_sublist_export.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     pyodide.FS.writeFile('/pl_sublist_export.py', sublistExportSrc);
+    const orListImportSrc = await (await fetch('pl_or_list_import.py?v=' + _cacheBust, { cache: 'no-store' })).text();
+    pyodide.FS.writeFile('/pl_or_list_import.py', orListImportSrc);
+    const sublistPdfExportSrc = await (await fetch('pl_sublist_pdf_export.py?v=' + _cacheBust, { cache: 'no-store' })).text();
+    pyodide.FS.writeFile('/pl_sublist_pdf_export.py', sublistPdfExportSrc);
     await pyodide.runPythonAsync('import sys\nif "/" not in sys.path: sys.path.insert(0, "/")');
 
     let coreSrc = await (await fetch('pl_ocr_core.py?v=' + _cacheBust, { cache: 'no-store' })).text();
@@ -369,6 +398,8 @@ async function runPipeline() {
       .replace('__MANUAL_CONSIGNEE__', pyStrLiteral(manualConsigneeInput.value.trim()))
       .replace('__MANUAL_NOTIFY_PARTY__', pyStrLiteral(manualNotifyInput.value.trim()))
       .replace('__GENERATE_SUBLIST__', generateSublistCheck.checked ? 'True' : 'False')
+      .replace('__GENERATE_SUBLIST_PDF__', generateSublistPdfCheck.checked ? 'True' : 'False')
+      .replace('__OR_LIST_FILE__', orListFileLiteral)
       // No build step serves this page (plain static file on GitHub Pages), so
       // there is no real git-commit-at-build-time value to inject here. Left
       // blank on purpose rather than faking a SHA -- PARSER_VERSION (shown in
@@ -404,6 +435,15 @@ async function runPipeline() {
       runSummary_lastJson = runSummary;
       runSummary.push_ok = true;
       const stat = (label, value, isErr) => `<div class="stat${isErr ? ' err' : ''}"><b>${value}</b>${label}</div>`;
+      // Sublist statuses (spec: SUCCESS | FAILED | DISABLED) are shown as
+      // text, not the numeric stat() boxes above -- FAILED here must never
+      // be styled/read as a pipeline-blocking error (it isn't one: the rest
+      // of the run already completed by the time this renders).
+      const sublistLine = (label, status, path) => {
+        const cls = status === 'SUCCESS' ? 'ok' : (status === 'FAILED' ? 'err' : 'idle');
+        const pathTxt = (status === 'SUCCESS' && path) ? ` — <code>${path.split('/').slice(-2).join('/')}</code>` : '';
+        return `<span class="stage-badge ${cls}" style="margin-left:0;margin-right:8px;">${label}: ${status}</span>${pathTxt}`;
+      };
       runSummaryEl.innerHTML =
         `<div class="version-line">pl_ocr_core <b>${runSummary.parser_version || '(unknown)'}</b>` +
         (runSummary.git_commit ? ` — commit <code>${runSummary.git_commit}</code>` : '') +
@@ -421,6 +461,13 @@ async function runPipeline() {
         stat('Duplicate đã loại', runSummary.duplicate_items_skipped) +
         stat('Lỗi (errors)', runSummary.errors, runSummary.errors > 0) +
         `</div>` +
+        `<div style="margin-top:10px;">` +
+        sublistLine('Sublist Excel', runSummary.sublist_xlsx_status || 'DISABLED', runSummary.sublist_xlsx_path) +
+        sublistLine('Sublist PDF (A5)', runSummary.sublist_pdf_status || 'DISABLED', runSummary.sublist_pdf_path) +
+        `</div>` +
+        ((runSummary.sublist_pdf_status === 'FAILED' || runSummary.sublist_xlsx_status === 'FAILED') ?
+          `<div class="status" style="margin-top:6px;color:#92400e;">Sublist là output tuỳ chọn — FAILED ở đây ` +
+          `<b>không</b> ảnh hưởng PL_Total.xlsx / PL_SPLIT_OUTPUT chính, xem chi tiết lỗi trong log phía trên.</div>` : '') +
         `<div class="dl-log"><a href="#" id="dlLogLink">⬇ Tải diagnostic log (.txt)</a> ·  ` +
         `<a href="#" id="dlSummaryLink">⬇ Tải RUN_SUMMARY (.json)</a></div>`;
       runSummaryEl.style.display = 'block';
