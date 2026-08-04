@@ -51,7 +51,7 @@ _AUTO_SPLIT_MARKER = "# ========================================================
 
 def _substitute_placeholders(src: str, *, dim_sheet=None, master_sheet=None,
                               recursive=False, consignee=None, notify=None,
-                              generate_sublist=True) -> str:
+                              generate_sublist=True, or_list_file=None) -> str:
     def lit(v):
         return "None" if v is None else repr(v)
     return (src
@@ -61,6 +61,7 @@ def _substitute_placeholders(src: str, *, dim_sheet=None, master_sheet=None,
             .replace("__MANUAL_CONSIGNEE__", lit(consignee))
             .replace("__MANUAL_NOTIFY_PARTY__", lit(notify))
             .replace("__GENERATE_SUBLIST__", "True" if generate_sublist else "False")
+            .replace("__OR_LIST_FILE__", lit(str(or_list_file)) if or_list_file else "None")
             .replace("__GIT_COMMIT__", lit("test-suite")))
 
 
@@ -725,6 +726,115 @@ def t_synthetic_files_full_pipeline():
 
 
 test("synthetic fixtures (2 PDFs, 3 packages, 9 items): all OK, totals reconcile, DIM 3/3", t_synthetic_files_full_pipeline)
+
+
+# =============================================================================
+# 9. Per-Store counting scope for carton numbering (spec section 9) --
+#    counting_scope_key must group cartons per Store WITHIN a shipment,
+#    never as one flat denominator across an entire multi-store upload.
+# =============================================================================
+print("\n== Per-Store counting scope (carton numbering) unit tests ==")
+D9 = load_core_defs()
+Package9 = D9["Package"]
+assign_counting_scope_keys = D9["assign_counting_scope_keys"]
+assign_global_numbers = D9["assign_global_numbers"]
+compute_counting_scope_key = D9["compute_counting_scope_key"]
+
+
+def _pkg9(ref, or_status="", or_num="", or_store="", store="", seq=1):
+    p = Package9(package_code=f"PGKEC{ref}", source_file=f"{ref}.pdf",
+                 reference_code=ref, pdf_package_seq=seq)
+    p.or_list_match_status = or_status
+    p.or_number = or_num
+    p.or_list_store = or_store
+    p.store = store
+    return p
+
+
+def t_scoped_numbering_spec_example_kerry_hangzhou():
+    # Exact user-given example: Kerry 6 cartons, Hangzhou 4 cartons ->
+    # independent 1/6..6/6 and 1/4..4/4 -- NEVER a combined 1/10..10/10.
+    pkgs = [_pkg9(f"kerry_{i}", "OK", "OR1016", "Kerry", seq=i + 1) for i in range(6)]
+    pkgs += [_pkg9(f"hz_{i}", "OK", "OR2044", "Hangzhou", seq=i + 1) for i in range(4)]
+    assign_counting_scope_keys(pkgs)
+    assign_global_numbers(pkgs)
+    kerry = [p for p in pkgs if p.or_list_store == "Kerry"]
+    hz = [p for p in pkgs if p.or_list_store == "Hangzhou"]
+    assert [p.carton_display for p in kerry] == ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"],         [p.carton_display for p in kerry]
+    assert [p.carton_display for p in hz] == ["1/4", "2/4", "3/4", "4/4"], [p.carton_display for p in hz]
+    assert kerry[0].counting_scope_key != hz[0].counting_scope_key
+    assert all(p.carton_total == 6 for p in kerry)
+    assert all(p.carton_total == 4 for p in hz)
+
+
+def t_scoped_numbering_no_store_signal_stays_flat_backward_compat():
+    # No OR List match, no CN store resolved -> every package falls into
+    # the SAME implicit "UPLOAD_BATCH|UNRESOLVED" scope -- i.e. today's
+    # flat 1/N..N/N numbering, byte-for-byte, for every pre-v12 caller
+    # that never touches counting_scope_key at all.
+    pkgs = [_pkg9(f"f{i}", seq=i + 1) for i in range(5)]
+    assign_counting_scope_keys(pkgs)
+    assign_global_numbers(pkgs)
+    assert [p.carton_display for p in pkgs] == ["1/5", "2/5", "3/5", "4/5", "5/5"]
+    assert len({p.counting_scope_key for p in pkgs}) == 1
+
+
+def t_scoped_numbering_cn_store_without_or_list_still_splits():
+    # or_list_match_status is NOT "OK" (no OR List uploaded at all) but
+    # pkg.store WAS resolved (classify_packages_for_port / CN split) --
+    # counting scope must still key off that resolved Store.
+    pkgs = [_pkg9(f"a{i}", store="SHENZHEN", seq=i + 1) for i in range(3)]
+    pkgs += [_pkg9(f"b{i}", store="GUANGZHOU", seq=i + 1) for i in range(2)]
+    assign_counting_scope_keys(pkgs)
+    assign_global_numbers(pkgs)
+    sz = [p for p in pkgs if p.store == "SHENZHEN"]
+    gz = [p for p in pkgs if p.store == "GUANGZHOU"]
+    assert [p.carton_display for p in sz] == ["1/3", "2/3", "3/3"]
+    assert [p.carton_display for p in gz] == ["1/2", "2/2"]
+
+
+def t_scoped_numbering_or_list_match_takes_priority_over_cn_store():
+    # A package can have BOTH or_list_store (OK match) and a stale/blank
+    # pkg.store -- compute_counting_scope_key must prefer the OR-List-
+    # matched store, since it's the stronger, more specific signal.
+    p = _pkg9("x", or_status="OK", or_num="OR9", or_store="Kerry", store="")
+    key, source = compute_counting_scope_key(p)
+    assert source == "OR_LIST_GROUPING", source
+    assert "KERRY" in key.upper()
+
+
+def t_scoped_numbering_review_status_falls_back_not_or_list_grouped():
+    # or_list_match_status == "REVIEW" (ambiguous/no confident match) must
+    # NOT be treated as a confirmed OR-List grouping signal.
+    p = _pkg9("x", or_status="REVIEW", or_num="", or_store="", store="SHENZHEN")
+    key, source = compute_counting_scope_key(p)
+    assert source == "UPLOAD_BATCH_DEFAULT", source
+    assert "SHENZHEN" in key.upper()
+
+
+def t_scoped_numbering_case_insensitive_store_identity_merges():
+    # "Kerry" (OR List's own casing) and "KERRY" (a hypothetical differently
+    # -cased signal) must resolve to the SAME counting scope, not two.
+    p1 = _pkg9("a", or_status="OK", or_num="OR1", or_store="Kerry")
+    p2 = _pkg9("b", or_status="OK", or_num="OR1", or_store="KERRY")
+    k1, _ = compute_counting_scope_key(p1)
+    k2, _ = compute_counting_scope_key(p2)
+    assert k1 == k2, (k1, k2)
+
+
+test("per-Store scope: Kerry 6 cartons + Hangzhou 4 cartons number independently (1/6.. and 1/4.., never 1/10..)",
+     t_scoped_numbering_spec_example_kerry_hangzhou)
+test("per-Store scope: no store signal at all -> flat 1/N..N/N (backward-compat, matches every pre-v12 caller)",
+     t_scoped_numbering_no_store_signal_stays_flat_backward_compat)
+test("per-Store scope: CN store resolved without any OR List still splits scopes correctly",
+     t_scoped_numbering_cn_store_without_or_list_still_splits)
+test("per-Store scope: OK OR List match takes priority over a blank/stale pkg.store",
+     t_scoped_numbering_or_list_match_takes_priority_over_cn_store)
+test("per-Store scope: REVIEW status is never treated as a confirmed OR List grouping signal",
+     t_scoped_numbering_review_status_falls_back_not_or_list_grouped)
+test("per-Store scope: store identity is case-insensitive (Kerry == KERRY)",
+     t_scoped_numbering_case_insensitive_store_identity_merges)
+
 
 
 # ── summary ──────────────────────────────────────────────────────────────

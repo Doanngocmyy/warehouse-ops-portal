@@ -88,26 +88,78 @@ def _tokens(code: str) -> List[str]:
 # =========================================================================
 # 2) Factory detection — suffix based, last token wins
 # =========================================================================
-FACTORY_KEYWORDS = ["SBGEAR", "QIFENG", "POP", "JION", "CN"]  # longest-first for the flat-suffix fallback
+# v12: "VN" is a distinct, literal factory token -- used when a shipment's
+# Vietnam factory is named generically ("KR100_VN") rather than by its
+# specific name (POP/SBGEAR/QIFENG/JION). Spec section 8 explicitly warns
+# these must NOT be assumed equivalent -- VN is its own category, never
+# silently folded into one of the other four.
+FACTORY_KEYWORDS = ["SBGEAR", "QIFENG", "POP", "JION", "VN", "CN"]  # longest-first for the flat-suffix fallback
+_KNOWN_FACTORY_TOKENS = {"CN", "POP", "SBGEAR", "QIFENG", "JION", "VN"}
 
-# v11: carton-NUMBERING business order (spec section 7.2) -- deliberately
-# separate from FACTORY_KEYWORDS above, which is only a longest-first
-# matching-priority list for detect_factory() and has nothing to do with the
-# order cartons should be numbered in. Centralised here (not scattered
-# across pl_ocr_core.py) so there is exactly one place to change if the
-# warehouse's factory order ever changes. All VN-based factories (POP,
-# SBGEAR, QIFENG, JION) precede CN -- this also satisfies the "no CO" rule
-# (VN before CN) for free, since it's the same ordered list either way.
+# v11/v12: carton-NUMBERING business order (spec section 7.2/8) --
+# deliberately separate from FACTORY_KEYWORDS above, which is only a
+# longest-first matching-priority list for detect_factory() and has nothing
+# to do with the order cartons should be numbered in. Centralised here (not
+# scattered across pl_ocr_core.py) so there is exactly one place to change
+# if the warehouse's factory order ever changes.
+#   CARTON_FACTORY_ORDER_WITH_CO -- specific named factories, one Store
+#     spanning several of them (spec 7.2/8, "CO" case).
+#   CARTON_FACTORY_ORDER_NO_CO -- the literal VN/CN case (spec 7.3/8, "no
+#     CO"): VN always before CN, whether or not a specific VN sub-factory
+#     name is present.
+# carton_factory_rank_table() merges the two into one effective order so
+# they can never silently disagree with each other -- see its docstring.
 CARTON_FACTORY_ORDER_WITH_CO = ["POP", "SBGEAR", "QIFENG", "JION", "CN"]
+CARTON_FACTORY_ORDER_NO_CO = ["VN", "CN"]
+
+
+def carton_factory_rank_table() -> List[str]:
+    """Single effective carton-numbering factory order, derived from the two
+    named constants above so they cannot silently diverge: every specific
+    factory from CARTON_FACTORY_ORDER_WITH_CO except its trailing "CN"
+    ranks first (in that order), then CARTON_FACTORY_ORDER_NO_CO's own order
+    (VN, then CN) as the tail -- i.e. POP -> SBGEAR -> QIFENG -> JION -> VN
+    -> CN. A shipment with only literal VN/CN packages (no specific factory
+    names) gets exactly the CARTON_FACTORY_ORDER_NO_CO order (VN before CN)
+    from this same table; a shipment with specific factory names gets
+    CARTON_FACTORY_ORDER_WITH_CO's order, with any literal-VN packages
+    sorting alongside them (after the named ones, still before CN)."""
+    specific = [f for f in CARTON_FACTORY_ORDER_WITH_CO if f != "CN"]
+    return specific + list(CARTON_FACTORY_ORDER_NO_CO)
+
+
+# v12: trailing copy-suffix (_1 / -2 / (3) / COPY 4 / COPY_5 / COPY-6),
+# anchored to the END of the string only -- same semantics as
+# pl_ocr_core.parse_document_sequence's _SEQ_SUFFIX_RE (kept as an
+# independent, self-contained copy here per this module's own "no import
+# from pl_ocr_core" architecture -- see test_pl_group_export.py for a
+# cross-consistency test guarding the two against silently diverging).
+_COPY_SUFFIX_RE = re.compile(
+    r'^(?P<base>.+?)(?:[_\-]\s*\d{1,4}|\(\d{1,4}\)|\s+COPY[_\-\s]\d{1,4})$',
+    re.IGNORECASE)
+
+
+def _strip_trailing_copy_suffix(code: str) -> str:
+    """"Kerry_POP_1" -> "Kerry_POP" (so factory detection sees the real
+    "POP" suffix instead of the copy marker "1"); "Kerry_POP" (no suffix)
+    and "CN-1666-PVG-KERRY-POP" (mid-string number, not a trailing copy
+    marker) are returned unchanged. Found while testing business_sort_
+    packages(): calling detect_factory() on a copy-suffixed filename without
+    this step misreads every _1/_2/... copy as factory=REVIEW (the literal
+    last token is "1", not "POP"), which would sort a copy PDF to the very
+    end of the whole shipment instead of next to its original."""
+    m = _COPY_SUFFIX_RE.match(code or "")
+    return m.group("base") if m and m.group("base") else (code or "")
 
 
 def _detect_factory_from_code(code: str) -> Optional[str]:
+    code = _strip_trailing_copy_suffix(code)
     toks = _tokens(code)
     if not toks:
         return None
 
     last = toks[-1]
-    if last in {"CN", "POP", "SBGEAR", "QIFENG", "JION"}:
+    if last in _KNOWN_FACTORY_TOKENS:
         return last
 
     # Handle split spellings such as "..._SB_GEAR" or "..._QI_FENG"
@@ -127,11 +179,17 @@ def _detect_factory_from_code(code: str) -> Optional[str]:
 
 
 def detect_factory(reference_code: str, source_file: str) -> str:
-    """Return one of CN / POP / SBGEAR / QIFENG / JION / REVIEW.
+    """Return one of CN / POP / SBGEAR / QIFENG / JION / VN / REVIEW.
 
     Priority: the LAST suffix of reference_code, then the LAST suffix of the
     PDF filename (stem). A leading 'CN' (e.g. CN-2569_SH_PVG_POP) must NOT be
-    read as factory=CN — only the final suffix counts.
+    read as factory=CN — only the final suffix counts. A trailing copy-
+    sequence marker (_1/_2/(3)/COPY 4/...) is stripped first, so
+    "Kerry_POP_1" still detects factory=POP (see _strip_trailing_copy_suffix)
+    -- this is now the SINGLE source of truth for factory classification:
+    every caller (classify_packages_for_port, export_grouped_pl's grouping,
+    _is_all_cn_factory, business_sort_packages) goes through this same
+    function and therefore gets the same, consistent answer.
     """
     f = _detect_factory_from_code(reference_code or "")
     if f:
@@ -321,6 +379,230 @@ def match_store(signal_text: str, threshold: float = 0.55, margin: float = 0.08)
     if (best_score - second_score) < margin:
         return "REVIEW", round(best_score, 3), best_store
     return best_store, round(best_score, 3), ""
+
+
+# =========================================================================
+# v12) Store / OR / SO matching against an (optional) OR List (spec section
+#      5) -- separate from match_store() above (which is CN-STORE_MASTER-
+#      specific, used for Notify Party/address lookup). This matches
+#      against the OR List's OWN store vocabulary, which can name ANY
+#      store across ANY factory, not just the 9 CN retail stores.
+# =========================================================================
+from dataclasses import dataclass as _dc_dataclass, field as _dc_field
+
+
+@_dc_dataclass
+class StoreOrMatchResult:
+    matched_store: str = ""
+    matched_or: str = ""
+    matched_so: str = ""
+    match_source: str = ""   # SHIPMARK_TOKEN_EXACT | FILENAME_TOKEN_EXACT | RECEIVER_TEXT_EXACT | FUZZY | ""
+    candidate_store: str = ""
+    candidate_score: float = 0.0
+    status: str = "REVIEW"   # OK | REVIEW | NO_OR_LIST
+    review_reason: str = ""
+
+
+def store_identity(store_text: str) -> str:
+    """Case/whitespace-insensitive identity key so "Kerry" (OR List's own
+    casing) and "KERRY" (STORE_MASTER's enum-style key) are recognised as
+    the SAME store instead of a false ambiguity between two differently-
+    cased spellings of one store. Public (no leading underscore) because
+    pl_ocr_core.py's counting-scope-key computation reuses it too (spec
+    section 9: counting_scope_key = shipment_key + "|" + normalized_store)."""
+    return _strip_accents(store_text).strip()
+
+
+_store_identity = store_identity  # backward-compat alias for internal callers
+
+
+def _store_alias_token_index(or_list_store_values) -> Dict[str, set]:
+    """token(uppercased, >=2 chars) -> set of distinct store IDENTITIES
+    (see _store_identity above) it could mean. Built from BOTH
+    STORE_MASTER's own alias config (helps match a CN store even when the
+    OR List just says "Kerry") AND the OR List's own STORE column values
+    (works for factories STORE_MASTER doesn't cover at all, e.g.
+    POP/SBGEAR/QIFENG stores). A token that maps to more than one DISTINCT
+    store identity is ambiguous by construction -- never used for an exact
+    match (spec: "RY must not automatically match KERRY unless RY is
+    explicitly configured as a Store alias" -- since tokens are never split
+    below word boundaries, "RY" and "KERRY" are simply different tokens;
+    this only becomes relevant if two DIFFERENT stores happen to share a
+    configured alias token, which is flagged as ambiguous rather than
+    picked)."""
+    idx: Dict[str, set] = {}
+
+    def add(token, store_identity):
+        if len(token) >= 2:
+            idx.setdefault(token, set()).add(store_identity)
+
+    for store_key, info in STORE_MASTER.items():
+        identity = _store_identity(store_key.replace("_", " "))
+        # NOTE: deliberately NOT tokenizing info["receiver"] (a full postal/
+        # company description, e.g. "CN - Shenzhen Mixc City (Shop T228)")
+        # -- splitting that into individual words would flood the index
+        # with generic English tokens ("Shop", "City", "Tower", ...) that
+        # collide across many stores and make everything "ambiguous". Only
+        # the store's own short/distinctive name + explicitly configured
+        # aliases (e.g. "Kerry", "Kerry Center", "NB1-23B") are tokenized.
+        for alias in [store_key.replace("_", " ")] + list(info["aliases"]):
+            for tok in _tokens(alias):
+                add(tok, identity)
+    for store_raw in or_list_store_values:
+        identity = _store_identity(store_raw)
+        for tok in _tokens(store_raw):
+            add(tok, identity)
+    return idx
+
+
+def _exact_token_store_match(text: str, token_index: Dict[str, set]):
+    """Returns (store_or_None, ambiguous_candidates_or_None)."""
+    hits: set = set()
+    ambiguous: set = set()
+    for tok in _tokens(text):
+        stores = token_index.get(tok)
+        if not stores:
+            continue
+        if len(stores) == 1:
+            hits |= stores
+        else:
+            ambiguous |= stores
+    if len(hits) == 1 and not (ambiguous - hits):
+        return next(iter(hits)), None
+    if hits or ambiguous:
+        return None, sorted(hits | ambiguous)
+    return None, None
+
+
+def _fuzzy_match_against_candidates(signal_text: str, candidates, threshold: float = 0.6, margin: float = 0.1):
+    """Generic version of match_store()'s tier-2 fuzzy scoring, parameterized
+    over an arbitrary candidate list instead of hardcoded STORE_MASTER --
+    used as the conservative last-resort fallback for OR List store names
+    that aren't in STORE_MASTER at all. Same "REVIEW beats a wrong guess"
+    philosophy: low confidence or a too-close runner-up both yield REVIEW."""
+    norm_signal = _norm_text(signal_text)
+    if not norm_signal or not candidates:
+        return "REVIEW", 0.0, ""
+    scores: Dict[str, float] = {}
+    for cand in candidates:
+        norm_cand = _norm_text(cand)
+        if not norm_cand:
+            continue
+        ratio = difflib.SequenceMatcher(None, norm_signal, norm_cand).ratio()
+        overlap = _token_overlap_score(norm_signal, norm_cand)
+        s = max(ratio, overlap)
+        if s > scores.get(cand, 0.0):
+            scores[cand] = s
+    if not scores:
+        return "REVIEW", 0.0, ""
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_cand, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best_score < threshold:
+        return "REVIEW", round(best_score, 3), best_cand
+    if (best_score - second_score) < margin:
+        return "REVIEW", round(best_score, 3), best_cand
+    return best_cand, round(best_score, 3), ""
+
+
+def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") -> StoreOrMatchResult:
+    """Resolve Store (and its OR/SO) for `pkg` against an OR List already
+    loaded into `or_index` (pl_or_list_import.build_or_index() -- or_norm ->
+    [OrListRow, ...]). Priority (spec section 5):
+      1) exact store-alias TOKEN in Shipmark
+      2) exact store-alias TOKEN in filename/reference_code
+      3) exact store name TOKEN in receiver/consignee text
+      4) conservative fuzzy fallback across the OR List's own store names
+    Exact token matching always wins over fuzzy. Returns status=REVIEW
+    (never a guess) on any conflict: ambiguous token, multiple store
+    candidates, or an OR value that maps to more than one Store in the OR
+    List itself."""
+    result = StoreOrMatchResult()
+    if not or_index:
+        result.status = "NO_OR_LIST"
+        return result
+
+    all_rows = [r for rows in or_index.values() for r in rows]
+    store_values = sorted({r.store_raw for r in all_rows})
+    identity_to_raw: Dict[str, set] = {}
+    for r in all_rows:
+        identity_to_raw.setdefault(_store_identity(r.store_raw), set()).add(r.store_raw)
+    token_idx = _store_alias_token_index(store_values)
+
+    store_identity = None
+    # NOTE: in production pkg.shipping_mark is already resolved to
+    # pkg.reference_code as a fallback upstream (run_pipeline(), v11) when
+    # no explicit Shipping Mark label was found in the PL text, so this
+    # first tier effectively also covers "no distinct Shipmark" cases; the
+    # reference_code tier below still runs independently for a pure/testable
+    # function that doesn't assume that upstream resolution already happened.
+    for text, source in (
+        (pkg.shipping_mark, "SHIPMARK_TOKEN_EXACT"),
+        (pkg.reference_code, "FILENAME_TOKEN_EXACT"),
+        (receiver_text, "RECEIVER_TEXT_EXACT"),
+    ):
+        if not text:
+            continue
+        hit, ambiguous = _exact_token_store_match(text, token_idx)
+        if hit:
+            store_identity, result.match_source = hit, source
+            break
+        if ambiguous:
+            result.status = "REVIEW"
+            result.review_reason = f"Ambiguous store token match in {source}: candidates={ambiguous}"
+            result.candidate_store = "/".join(sorted(ambiguous))
+            return result
+
+    if not store_identity:
+        signal = " ".join(t for t in (pkg.shipping_mark, pkg.reference_code, receiver_text) if t)
+        cand, score, suggestion = _fuzzy_match_against_candidates(signal, store_values)
+        if cand == "REVIEW" or not cand:
+            result.status = "REVIEW"
+            result.review_reason = "No confident Store match (exact-token and fuzzy both failed)."
+            result.candidate_store = suggestion
+            result.candidate_score = score
+            return result
+        store_identity, result.match_source, result.candidate_score = _store_identity(cand), "FUZZY", score
+
+    # Map the matched (normalized) store identity back onto the OR List's
+    # own raw store spelling(s) that share it -- this is what the OR List's
+    # rows are actually keyed by.
+    raw_candidates = identity_to_raw.get(store_identity)
+    if not raw_candidates:
+        result.status = "REVIEW"
+        result.review_reason = f"Store identity '{store_identity}' matched via {result.match_source}, " \
+                                f"but has no corresponding row in the OR List (only in STORE_MASTER)."
+        result.candidate_store = store_identity
+        return result
+    if len(raw_candidates) > 1:
+        result.status = "REVIEW"
+        result.review_reason = f"Store identity '{store_identity}' spelled multiple ways in the OR List: " \
+                                f"{sorted(raw_candidates)}"
+        result.candidate_store = "/".join(sorted(raw_candidates))
+        return result
+    store = next(iter(raw_candidates))
+
+    # Now resolve OR/SO for that store from the OR List.
+    store_rows = [r for r in all_rows if r.store_raw == store]
+    if not store_rows:
+        result.status = "REVIEW"
+        result.review_reason = f"Store '{store}' matched, but has no row in the OR List."
+        result.candidate_store = store
+        return result
+
+    distinct_or = {r.or_raw for r in store_rows}
+    if len(distinct_or) > 1:
+        result.status = "REVIEW"
+        result.review_reason = f"Store '{store}' has multiple OR values in the OR List: {sorted(distinct_or)}"
+        result.candidate_store = store
+        return result
+
+    row = store_rows[0]
+    result.matched_store = store
+    result.matched_or = row.or_raw
+    result.matched_so = row.so_raw
+    result.status = "OK"
+    return result
 
 
 # =========================================================================

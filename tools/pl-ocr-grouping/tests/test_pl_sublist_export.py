@@ -34,6 +34,7 @@ def _substitute(src: str) -> str:
             .replace("__MANUAL_CONSIGNEE__", "None")
             .replace("__MANUAL_NOTIFY_PARTY__", "None")
             .replace("__GENERATE_SUBLIST__", "True")
+            .replace("__OR_LIST_FILE__", "None")
             .replace("__GIT_COMMIT__", repr("test-suite")))
 
 
@@ -629,12 +630,13 @@ def t_end_to_end_generate_sublist_off_still_produces_everything_else():
         master_xlsx = td / "master.xlsx"
         _make_empty_master_xlsx(master_xlsx)
         src = CORE_PY.read_text(encoding="utf-8")
-        src = _substitute(src).replace("__GENERATE_SUBLIST__", "True")  # placeholder for the next replace
+        src = _substitute(src).replace("__GENERATE_SUBLIST__", "True").replace("__OR_LIST_FILE__", "None")  # placeholder for the next replace
         # re-substitute with GENERATE_SUBLIST=False specifically
         src = CORE_PY.read_text(encoding="utf-8")
         src = (src.replace("__DIM_WEIGHT_SHEET__", "None").replace("__MASTER_DATA_SHEET__", "None")
                   .replace("__RECURSIVE__", "False").replace("__MANUAL_CONSIGNEE__", "None")
                   .replace("__MANUAL_NOTIFY_PARTY__", "None").replace("__GENERATE_SUBLIST__", "False")
+                  .replace("__OR_LIST_FILE__", "None")
                   .replace("__GIT_COMMIT__", repr("test-suite")))
         src = src.replace('PL_FOLDER = Path("/work/pdfs")', f'PL_FOLDER = Path({str(pdf_dir)!r})')
         src = src.replace('OUTPUT_XLSX = Path("/work/PL_Total.xlsx")', f'OUTPUT_XLSX = Path({str(td / "PL_Total.xlsx")!r})')

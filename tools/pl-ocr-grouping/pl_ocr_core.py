@@ -64,6 +64,11 @@ DIM_WEIGHT_SHEET = __DIM_WEIGHT_SHEET__
 MASTER_DATA_FILE = Path("/work/master.xlsx")
 MASTER_DATA_SHEET = __MASTER_DATA_SHEET__
 RECURSIVE = __RECURSIVE__
+# v12: OR List (optional, spec section 4/9) -- None means "no file", and the
+# whole pipeline must run fully in that case (never a fatal error, Run/
+# Export never disabled). Wired from app.html's OR List upload input in a
+# later step (Task 20); defaults to None until then.
+OR_LIST_FILE = __OR_LIST_FILE__
 # v9: optional manual CNEE / Notify Party, typed in on the app.html page —
 # only used for non-CN factories (CN always auto-fills from STORE_MASTER).
 # None / "" when the user left the field blank.
@@ -374,6 +379,14 @@ class Package:
     so_source: str = ""             # PL_STRUCTURED_FIELD | PL_TEXT | ""
     shipping_mark: str = ""
     shipping_mark_source: str = ""  # PL_STRUCTURED_FIELD | PL_TEXT | FILENAME_REFERENCE_CODE | ""
+    # v12: GW parsed directly from a "GW:" label line in the PL text. Kept
+    # SEPARATE from `weight` (exclusively DIM/Weight-file-sourced, existing
+    # field, unchanged behavior) -- this is only a fallback used by the
+    # Sublist when no DIM match exists. Stored as the raw string (e.g.
+    # "35.68 KG" or "35.68") since the label's own unit formatting should
+    # not be guessed/reformatted here.
+    pl_gross_weight: str = ""
+    pl_gross_weight_source: str = ""
     # v11: structured carton-numbering fields backing the existing
     # global_carton_num string (kept as-is, unchanged shape, for 100% backward
     # compatibility with every current reader of that field) so callers never
@@ -381,6 +394,27 @@ class Package:
     carton_sequence: int = 0
     carton_total: int = 0
     carton_display: str = ""
+    # v12: counting SCOPE this package's carton number is relative to (spec
+    # section 9) -- "" (the default/unset value) means "one implicit scope
+    # containing every package", which is exactly today's flat global
+    # numbering, so every existing caller/test that never sets this field
+    # keeps behaving identically. Format when set: "<shipment_key>|
+    # <normalized_store>", e.g. "OR:OR1016|KERRY" or "UPLOAD_BATCH|KERRY".
+    counting_scope_key: str = ""
+    counting_scope_source: str = ""  # OR_LIST_GROUPING | UPLOAD_BATCH_DEFAULT | ""
+    # v12: Store/OR/SO resolved against an (optional) OR List -- kept
+    # separate from `store` (existing field, CN-only, filled by
+    # classify_packages_for_port/match_store) and from or_number/so_number
+    # (PL-text-parsed, v11) so every source stays independently traceable.
+    # or_number/so_number are ENRICHED from these (fills in only when still
+    # blank -- PL-text-parsed value always wins, spec section 4.2/4.3 +
+    # the original priority list: structured PL field > OCR text > OR List).
+    or_list_store: str = ""
+    or_list_match_source: str = ""   # SHIPMARK_TOKEN_EXACT | FILENAME_TOKEN_EXACT | RECEIVER_TEXT_EXACT | FUZZY | ""
+    or_list_match_status: str = ""   # OK | REVIEW | NO_OR_LIST | ""
+    or_list_review_reason: str = ""
+    or_list_candidate_store: str = ""
+    or_list_candidate_score: float = 0.0
     _seen_item_keys: set = field(default_factory=set, repr=False, compare=False)
 
     @property
@@ -407,11 +441,22 @@ class Package:
 # unambiguous enough to also accept a plain space separator. Never widened
 # beyond the alias lists below without a real-file confirmation (spec:
 # "khong match qua rong dan den nhan nham field").
-OR_ALIASES_RAW = ["OR #", "OR NO.", "OR NO", "OR NUMBER", "OUTBOUND REQUEST", "OR"]
-SO_ALIASES_RAW = ["SO ORDER #", "SO ORDER", "SO #", "SO NO.", "SO NO",
+OR_ALIASES_RAW = ["OR #", "OR NO.", "OR NO", "OR NUMBER", "OR CODE", "OUTBOUND REQUEST", "OR"]
+SO_ALIASES_RAW = ["SO ORDER #", "SO ORDER", "SO #", "SO NO.", "SO NO", "SO NUMBER",
                    "SALES ORDER #", "SALES ORDER", "SO"]
-SHIPPING_MARK_ALIASES_RAW = ["SHIPPING MARKS", "SHIPPING MARK", "MARKS & NOS",
-                              "MARKS AND NUMBERS", "WAREHOUSE OR"]
+SHIPPING_MARK_ALIASES_RAW = ["SHIPPING MARKS", "SHIPPING MARK", "SHIPMARK #", "SHIPMARK",
+                              "SHIP MARK", "MARKS & NOS", "MARKS AND NUMBERS", "WAREHOUSE OR"]
+# v12: GW (gross weight) as a package-level label line, same convention as
+# OR#/SO#/Shipping Mark. NOTE this is intentionally kept SEPARATE from
+# Package.weight (which is exclusively DIM/Weight-file-sourced, unchanged
+# existing behavior) -- see pl_weight_from_label / _METADATA_SOURCE_FIELD
+# and resolve_sublist_metadata() in pl_sublist_pdf_export.py for the
+# resolution order (DIM file wins when present; this is a fallback only).
+GW_ALIASES_RAW = ["GROSS WEIGHT", "G.W.", "G.W", "GW"]
+# "GW" is NOT in the strict-separator set below -- unlike bare "OR"/"SO",
+# which collide with common English sentence-starter words, "GW" has no
+# such natural-language collision risk, so a plain space separator (the
+# real spec example: "GW  35.68 KG", no punctuation) is accepted.
 _BARE_2LETTER_ALIASES = {"OR", "SO"}
 
 
@@ -435,10 +480,11 @@ def _build_label_matcher(aliases_raw):
 RE_OR_LABEL_LINE = _build_label_matcher(OR_ALIASES_RAW)
 RE_SO_LABEL_LINE = _build_label_matcher(SO_ALIASES_RAW)
 RE_SHIPPING_MARK_LABEL_LINE = _build_label_matcher(SHIPPING_MARK_ALIASES_RAW)
+RE_GW_LABEL_LINE = _build_label_matcher(GW_ALIASES_RAW)
 
 _ALL_LABEL_ALIASES_NORM = {
     re.sub(r'[^A-Z0-9]', '', a.upper())
-    for group in (OR_ALIASES_RAW, SO_ALIASES_RAW, SHIPPING_MARK_ALIASES_RAW)
+    for group in (OR_ALIASES_RAW, SO_ALIASES_RAW, SHIPPING_MARK_ALIASES_RAW, GW_ALIASES_RAW)
     for a in group
 }
 
@@ -446,6 +492,7 @@ _METADATA_SOURCE_FIELD = {
     "or_number": "or_source",
     "so_number": "so_source",
     "shipping_mark": "shipping_mark_source",
+    "pl_gross_weight": "pl_gross_weight_source",
 }
 
 
@@ -454,9 +501,9 @@ def _norm_label_cell(s: str) -> str:
 
 
 def match_metadata_label_line(line: str):
-    """Try OR -> SO -> Shipping Mark (in that priority order) against one
-    flattened text line. Returns (field, value) or (None, None). Used for the
-    text-fallback parsing path (source=PL_TEXT)."""
+    """Try OR -> SO -> Shipping Mark -> GW (in that priority order) against
+    one flattened text line. Returns (field, value) or (None, None). Used
+    for the text-fallback parsing path (source=PL_TEXT)."""
     line = (line or "").strip()
     if not line:
         return None, None
@@ -469,6 +516,9 @@ def match_metadata_label_line(line: str):
     m = RE_SHIPPING_MARK_LABEL_LINE.match(line)
     if m:
         return "shipping_mark", m.group(1).strip()
+    m = RE_GW_LABEL_LINE.match(line)
+    if m:
+        return "pl_gross_weight", m.group(1).strip()
     return None, None
 
 
@@ -484,7 +534,7 @@ def match_metadata_label_cells(cells):
     norm = _norm_label_cell(label)
     if norm not in _ALL_LABEL_ALIASES_NORM:
         return None, None
-    if norm in {"OR", "SO"} and len(value) < 1:
+    if norm in {"OR", "SO", "GW"} and len(value) < 1:
         return None, None
     if any(_norm_label_cell(a) == norm for a in OR_ALIASES_RAW):
         return "or_number", value.strip()
@@ -492,6 +542,8 @@ def match_metadata_label_cells(cells):
         return "so_number", value.strip()
     if any(_norm_label_cell(a) == norm for a in SHIPPING_MARK_ALIASES_RAW):
         return "shipping_mark", value.strip()
+    if any(_norm_label_cell(a) == norm for a in GW_ALIASES_RAW):
+        return "pl_gross_weight", value.strip()
     return None, None
 
 
@@ -758,6 +810,12 @@ class Parser:
         # per-page "table produced nothing new -> fall back to text" rule
         # (spec section 5) without depending on internal state layout.
         self.duplicate_items_skipped = 0
+        # v12: OR#/SO#/Shipping Mark/GW label lines that appear BEFORE the
+        # package that owns them opens (real PL layout: metadata block
+        # printed above "Ma kien hang"/Packing Code) -- held here until the
+        # next _on_pkg_header() call, then applied and immediately cleared.
+        # Never forward-filled past that one package (spec section 6).
+        self._pending_package_metadata: Dict[str, Tuple[str, str]] = {}
 
     def set_file(self, pdf_path: Path):
         self._source_file    = pdf_path.name
@@ -792,14 +850,17 @@ class Parser:
         if m:
             self._on_total(parse_qty(m.group(1)))
             return
-        if self._cur is None:
-            return
-        # v11: package-level OR#/SO#/Shipping Mark as a 2-cell [label,value]
-        # table row -- checked before item parsing so a metadata row is
-        # never mistaken for a (necessarily malformed) item row.
+        # v12: package-level OR#/SO#/Shipping Mark/GW as a 2-cell
+        # [label,value] table row -- checked BEFORE the "no open package"
+        # guard below, because this metadata commonly appears ABOVE the
+        # package's own header line in the real PL layout (spec section 6);
+        # _capture_metadata() itself queues it as pending when no package is
+        # open yet, and _on_pkg_header() applies it to the next package.
         field, value = match_metadata_label_cells(cells)
         if field:
             self._capture_metadata(field, value, "PL_STRUCTURED_FIELD")
+            return
+        if self._cur is None:
             return
         # Bug #6: a lone "-BOX"/"BOX" row is the continuation of the
         # PREVIOUS row's SKU suffix, split onto its own line by the PDF
@@ -826,13 +887,14 @@ class Parser:
             self._flush_buf()
             self._on_total(parse_qty(m.group(1)))
             return
-        if self._cur is None:
-            return
-        # v11: package-level OR#/SO#/Shipping Mark as a "LABEL: value" text
-        # line -- checked before item parsing for the same reason as above.
+        # v12: same reasoning as the table-row case above -- checked BEFORE
+        # the "no open package" guard so metadata printed above the package
+        # header is queued as pending instead of silently dropped.
         field, value = match_metadata_label_line(line)
         if field:
             self._capture_metadata(field, value, "PL_TEXT")
+            return
+        if self._cur is None:
             return
         if RE_SKU_SUFFIX_ROW.match(line) and self._cur.items and not self._buf:
             self._append_sku_suffix(line)
@@ -866,21 +928,46 @@ class Parser:
             self._force_close()
 
     def _capture_metadata(self, field: str, value: str, source: str):
-        """First match wins per package -- never overwrite an already-
-        captured OR#/SO#/Shipping Mark with a later, possibly-spurious
-        match (same 'never silently overwrite' philosophy as
-        declared_total_qty / DIM duplicate-key handling elsewhere in this
-        file). Scoped to the CURRENTLY OPEN package only -- never
-        forward-filled into a later/different package (spec: "khong duoc tu
-        forward-fill qua package khac tru khi parser state chung minh chung
-        thuoc cung package")."""
+        """First match wins -- never overwrite an already-captured
+        OR#/SO#/Shipping Mark/GW with a later, possibly-spurious match (same
+        'never silently overwrite' philosophy as declared_total_qty / DIM
+        duplicate-key handling elsewhere in this file).
+
+        v12: when NO package is currently open (metadata block printed
+        above "Ma kien hang"/Packing Code -- the common real layout), the
+        value is held in _pending_package_metadata instead of being
+        dropped, and gets applied to the NEXT package opened by
+        _on_pkg_header() (then immediately cleared -- spec section 6:
+        "khong duoc forward-fill vao mot package khong lien quan sau do").
+        If a package IS already open, capture goes straight onto it, scoped
+        to that package only, exactly as before."""
         value = (value or "").strip()
-        if not value or self._cur is None:
+        if not value:
+            return
+        if self._cur is None:
+            if field not in self._pending_package_metadata:
+                self._pending_package_metadata[field] = (value, source)
             return
         if getattr(self._cur, field):
             return
         setattr(self._cur, field, value)
         setattr(self._cur, _METADATA_SOURCE_FIELD[field], source)
+
+    def _apply_pending_metadata(self, pkg: "Package"):
+        """Apply whatever metadata was captured before `pkg` opened, then
+        clear it unconditionally so it can never leak into a LATER package
+        (spec section 6, item 3-4). First-match-wins is preserved: if `pkg`
+        already has a value for a field (e.g. a re-opened package that had
+        already captured it directly), the pending value is discarded for
+        that field rather than overwriting it."""
+        if pkg is None:
+            self._pending_package_metadata = {}
+            return
+        for field, (value, source) in self._pending_package_metadata.items():
+            if not getattr(pkg, field):
+                setattr(pkg, field, value)
+                setattr(pkg, _METADATA_SOURCE_FIELD[field], source)
+        self._pending_package_metadata = {}
 
     def _append_sku_suffix(self, suffix_cell: str):
         """Bug #6 fix: join a stray '-BOX' style continuation row onto the
@@ -896,6 +983,11 @@ class Parser:
     def _on_pkg_header(self, pkg_code: str, seq: str):
         if self._cur is not None and self._cur.package_code == pkg_code:
             self._cur.header_count += 1
+            # v12: a continuation-page repeat of the SAME package's header
+            # can still be preceded by its own stray metadata line (e.g. a
+            # re-printed "GW:" on the continuation page) -- apply/clear any
+            # pending metadata onto the (unchanged) current package too.
+            self._apply_pending_metadata(self._cur)
             return
         if self._cur is not None:
             log.warning(f"INTERRUPTED: {self._cur.package_code} -> {pkg_code}")
@@ -913,12 +1005,18 @@ class Parser:
             self._cur = self.packages.pop()
             self._cur.declared_total_qty = None
             self._cur.header_count += 1
+            self._apply_pending_metadata(self._cur)
             return
         self._cur = Package(package_code=pkg_code,
                             source_file=self._source_file,
                             reference_code=self._reference_code,
                             pdf_package_seq=seq,
                             first_page=self._page)
+        # v12: apply whatever OR#/SO#/Shipping Mark/GW label lines were seen
+        # BEFORE this package's own header (the common real layout: metadata
+        # block printed above "Ma kien hang"/Packing Code) -- then clear
+        # them so they can never leak into a later, unrelated package.
+        self._apply_pending_metadata(self._cur)
 
     def _on_total(self, declared: int):
         if self._cur is None:
@@ -1491,8 +1589,7 @@ class HsCodeMapper:
 def business_sort_packages(packages: List[Package]) -> List[Package]:
     try:
         import pl_group_export as pge
-        factory_order = list(getattr(pge, "CARTON_FACTORY_ORDER_WITH_CO",
-                                      ["POP", "SBGEAR", "QIFENG", "JION", "CN"]))
+        factory_order = list(pge.carton_factory_rank_table())
         detect_factory = pge.detect_factory
     except ImportError:
         log.warning("pl_group_export not importable -- carton business sort "
@@ -1505,35 +1602,93 @@ def business_sort_packages(packages: List[Package]) -> List[Package]:
              f"(factory {factory_order} -> document -> sequence)...")
 
     def key(pkg: Package):
+        # detect_factory() now strips a trailing copy-suffix (_1/_2/...)
+        # internally (v12 fix, single source of truth in pl_group_export.py)
+        # so this can call it directly on the raw reference_code/source_file
+        # exactly like every other caller does -- no local workaround needed
+        # here any more.
+        factory = detect_factory(pkg.reference_code, pkg.source_file)
         seq = parse_document_sequence(pkg.reference_code, pkg.source_file)
-        # IMPORTANT: detect factory from the BASE document key (copy-suffix
-        # already stripped), not the raw reference_code/filename. Found
-        # while writing this function's tests: pl_group_export.detect_factory
-        # is suffix-based and its last "token" for e.g. "Kerry_POP_1" is the
-        # literal "1", not "POP" -- called on the raw string it misreads
-        # every _1/_2/... copy as an unclassifiable factory (REVIEW), which
-        # would sort a copy PDF to the very end of the whole shipment
-        # instead of right next to its original. Not a bug introduced here;
-        # it's a pre-existing gap in detect_factory's suffix matching that
-        # this sort function works around locally by re-using the same
-        # base_document_key computed above (detect_factory() itself and the
-        # 02_BY_FACTORY export grouping in pl_group_export.py are
-        # deliberately left untouched -- out of scope for this change).
-        factory = detect_factory(seq.base_document_key, seq.base_document_key)
         return (rank.get(factory, review_rank), seq.base_document_key, seq.document_sequence)
 
     return sorted(packages, key=key)  # sorted() is stable -> ties keep parse order
 
 
-# ── Global carton numbers ──────────────────────────────────────────────────
+# ── v12: per-Store counting scope (spec section 9) ──────────────────────────
+def compute_counting_scope_key(pkg: Package) -> Tuple[str, str]:
+    """(counting_scope_key, scope_source). Store comes from an OK OR List
+    match first, else the existing CN-only `pkg.store` (classify_packages_
+    for_port), else "UNRESOLVED" (never crashes/blocks on an unknown store).
+
+    shipment_key: the OR List's own OR value is the strongest available
+    signal ("OR List grouping" per spec's list of possible signals) --
+    packages sharing the same Store AND the same OR are almost certainly the
+    same customer order/shipment. Absent that, this tool's own existing
+    workflow is already scoped to "1 upload = 1 lo hang / 1 shipment" (see
+    app.html's own long-standing instructions: "Chon thu muc chua toan bo
+    PDF Packing List cua 1 lo hang") -- so "the whole upload is one
+    shipment" is not an arbitrary guess, it's the tool's existing, already-
+    documented assumption, used here as the fallback shipment_key when no
+    OR List disambiguates further. KNOWN LIMITATION: two independent
+    shipments for the SAME Store combined into one upload, with no OR List
+    to tell them apart, will still share one counting scope -- there is no
+    other reliable shipment-boundary signal available in the PL PDFs' own
+    structured data today. Flagged explicitly rather than guessed at
+    silently (spec: "neu khong the xac dinh tin cay, danh dau REVIEW" --
+    the ambiguity itself is documented here rather than resolved by
+    invention)."""
+    try:
+        import pl_group_export as pge
+        store_identity_fn = pge.store_identity
+    except ImportError:
+        store_identity_fn = lambda s: str(s or "").strip().upper()
+
+    if pkg.or_list_match_status == "OK" and pkg.or_list_store:
+        store = pkg.or_list_store
+    elif pkg.store and pkg.store != "REVIEW":
+        store = pkg.store
+    else:
+        store = "UNRESOLVED"
+
+    if pkg.or_list_match_status == "OK" and pkg.or_number:
+        shipment_key = f"OR:{store_identity_fn(pkg.or_number)}"
+        source = "OR_LIST_GROUPING"
+    else:
+        shipment_key = "UPLOAD_BATCH"
+        source = "UPLOAD_BATCH_DEFAULT"
+
+    return f"{shipment_key}|{store_identity_fn(store)}", source
+
+
+def assign_counting_scope_keys(packages: List[Package]):
+    for pkg in packages:
+        pkg.counting_scope_key, pkg.counting_scope_source = compute_counting_scope_key(pkg)
+
+
+# ── Carton numbers (per counting scope) ─────────────────────────────────────
 def assign_global_numbers(packages: List[Package]):
-    total = len(packages)
-    for i, pkg in enumerate(packages, start=1):
-        pkg.carton_sequence = i
-        pkg.carton_total = total
-        pkg.carton_display = f"{i}/{total}"
-        pkg.global_carton_num = pkg.carton_display  # unchanged shape/field, kept in sync
-    log.info(f"Carton numbers: 1/{total} ... {total}/{total}")
+    """Numbers each counting_scope_key group independently as 1/N .. N/N
+    (spec section 9) -- NOT one denominator across the whole `packages`
+    list. `counting_scope_key` defaults to "" on every Package (v12), so
+    any caller that never touches counting_scope_key (every pre-v12 test,
+    and the whole pipeline when no OR List is uploaded and no package
+    resolves a Store at all) puts every package into that one shared ""
+    scope -- i.e. exactly today's flat global "1/total ... total/total"
+    numbering, byte-for-byte. The name `assign_global_numbers` and the
+    `global_carton_num` field it sets are both kept unchanged so every
+    existing caller keeps working without modification."""
+    scopes: Dict[str, List[Package]] = {}
+    for pkg in packages:
+        scopes.setdefault(pkg.counting_scope_key, []).append(pkg)
+    for scope_key, scoped_pkgs in scopes.items():
+        total = len(scoped_pkgs)
+        for i, pkg in enumerate(scoped_pkgs, start=1):
+            pkg.carton_sequence = i
+            pkg.carton_total = total
+            pkg.carton_display = f"{i}/{total}"
+            pkg.global_carton_num = pkg.carton_display  # unchanged shape/field, kept in sync
+        label = scope_key if scope_key else "(single implicit scope)"
+        log.info(f"Carton numbers for scope {label!r}: 1/{total} ... {total}/{total}")
 
 # ── v8: CN store/port classification (same rule as pl_group_export.py) ─────
 def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recursive: bool):
@@ -2120,7 +2275,8 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
                  dim_sheet: Optional[str] = None,
                  master_data_file: Optional[Path] = None,
                  master_data_sheet: Optional[str] = None,
-                 recursive: bool = False):
+                 recursive: bool = False,
+                 or_list_file: Optional[Path] = None):
     run_started_at = datetime.now(timezone.utc)
     if output_path is None:
         output_path = pl_folder / "PL_Output_v6_HS_DIM.xlsx"
@@ -2227,6 +2383,72 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     packages = business_sort_packages(packages)
     parser.packages = packages
 
+    # v8: CN store/port classification — fills pkg.port/pkg.store for the
+    # Packing List sheet's PORT column, using the exact same rule as the CN
+    # split step. v12: moved up from below DIM/HS matching -- it now must
+    # run BEFORE OR List matching and carton numbering, since both need
+    # pkg.store resolved for CN packages that have no OR List coverage.
+    classify_packages_for_port(packages, pl_folder, recursive)
+
+    # v12: OR List (optional) — Store/OR/SO matching hierarchy (spec section
+    # 5). Never a fatal error, never disables Run/Export: an unusable/absent
+    # OR List just leaves every package at or_list_match_status="NO_OR_LIST"
+    # and the pipeline continues exactly as it did before this feature.
+    log.info("Matching packages against OR List (optional)...")
+    or_index: Dict[str, list] = {}
+    pge_mod = None
+    try:
+        import pl_or_list_import as oli
+        import pl_group_export as pge_mod
+        or_list_result = oli.load_or_list(or_list_file)
+        if or_list_result.ok:
+            or_index = oli.build_or_index(or_list_result)
+            log.info(f"OR List loaded: {len(or_list_result.rows)} row(s) from "
+                     f"sheet {or_list_result.sheet_used!r}.")
+        elif or_list_result.status != "NO_FILE":
+            log.warning(f"OR List not usable (status={or_list_result.status}): "
+                        f"{'; '.join(or_list_result.errors) or '(no details)'} "
+                        f"-- continuing without it, Run/Export not affected.")
+    except ImportError:
+        log.warning("pl_or_list_import/pl_group_export not importable — "
+                    "OR List matching skipped, pipeline continues unaffected.")
+
+    if or_index and pge_mod is not None:
+        receiver_cache: Dict[str, str] = {}
+        for pkg in packages:
+            receiver_text = pge_mod._collect_cn_signal(pkg, pl_folder, recursive, receiver_cache)
+            m = pge_mod.match_store_and_or(pkg, or_index, receiver_text=receiver_text)
+            pkg.or_list_store = m.matched_store
+            pkg.or_list_match_source = m.match_source
+            pkg.or_list_match_status = m.status
+            pkg.or_list_review_reason = m.review_reason
+            pkg.or_list_candidate_store = m.candidate_store
+            pkg.or_list_candidate_score = m.candidate_score
+            if m.status == "OK":
+                # PL-text-parsed OR/SO (captured earlier by the Parser)
+                # always takes priority when present -- OR List only fills
+                # in what the PL text itself didn't already give us.
+                if not pkg.or_number:
+                    pkg.or_number = m.matched_or
+                    pkg.or_source = "OR_LIST"
+                if not pkg.so_number:
+                    pkg.so_number = m.matched_so
+                    pkg.so_source = "OR_LIST"
+        n_ok = sum(1 for p in packages if p.or_list_match_status == "OK")
+        n_review = sum(1 for p in packages if p.or_list_match_status == "REVIEW")
+        n_other = len(packages) - n_ok - n_review
+        log.info(f"OR List match: {n_ok} OK, {n_review} REVIEW, {n_other} other, "
+                 f"out of {len(packages)}")
+    else:
+        for pkg in packages:
+            pkg.or_list_match_status = "NO_OR_LIST"
+        log.info("No usable OR List -- every package left at "
+                 "or_list_match_status='NO_OR_LIST' (tool still runs fully; "
+                 "Run/Export never disabled).")
+
+    # v12: carton numbers are now computed per counting_scope_key (spec
+    # section 9), not as one flat sequence across the whole upload.
+    assign_counting_scope_keys(packages)
     assign_global_numbers(packages)
 
     matched = 0
@@ -2256,10 +2478,6 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
         # For zero-item packages only, keep a carton-level fallback blank.
         pkg.hs_code = ", ".join(sorted(set(pkg_hs_codes))) if pkg_hs_codes else ""
     log.info(f"HS Code matched: {hs_matched}/{hs_total}")
-
-    # v8: CN store/port classification — fills pkg.port for the Packing List
-    # sheet's PORT column, using the exact same rule as the CN split step.
-    classify_packages_for_port(packages, pl_folder, recursive)
 
     counts: Dict[str, int] = defaultdict(int)
     audit_counts: Dict[str, int] = defaultdict(int)
@@ -2296,6 +2514,7 @@ packages = run_pipeline(
     master_data_file=MASTER_DATA_FILE,
     master_data_sheet=MASTER_DATA_SHEET,
     recursive=RECURSIVE,
+    or_list_file=OR_LIST_FILE,
 )
 
 # ── UI summary (spec section 13) ─────────────────────────────────────────
