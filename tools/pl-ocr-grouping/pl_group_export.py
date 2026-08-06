@@ -47,7 +47,7 @@ import logging
 import re
 import shutil
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -81,8 +81,28 @@ def _norm_text(s: str) -> str:
     return s
 
 
+_RE_SPACED_SINGLE_LETTERS = re.compile(
+    r'(?<![A-Z0-9])(?:[A-Z0-9][\s\-_]+){1,}[A-Z0-9](?![A-Z0-9])'
+)
+# NOTE: custom lookaround boundaries instead of \b -- \b treats underscore as a
+# "word" character, which would block matching across the underscore-delimited
+# segments real Shipmark codes actually use (e.g. "..._I A P M_..."). The boundary
+# used here matches _tokens()'s own final split class ([^A-Z0-9], which DOES
+# treat underscore as a separator).
+
+
 def _tokens(code: str) -> List[str]:
-    return [t for t in re.split(r"[^A-Z0-9]+", _strip_accents(code)) if t]
+    text = _strip_accents(code)
+    # v14 (spec section 4): collapse a run of >=2 space/hyphen/underscore-
+    # separated SINGLE characters into one glued token first -- e.g.
+    # "I A P M" -> "IAPM" -- so a spelled-out Store code tokenizes and
+    # matches identically on both the alias side (STORE_MASTER aliases) and
+    # the live signal side (Shipmark/filename/receiver text), since both
+    # go through this same function. Deliberately narrow (only fires on
+    # RUNS of lone single characters, never on ordinary multi-letter
+    # words) to avoid gluing unrelated short words together.
+    text = _RE_SPACED_SINGLE_LETTERS.sub(lambda m: re.sub(r"[\s\-_]+", "", m.group(0)), text)
+    return [t for t in re.split(r"[^A-Z0-9]+", text) if t]
 
 
 # =========================================================================
@@ -252,7 +272,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "shipping_mark_tokens": ["SZ"],
         "port": "SZX",
         "receiver": "CN - Shenzhen Mixc City (Shop T228)",
-        "aliases": ["Shenzhen", "Shenzhen MixC", "Mixc City", "T228"],
+        "aliases": ["Shenzhen", "Shenzen", "Shenzhen MixC", "Mixc City", "T228"],
         "address": "Shop T228, Tower 3, Vientiane City (MixC), No. 1881 Baoan South Road, Luohu District, Shenzhen, Guangdong, CN 518000",
         "contact_name": "Ben",
         "contact_phone": "18565775002",
@@ -261,7 +281,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "shipping_mark_tokens": ["GZ"],
         "port": "SZX",
         "receiver": "Topologie CN - Guangzhou Central Parc",
-        "aliases": ["Guangzhou", "Guangzhou Central Parc", "Guangzhou Parc Central", "B262-1"],
+        "aliases": ["Guangzhou", "Guangzou", "Guangzhou Central Parc", "Guangzhou Parc Central", "B262-1"],
         "address": "Shop B262-1, B2/F, Parc Central, No.218 Tianhe Road, Tianhe District, Guangzhou City, Guangdong, CN 510620",
         "contact_name": "Zhang Xiaojie",
         "contact_phone": "13662343374",
@@ -270,7 +290,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "shipping_mark_tokens": ["HZ"],
         "port": "PVG",
         "receiver": "Topologie CN - Hangzhou Mixc",
-        "aliases": ["Hangzhou", "Hangzhou MixC", "B1C03"],
+        "aliases": ["Hangzhou", "Hang Zhou", "Hangzhou MixC", "B1C03"],
         "address": "B1C03, Hangzhou MixC Mall, 701 Fuchun Rd, Jianggan District, Hangzhou, Zhejiang, CN 310008",
         "contact_name": "Su Su",
         "contact_phone": "15606539115",
@@ -279,13 +299,16 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "shipping_mark_tokens": ["IAPM"],
         "port": "PVG",
         "receiver": "Topologie CN - Iapm",
-        "aliases": ["IAPM", "IAPM Mall", "L4-426"],
+        "aliases": ["IAPM", "I A P M", "IAPM Mall", "L4-426"],
         "address": "L4-426, IAPM Mall, 999 Huaihai Rd (M), Xuhui District, Shanghai, Shanghai, CN 200020",
         "contact_name": "Shi Wei Yi",
         "contact_phone": "13621647004",
     },
     "KERRY": {
-        "shipping_mark_tokens": ["KR"],
+        # v14 (spec section 4): KR/KRY/KRYY/KER -- explicit short codes only
+        # (never fuzzy, per the "short aliases <=3 chars -> exact token
+        # only" rule), all resolve unambiguously to KERRY.
+        "shipping_mark_tokens": ["KR", "KRY", "KRYY", "KER"],
         "port": "PVG",
         "receiver": "Topologie CN - Kerry Center flagship",
         "aliases": ["Kerry", "Kerry Center", "Kerry Centre", "NB1-23B"],
@@ -297,6 +320,16 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "shipping_mark_tokens": ["SHTAIKOOLI"],
         "port": "PVG",
         "receiver": "CN - Shanghai Taikooli (Shop B1-07b)",
+        # NOTE (spec section 4): "SH-Taikooli"/"SHai Taikooli" spelling
+        # variants are intentionally NOT added as free-text aliases here --
+        # both would tokenize down to a bare "SH" unigram shared with
+        # SHANGHAI_HONGQIAO's own "SH-Airport" alias, creating exactly the
+        # kind of cross-store ambiguity _GENERIC_ALIAS_STOPWORDS exists to
+        # prevent. The compound form is already resolved unambiguously via
+        # shipping_mark_tokens=["SHTAIKOOLI"] + the bigram-joining exact
+        # matcher (see _tokens_with_bigrams) -- "SH"+"Taikooli" in a real
+        # Shipmark joins to "SHTAIKOOLI" and matches that token directly,
+        # no separate alias needed.
         "aliases": ["Shanghai Taikooli", "Shanghai Taikoo Li", "B1-07b", "S-B1-07b"],
         "address": "Shop S-B1-07b, B/F, No.1-9, 500 Dongyu Road, Pudong, Shanghai, Shanghai, CN 200127",
         "contact_name": "Bobo Shi",
@@ -306,6 +339,10 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
         "shipping_mark_tokens": ["SHAIRPORT"],
         "port": "PVG",
         "receiver": "CN - Shanghai Hongqiao Airport",
+        # NOTE (spec section 4): see the matching NOTE on SHANGHAI_TAIKOOLI
+        # above -- "SH Airport"/"SH-Airport" deliberately NOT added as a
+        # free-text alias (bare "SH" collision); already resolved via
+        # shipping_mark_tokens=["SHAIRPORT"] + bigram-joining.
         "aliases": ["Shanghai Hongqiao", "Hongqiao Airport", "D60-6"],
         "address": "Shop D60-6, Shanghai Hongqiao International Airport Terminal 2 (Departure Restricted Area), Changning District, Shanghai, Shanghai, China 200335",
         "contact_name": "Bobo Shi",
@@ -335,6 +372,68 @@ PORT_FILE_MAP = {
     "PEK": "PL_CN_PORT_PEK.xlsx",
 }
 STORE_FILE_MAP = {k: f"PL_CN_STORE_{k}.xlsx" for k in STORE_MASTER}
+
+
+def _dynamic_store_filename(label: str) -> str:
+    """Filename for a Store that resolved via the OR List but isn't one of
+    the 9 named STORE_MASTER keys (spec: OR List Store column is dynamic,
+    not limited to a fixed enum) -- sanitize into a safe filename instead of
+    silently dropping the group."""
+    safe = _strip_accents(str(label or "STORE")).upper()
+    safe = re.sub(r"[^A-Z0-9]+", "_", safe).strip("_") or "STORE"
+    return f"PL_CN_STORE_{safe}.xlsx"
+
+
+_NON_CN_COUNTRIES = {"KR", "JP", "BE", "US", "TW"}
+
+
+def _resolved_store_for_split(pkg) -> str:
+    """Cross-factory Store identity key for the 04_CN_BY_STORE split (spec
+    sections 9-12: a Store's POP/SBGEAR/QIFENG/JION/CN cartons all belong in
+    ONE file, sharing the ONE denominator already computed by pl_ocr_core.py's
+    counting_scope_key/assign_global_numbers()). Priority mirrors
+    compute_counting_scope_key() exactly, INCLUDING its section 3/11 country
+    gate: non-China countries (KR/JP/BE/US/TW) are SINGLE_DESTINATION and
+    never get a China Store split, even if an OR List/CN classifier would
+    otherwise resolve one. Then: an OK OR List match first, else the
+    CN-only classify_packages_for_port() result, else "" (excluded on
+    purpose -- never silently guessed)."""
+    if getattr(pkg, "country", "") in _NON_CN_COUNTRIES:
+        return ""
+    if getattr(pkg, "or_list_match_status", "") == "OK" and getattr(pkg, "or_list_store", ""):
+        return store_identity(pkg.or_list_store)
+    if getattr(pkg, "store", "") and pkg.store != "REVIEW":
+        return store_identity(pkg.store)
+    return ""
+
+
+def _store_display_label(pkg, store_key: str) -> str:
+    """Human-readable label for a resolved store key, preferring the raw OR
+    List text (e.g. "Kerry") over the bare identity key, for filenames of
+    stores outside the 9 named STORE_MASTER keys."""
+    if getattr(pkg, "or_list_match_status", "") == "OK" and getattr(pkg, "or_list_store", ""):
+        return pkg.or_list_store
+    return getattr(pkg, "store", "") or store_key
+
+
+def _store_file_key(pkg, store_key: str) -> str:
+    """Best-effort CANONICAL STORE_MASTER key, for filename purposes only
+    (e.g. "KERRY" -> PL_CN_STORE_KERRY.xlsx instead of a sanitized dump of
+    the OR List's full free-text description). Grouping itself always uses
+    the raw `store_key` from _resolved_store_for_split() so file contents
+    never disagree with pl_ocr_core.compute_counting_scope_key()'s
+    numbering scope -- this only affects the filename that scope is
+    written under."""
+    if getattr(pkg, "or_list_match_status", "") == "OK" and getattr(pkg, "or_list_store", ""):
+        # _canonical_store_identity_for_or_row() returns space-separated
+        # identity form (e.g. "SHANGHAI HONGQIAO") for multi-word keys --
+        # STORE_MASTER itself is keyed with underscores ("SHANGHAI_HONGQIAO").
+        canon = _canonical_store_identity_for_or_row(pkg.or_list_store).replace(" ", "_")
+        if canon in STORE_MASTER:
+            return canon
+    if getattr(pkg, "store", "") in STORE_MASTER:
+        return pkg.store
+    return store_key
 
 
 def notify_party_block(store_key: str) -> str:
@@ -438,6 +537,13 @@ class StoreOrMatchResult:
     matched_store: str = ""
     matched_or: str = ""
     matched_so: str = ""
+    # v14: the full dynamic business_fields dict for the matched row
+    # (display_header -> value, in upload column order -- spec section 6).
+    # matched_or/matched_so above are kept as backward-compatible aliases
+    # for the 1st/2nd business field (many existing callers still read
+    # them generically that way) -- matched_business_fields is the
+    # complete, order-preserving source of truth for every field.
+    matched_business_fields: "OrderedDict" = _dc_field(default_factory=OrderedDict)
     match_source: str = ""   # SHIPMARK_TOKEN_EXACT | FILENAME_TOKEN_EXACT | RECEIVER_TEXT_EXACT | FUZZY | ""
     candidate_store: str = ""
     candidate_score: float = 0.0
@@ -709,15 +815,19 @@ def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") 
         result.candidate_store = store
         return result
 
-    distinct_or = {r.or_raw for r in store_rows}
-    if len(distinct_or) > 1:
+    # v14: compare the FULL business_fields tuple (not just the 1st field)
+    # -- two rows for the same store are only truly consistent if every
+    # dynamic field agrees, not just the field this code used to call "OR".
+    distinct_field_sets = {tuple(r.business_fields.items()) for r in store_rows}
+    if len(distinct_field_sets) > 1:
         result.status = "REVIEW"
-        result.review_reason = f"Store '{store}' has multiple OR values in the OR List: {sorted(distinct_or)}"
+        result.review_reason = f"Store '{store}' has multiple different business-field values in the OR List: "                                 f"{[dict(fs) for fs in sorted(distinct_field_sets, key=str)]}"
         result.candidate_store = store
         return result
 
     row = store_rows[0]
     result.matched_store = store
+    result.matched_business_fields = OrderedDict(row.business_fields)
     result.matched_or = row.or_raw
     result.matched_so = row.so_raw
     result.status = "OK"
@@ -873,6 +983,7 @@ def _write_total(dir_total: Path, packages: List, write_workbook: Callable, tota
 CONTROL_FIELDS = [
     "source_file", "reference_code", "package_code",
     "factory", "port", "store", "store_confidence", "suggested_store_if_review",
+    "resolved_store_split", "carton_display", "global_carton_display",
 ]
 
 
@@ -902,7 +1013,7 @@ def _read_match_status_rowcount(path: Path) -> Optional[int]:
         return None
 
 
-def _validate(packages, classified, factory_groups, cn_by_port, cn_by_store,
+def _validate(packages, classified, factory_groups, cn_by_port, by_store,
               written_paths: Dict[Path, int]) -> Tuple[bool, str]:
     lines: List[str] = []
     ok = True
@@ -939,26 +1050,30 @@ def _validate(packages, classified, factory_groups, cn_by_port, cn_by_store,
         for p in review_factory:
             lines.append(f"    REVIEW-FACTORY  source_file={p.source_file}  reference_code={p.reference_code}  package_code={p.package_code}")
 
-    # -- CN port / store totals --
+    # -- CN port totals (factory-leg-scoped, unchanged) --
     cn_pkgs = factory_groups.get("CN", [])
     cn_cartons = len(cn_pkgs)
     cn_review = [c for c in classified if c["factory"] == "CN" and (not c["store"] or c["store"] == "REVIEW")]
     expected_cn_classified = cn_cartons - len(cn_review)
 
     port_cartons = sum(len(v) for v in cn_by_port.values())
-    port_qty = sum(sum(p.calc_qty for p in v) for v in cn_by_port.values())
-    store_cartons = sum(len(v) for v in cn_by_store.values())
-    store_qty = sum(sum(p.calc_qty for p in v) for v in cn_by_store.values())
 
     if cn_pkgs:
         check("SUM(CN port groups) cartons == CN factory cartons minus REVIEW",
               port_cartons == expected_cn_classified,
               f"port_sum={port_cartons} expected={expected_cn_classified} (CN_total={cn_cartons}, review={len(cn_review)})")
-        check("SUM(CN store groups) cartons == CN factory cartons minus REVIEW",
-              store_cartons == expected_cn_classified,
-              f"store_sum={store_cartons} expected={expected_cn_classified}")
-        check("SUM(CN port groups) quantity == SUM(CN store groups) quantity",
-              port_qty == store_qty, f"port_qty={port_qty} store_qty={store_qty}")
+
+    # -- BY STORE totals (v14: cross-factory -- a store's POP/VN/CN cartons
+    # all count here, so this is NOT compared against the CN-only port sum
+    # any more; the only invariants that still hold are "no duplicates" and
+    # "never more than PL_TOTAL") --
+    store_cartons = sum(len(v) for v in by_store.values())
+    check("SUM(store groups) cartons <= PL_TOTAL cartons (unresolved-store packages excluded on purpose)",
+          store_cartons <= total_cartons, f"store_sum={store_cartons} total={total_cartons}")
+    unresolved_store = total_cartons - store_cartons
+    if unresolved_store:
+        lines.append(f"[INFO] {unresolved_store} package(s) excluded from 04_CN_BY_STORE "
+                      f"(no Store resolved -- OR List didn't match and/or not a CN-classified package).")
 
     if cn_review:
         lines.append(f"[WARN] {len(cn_review)} CN package(s) could not be confidently mapped to a store (REVIEW):")
@@ -977,7 +1092,7 @@ def _validate(packages, classified, factory_groups, cn_by_port, cn_by_store,
 
     _dup_within("factory", factory_groups)
     _dup_within("cn_port", cn_by_port)
-    _dup_within("cn_store", cn_by_store)
+    _dup_within("store", by_store)
 
     # -- no package lost: every package_code appears in exactly one factory bucket --
     all_grouped_codes = [p.package_code for v in factory_groups.values() for p in v]
@@ -1056,6 +1171,15 @@ def export_grouped_pl(
             "store": store,
             "store_confidence": confidence,
             "suggested_store_if_review": suggestion,
+            # v14 diagnostics (spec section 14): the ACTUAL cross-factory
+            # Store identity used for 04_CN_BY_STORE grouping (OR List
+            # match first, else this same CN-only `store` above) -- shown
+            # separately from `store` because the two can legitimately
+            # differ (e.g. a POP/VN package has no CN-only `store` at all,
+            # but resolves here via the OR List).
+            "resolved_store_split": _resolved_store_for_split(pkg),
+            "carton_display": getattr(pkg, "carton_display", "") or getattr(pkg, "global_carton_num", ""),
+            "global_carton_display": getattr(pkg, "global_carton_display", ""),
         })
 
     written_paths: Dict[Path, int] = {}
@@ -1081,17 +1205,17 @@ def export_grouped_pl(
         if p:
             written_paths[p] = len(pkgs)
 
-    # ---- 3 & 4) CN BY PORT / CN BY STORE ----
-    log.info("Writing 03_CN_BY_PORT / 04_CN_BY_STORE ...")
+    # ---- 3) CN BY PORT (unchanged: CN-factory-leg-only, physical departure
+    # port classification -- a different concern from Store, not touched by
+    # the v14 dual-numbering rework below) ----
+    log.info("Writing 03_CN_BY_PORT ...")
     cn_by_port: Dict[str, List] = defaultdict(list)
-    cn_by_store: Dict[str, List] = defaultdict(list)
     for c in classified:
         if c["factory"] != "CN":
             continue
         if not c["store"] or c["store"] == "REVIEW":
             continue  # excluded on purpose — never silently guess
         cn_by_port[c["port"]].append(c["pkg"])
-        cn_by_store[c["store"]].append(c["pkg"])
 
     for port, pkgs in cn_by_port.items():
         fname = PORT_FILE_MAP.get(port)
@@ -1100,10 +1224,33 @@ def export_grouped_pl(
             if p:
                 written_paths[p] = len(pkgs)
 
-    for store, pkgs in cn_by_store.items():
-        fname = STORE_FILE_MAP.get(store)
-        if fname and pkgs:
-            p = _write_group(dir_cn_store / fname, pkgs, write_workbook, renumber=True)
+    # ---- 4) BY STORE (v14 rework, spec sections 9-12) ----
+    # Cross-factory, NOT CN-factory-only any more: a Store's POP + SBGEAR/
+    # QIFENG/JION + CN cartons must all land in the SAME per-store file,
+    # sharing ONE denominator -- exactly what pl_ocr_core.py's v12/v13/v14
+    # counting_scope_key / assign_global_numbers() already computed for
+    # every package, BEFORE export_grouped_pl() was ever called (see
+    # run_pipeline()). So this step does NOT re-classify from scratch with
+    # the old CN-only match_store() and does NOT locally renumber -- it only
+    # GROUPS by the already-resolved Store identity and writes each group's
+    # packages with their EXISTING carton_display/global_carton_num (Store-
+    # scoped numbering) untouched (renumber=False). See
+    # _resolved_store_for_split() for the exact resolution priority.
+    log.info("Writing 04_CN_BY_STORE ...")
+    by_store: Dict[str, List] = defaultdict(list)
+    store_display_name: Dict[str, str] = {}
+    for pkg in packages:
+        store_key = _resolved_store_for_split(pkg)
+        if not store_key:
+            continue  # excluded on purpose — never silently guess
+        by_store[store_key].append(pkg)
+        store_display_name.setdefault(store_key, _store_display_label(pkg, store_key))
+
+    for store_key, pkgs in by_store.items():
+        file_key = _store_file_key(pkgs[0], store_key)
+        fname = STORE_FILE_MAP.get(file_key) or _dynamic_store_filename(store_display_name.get(store_key, store_key))
+        if pkgs:
+            p = _write_group(dir_cn_store / fname, pkgs, write_workbook, renumber=False)
             if p:
                 written_paths[p] = len(pkgs)
 
@@ -1117,7 +1264,7 @@ def export_grouped_pl(
     log.info(f"  wrote {control_path.name}  ({len(control_rows)} rows)")
 
     # ---- validation / reconciliation ----
-    ok, report_text = _validate(packages, classified, factory_groups, cn_by_port, cn_by_store, written_paths)
+    ok, report_text = _validate(packages, classified, factory_groups, cn_by_port, by_store, written_paths)
     report_path = output_dir / "PL_SPLIT_VALIDATION.txt"
     report_path.write_text(report_text, encoding="utf-8")
     print("\n" + "=" * 70)

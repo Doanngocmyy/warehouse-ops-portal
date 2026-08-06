@@ -115,11 +115,16 @@ print("\n== load_or_list: HEADER_NOT_FOUND diagnostics ==")
 
 
 def t_header_not_found_when_no_recognizable_aliases():
+    # v14: a positional fallback exists now (spec section 5: "Only
+    # assumption: First column = Store"), so a bare 2-column shape with a
+    # blank Store cell on the data row is what genuinely still fails every
+    # tier -- no alias anywhere AND no "data continues under column A"
+    # structural signal either.
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "or_list.xlsx"
         _write_xlsx(p, {"Sheet1": [
-            ["Warehouse", "Reference", "Notes"],
-            ["A", "B", "C"],
+            ["Warehouse", "Reference"],
+            ["", "B"],
         ]})
         result = oli.load_or_list(p)
         assert result.status == "HEADER_NOT_FOUND"
@@ -130,8 +135,8 @@ def t_header_not_found_populates_diagnostics_with_sheet_and_row_detail():
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "or_list.xlsx"
         _write_xlsx(p, {"Sheet1": [
-            ["Warehouse", "Reference", "Notes"],
-            ["A", "B", "C"],
+            ["Warehouse", "Reference"],
+            ["", "B"],
         ]})
         result = oli.load_or_list(p)
         assert result.status == "HEADER_NOT_FOUND"
@@ -145,17 +150,22 @@ def t_header_not_found_populates_diagnostics_with_sheet_and_row_detail():
 
 
 def t_header_not_found_diagnostics_show_near_miss_score():
+    # v14: "Store Name" is itself a literal STORE alias, so with a second
+    # populated column it's now a valid Tier-1 header (Store alone is
+    # enough -- an "OR" alias is no longer required). A genuine near-miss
+    # under the new model is a single-column sheet: no alias match AND no
+    # second column for the positional fallback to use as a business field.
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "or_list.xlsx"
         _write_xlsx(p, {"Sheet1": [
-            ["Store Name", "Reference Code"],
-            ["Kerry", "REF001"],
+            ["Reference Code"],
+            ["REF001"],
         ]})
         result = oli.load_or_list(p)
         assert result.status == "HEADER_NOT_FOUND"
         diag_text = "\n".join(result.diagnostics)
-        assert "score=1/2" in diag_text, diag_text
-        assert "STORE match=True" in diag_text
+        assert "score=0/2" in diag_text, diag_text
+        assert "STORE match=False" in diag_text
         assert "OR match=False" in diag_text
 
 
@@ -173,9 +183,12 @@ def t_header_not_found_diagnostics_cover_multiple_sheets():
 
 
 def t_header_not_found_diagnostics_respect_scan_row_limit():
+    # v14: single column -- no second column for the positional fallback to
+    # use as a business field, so this genuinely stays HEADER_NOT_FOUND
+    # regardless of how many data rows follow.
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "or_list.xlsx"
-        rows = [["Col A", "Col B"]] + [[f"x{i}", f"y{i}"] for i in range(44)]
+        rows = [["Col A"]] + [[f"x{i}"] for i in range(44)]
         _write_xlsx(p, {"Sheet1": rows})
         result = oli.load_or_list(p)
         assert result.status == "HEADER_NOT_FOUND"
@@ -238,6 +251,73 @@ def t_or_under_multiple_stores_flagged():
 test("blank OR for every row -> REQUIRED_FIELD_MISSING", t_required_field_missing_when_or_blank_for_every_row)
 test("exact-duplicate rows are flagged in duplicate_rows, never silently dropped", t_duplicate_rows_flagged_not_dropped)
 test("same OR value under two different Stores is flagged", t_or_under_multiple_stores_flagged)
+
+
+# =============================================================================
+# v14: fully dynamic business fields (spec section 5-6) -- ANY number of
+# columns after Store, ANY labels, preserved exactly as uploaded.
+# =============================================================================
+print("\n== load_or_list: v14 dynamic business fields ==")
+
+
+def t_dynamic_fields_arbitrary_4_column_shape():
+    """Store, Ref No., Buyer, Delivery, Batch -- exactly the multi-field
+    example from the spec. Labels must be preserved verbatim, values
+    correctly keyed to each label, in column order."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["Store", "Ref No.", "Buyer", "Delivery", "Batch"],
+            ["Kerry", "REF-001", "Acme Co", "2026-08-01", "B7"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "OK", result.errors
+        assert result.business_field_labels == ["Ref No.", "Buyer", "Delivery", "Batch"]
+        row = result.rows[0]
+        assert row.store_raw == "Kerry"
+        assert list(row.business_fields.items()) == [
+            ("Ref No.", "REF-001"), ("Buyer", "Acme Co"),
+            ("Delivery", "2026-08-01"), ("Batch", "B7"),
+        ]
+        # backward-compat: 1st/2nd business field still readable the old way
+        assert row.or_raw == "REF-001"
+        assert row.so_raw == "Acme Co"
+
+
+def t_dynamic_fields_po_invoice_labels_preserved_exactly():
+    """A different real-world label set (PO / Invoice No.) must be
+    preserved verbatim -- never silently renamed to "OR No."/"SO No."."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["Store", "PO", "Invoice No."],
+            ["Kerry", "PO38071", "INV628038"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "OK", result.errors
+        assert result.business_field_labels == ["PO", "Invoice No."]
+        assert result.rows[0].business_fields == {"PO": "PO38071", "Invoice No.": "INV628038"}
+
+
+def t_dynamic_fields_single_business_field_ok():
+    """A minimal Store + 1-field shape (no 2nd field at all) is valid --
+    the old model required BOTH an OR-shaped and SO-shaped column; the new
+    model only requires Store + at least one business field."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "or_list.xlsx"
+        _write_xlsx(p, {"Sheet1": [
+            ["STORE", "Reference"],
+            ["Kerry", "REF001"],
+        ]})
+        result = oli.load_or_list(p)
+        assert result.status == "OK", result.errors
+        assert result.business_field_labels == ["Reference"]
+        assert result.rows[0].business_fields == {"Reference": "REF001"}
+
+
+test("dynamic business fields: arbitrary 4-column shape (Ref No./Buyer/Delivery/Batch)", t_dynamic_fields_arbitrary_4_column_shape)
+test("dynamic business fields: PO/Invoice No. labels preserved exactly as uploaded", t_dynamic_fields_po_invoice_labels_preserved_exactly)
+test("dynamic business fields: Store + single business field is valid (no 2nd field required)", t_dynamic_fields_single_business_field_ok)
 
 
 # =========================================================================
@@ -308,8 +388,12 @@ def t_literal_store_header_always_wins_over_semantic_fallback():
 
 
 def t_semantic_fallback_never_fires_with_only_one_or_column():
-    """A single OR column (no duplicate) with no STORE column has nothing to
-    reinterpret as STORE -- must stay HEADER_NOT_FOUND, never guess."""
+    """A single OR column (no duplicate) has nothing for Tier 2 (semantic
+    duplicate-OR/OR/SO fallback) to reinterpret as STORE -- Tier 2 must
+    never fire here. v14: Tier 3 (pure positional fallback) still applies
+    though, since spec section 5's only real assumption is "first column =
+    Store" -- so this now resolves via POSITIONAL_FALLBACK, not
+    HEADER_NOT_FOUND and not SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER."""
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "or_list.xlsx"
         _write_xlsx(p, {"Sheet1": [
@@ -317,12 +401,19 @@ def t_semantic_fallback_never_fires_with_only_one_or_column():
             ["po38070", "inv628037"],
         ]})
         result = oli.load_or_list(p)
-        assert result.status == "HEADER_NOT_FOUND"
+        assert result.status == "OK", result.errors
+        assert result.detection_source == "POSITIONAL_FALLBACK"
+        assert result.rows[0].store_raw == "po38070"
+        assert list(result.rows[0].business_fields.values()) == ["inv628037"]
 
 
 def t_semantic_fallback_never_fires_without_an_so_column():
-    """Two OR-aliased columns but no SO column at all is NOT the recognised
-    shape (spec: >=2 OR columns AND >=1 SO column) -- must not guess."""
+    """Two OR-aliased columns but no SO column at all is NOT the Tier-2
+    recognised shape (spec: >=2 OR columns AND >=1 SO column) -- Tier 2
+    must never fire here either. v14: Tier 3 still resolves it positionally
+    -- first column becomes Store, so "Kerry Center flagship" (which reads
+    like a real store name) is correctly picked up, just via a different
+    detection tier than the OR/OR/SO-specific one."""
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "or_list.xlsx"
         _write_xlsx(p, {"Sheet1": [
@@ -330,7 +421,10 @@ def t_semantic_fallback_never_fires_without_an_so_column():
             ["Kerry Center flagship", "po38071"],
         ]})
         result = oli.load_or_list(p)
-        assert result.status == "HEADER_NOT_FOUND"
+        assert result.status == "OK", result.errors
+        assert result.detection_source == "POSITIONAL_FALLBACK"
+        assert result.rows[0].store_raw == "Kerry Center flagship"
+        assert list(result.rows[0].business_fields.values()) == ["po38071"]
 
 
 test("semantic fallback: duplicate OR/OR/SO header (no STORE) loads OK, detection_source recorded", t_semantic_fallback_duplicate_or_header_loads_ok)

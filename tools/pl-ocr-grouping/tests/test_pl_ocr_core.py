@@ -864,9 +864,10 @@ _REAL_OR_LIST_ROWS_V13 = [
 
 
 def _real_or_index_v13():
+    from collections import OrderedDict
     rows = [
         _oli13.OrListRow(row_number=i + 2, store_raw=store, store_norm="",
-                          or_raw=or_v, or_norm=or_v.upper(), so_raw=so_v, so_norm=so_v.upper())
+                          business_fields=OrderedDict([("OR No.", or_v), ("SO No.", so_v)]))
         for i, (store, or_v, so_v) in enumerate(_REAL_OR_LIST_ROWS_V13)
     ]
     idx = {}
@@ -968,6 +969,334 @@ test("real 21-carton/7-store shipment: POP+VN+CN combine under one per-Store sco
 
 
 # =========================================================================
+# v14 (spec sections 9-12): export_grouped_pl()'s 04_CN_BY_STORE split must
+# actually WRITE each Store's POP+VN+CN cartons combined into one file,
+# using the ALREADY-correct Store-scoped carton_display (no local
+# renumbering) -- this is the piece that was still using the old CN-only
+# match_store() and bespoke per-file renumbering before this fix. Reuses
+# the exact same real 21-carton/7-store fixture as the test above, but
+# additionally calls export_grouped_pl() and reads the actual .xlsx files
+# back to confirm the combined-factory grouping and numbering survive all
+# the way to disk.
+# =========================================================================
+def t_export_grouped_pl_store_split_combines_pop_vn_cn_and_keeps_scope_numbering():
+    import openpyxl
+
+    real_marks = (
+        ["CN-1529_HZ_PVG_POP", "CN-1529_IAPM_PVG_POP", "CN-1529_KR_PVG_POP",
+         "CN-1529_SH-Airport_PVG_POP", "CN-1529_SH-Taikooli_PVG_POP",
+         "CN-1529_GZ_SZX_VN", "CN-1529_HZ_PVG_VN", "CN-1529_IAPM_PVG_VN",
+         "CN-1529_KR_PVG_VN", "CN-1529_SZ_SZX_VN"]
+        + ["CN-1529_GZ_SZX_CN"]
+        + ["CN-1529_HZ_PVG_CN"] * 2
+        + ["CN-1529_IAPM_PVG_CN"] * 2
+        + ["CN-1529_KR_PVG_CN"] * 2
+        + ["CN-1529_SH-Airport_PVG_CN v"] * 2
+        + ["CN-1529_SH-Taikooli_PVG_CN"]
+        + ["CN-1529_SZ_SZX_CN"]
+    )
+    pkgs = []
+    for i, mk in enumerate(real_marks):
+        p = Package9(package_code=f"PKG{i}", source_file=f"{mk}.pdf", reference_code=mk, pdf_package_seq=0)
+        p.shipping_mark = mk
+        pkgs.append(p)
+
+    pkgs = D9["business_sort_packages"](pkgs)
+    D9["classify_packages_for_port"](pkgs, None, False)
+
+    or_index = _real_or_index_v13()
+    for pkg in pkgs:
+        m = _pge13.match_store_and_or(pkg, or_index)
+        pkg.or_list_store = m.matched_store
+        pkg.or_list_match_status = m.status
+        if m.status == "OK":
+            if not pkg.or_number:
+                pkg.or_number = m.matched_or
+            if not pkg.so_number:
+                pkg.so_number = m.matched_so
+
+    assign_counting_scope_keys(pkgs)
+    assign_global_numbers(pkgs)
+    D9["assign_true_global_numbers"](pkgs)
+
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_split_store_"))
+    try:
+        control_path = _pge13.export_grouped_pl(
+            packages=pkgs,
+            output_dir=out_dir,
+            write_workbook=D9["write_workbook"],
+        )
+        assert control_path.exists()
+
+        store_dir = out_dir / "04_CN_BY_STORE"
+        written = {p.name for p in store_dir.glob("*.xlsx")}
+        # All 7 real stores must have produced a combined-factory file --
+        # not filtered to CN-only cartons any more.
+        for key in ("HZ", "IAPM", "KR"):
+            pass  # (canonical keys checked via STORE_MASTER below)
+        expected_files = {"PL_CN_STORE_HANGZHOU.xlsx", "PL_CN_STORE_IAPM.xlsx",
+                           "PL_CN_STORE_KERRY.xlsx", "PL_CN_STORE_SHANGHAI_HONGQIAO.xlsx",
+                           "PL_CN_STORE_SHANGHAI_TAIKOOLI.xlsx", "PL_CN_STORE_GUANGZHOU.xlsx",
+                           "PL_CN_STORE_SHENZHEN.xlsx"}
+        assert expected_files <= written, f"missing store files: {expected_files - written}, got {written}"
+
+        def _carton_col_values(path):
+            wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+            ws = wb["Match_Status"]
+            header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+            col_idx = header.index("Carton number")
+            vals = [row[col_idx] for row in ws.iter_rows(min_row=2, values_only=True) if row[col_idx]]
+            wb.close()
+            return vals
+
+        # HANGZHOU: 4 cartons total (1 POP + 1 VN + 2 CN), combined scope
+        # numbering 1/4..4/4 -- exactly the SAME denominator as carton_display
+        # computed above, never locally renumbered/reset by the split step.
+        hz_vals = _carton_col_values(store_dir / "PL_CN_STORE_HANGZHOU.xlsx")
+        assert sorted(hz_vals) == ["1/4", "2/4", "3/4", "4/4"], hz_vals
+        assert len(hz_vals) == 4, hz_vals
+
+        # GUANGZHOU: VN(1) + CN(1) only, no POP -- combined total 2.
+        gz_vals = _carton_col_values(store_dir / "PL_CN_STORE_GUANGZHOU.xlsx")
+        assert sorted(gz_vals) == ["1/2", "2/2"], gz_vals
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+test("export_grouped_pl(): 04_CN_BY_STORE combines POP+VN+CN per Store and keeps the already-correct scope numbering (no local renumber)",
+     t_export_grouped_pl_store_split_combines_pop_vn_cn_and_keeps_scope_numbering)
+
+
+# =========================================================================
+# v14 (spec sections 1-3): Shipmark confidence + country detection + the
+# non-China "single destination" routing gate.
+# =========================================================================
+detect_shipment_country = D9["detect_shipment_country"]
+resolve_shipping_mark_confidence = D9["resolve_shipping_mark_confidence"]
+
+
+def t_detect_shipment_country_known_prefixes():
+    assert detect_shipment_country("CN-1529_HZ_PVG_POP") == "CN"
+    assert detect_shipment_country("KR-2201_SEOUL") == "KR"
+    assert detect_shipment_country("JP-0099_TOKYO") == "JP"
+    assert detect_shipment_country("BE-0001_BRUSSELS") == "BE"
+    assert detect_shipment_country("US-4400_NY") == "US"
+    assert detect_shipment_country("TW-0012_TAIPEI") == "TW"
+    assert detect_shipment_country("cn-lowercase-ok") == "CN"
+
+
+def t_detect_shipment_country_never_guesses_beyond_the_six_codes():
+    assert detect_shipment_country("VN-1234_HANOI") == ""
+    assert detect_shipment_country("XYZ-0001") == ""
+    assert detect_shipment_country("") == ""
+    # must not match a longer word that merely STARTS with a known code
+    assert detect_shipment_country("USER-1234") == ""
+    assert detect_shipment_country("USA-1234") == ""
+
+
+def t_shipping_mark_confidence_ordinal_by_source():
+    assert resolve_shipping_mark_confidence("PL_STRUCTURED_FIELD") == 1.0
+    assert resolve_shipping_mark_confidence("PL_TEXT") == 0.85
+    assert resolve_shipping_mark_confidence("FILENAME_REFERENCE_CODE") == 0.5
+    assert resolve_shipping_mark_confidence("") == 0.0
+    assert resolve_shipping_mark_confidence("SOMETHING_UNKNOWN") == 0.0
+
+
+def t_run_pipeline_sets_country_and_filename_reference_diagnostics_fields():
+    p = Package9(package_code="PKG1", source_file="CN-1529_HZ_PVG_POP.pdf",
+                 reference_code="CN-1529_HZ_PVG_POP", pdf_package_seq=0)
+    assert p.shipping_mark == "" and p.country == "" and p.filename_reference == ""
+    # simulate exactly what run_pipeline's Shipmark-resolution loop does
+    p.filename_reference = p.reference_code
+    if not p.shipping_mark:
+        p.shipping_mark = p.reference_code
+        p.shipping_mark_source = "FILENAME_REFERENCE_CODE"
+    p.shipping_mark_raw = p.shipping_mark
+    p.shipping_mark_confidence = resolve_shipping_mark_confidence(p.shipping_mark_source)
+    p.country = detect_shipment_country(p.shipping_mark) or detect_shipment_country(p.filename_reference)
+    assert p.filename_reference == "CN-1529_HZ_PVG_POP"
+    assert p.shipping_mark_confidence == 0.5  # filename fallback -- weakest signal
+    assert p.country == "CN"
+
+
+test("detect_shipment_country(): all 6 spec-listed country codes recognised from the Shipmark prefix",
+     t_detect_shipment_country_known_prefixes)
+test("detect_shipment_country(): never guesses beyond the 6 explicit codes (VN/unknown/longer-word-prefix -> \"\")",
+     t_detect_shipment_country_never_guesses_beyond_the_six_codes)
+test("resolve_shipping_mark_confidence(): PL_STRUCTURED_FIELD > PL_TEXT > FILENAME_REFERENCE_CODE > unknown",
+     t_shipping_mark_confidence_ordinal_by_source)
+test("run_pipeline's Shipmark-resolution loop populates filename_reference/shipping_mark_confidence/country (v14 diagnostics)",
+     t_run_pipeline_sets_country_and_filename_reference_diagnostics_fields)
+
+
+def t_non_cn_country_forces_single_flat_scope_even_with_or_list_store_match():
+    """Section 3/11: KR/JP/BE/US/TW are SINGLE_DESTINATION -- even if an OR
+    List match resolves distinct-looking "store" values, packages must all
+    share ONE flat counting scope (store_carton_display == global_carton_
+    display), never split like a China multi-store shipment."""
+    # Same OR (one single-destination shipment/order) but DIFFERENT
+    # "store"-looking OR List values per carton -- if country routing were
+    # not gated, this shape would otherwise trigger a China-style per-Store
+    # split/scope exactly like the real Kerry/Hangzhou fixture above.
+    p1 = Package9(package_code="PKG1", source_file="KR-2201_SEOUL_A.pdf",
+                  reference_code="KR-2201_SEOUL_A", pdf_package_seq=0)
+    p1.shipping_mark = "KR-2201_SEOUL_A"
+    p1.country = "KR"
+    p1.or_list_match_status = "OK"
+    p1.or_list_store = "Seoul Flagship A"
+    p1.or_number = "OR-KR-1"
+
+    p2 = Package9(package_code="PKG2", source_file="KR-2201_SEOUL_B.pdf",
+                  reference_code="KR-2201_SEOUL_B", pdf_package_seq=0)
+    p2.shipping_mark = "KR-2201_SEOUL_B"
+    p2.country = "KR"
+    p2.or_list_match_status = "OK"
+    p2.or_list_store = "Seoul Flagship B"  # DIFFERENT "store" -- would split if this were CN
+    p2.or_number = "OR-KR-1"
+
+    pkgs = [p1, p2]
+    assign_counting_scope_keys(pkgs)
+    assign_global_numbers(pkgs)
+    D9["assign_true_global_numbers"](pkgs)
+
+    # ONE shared flat scope, not two -- both cartons number 1/2 and 2/2
+    # within that single scope, and Store-scoped carton_display equals the
+    # flat global_carton_display exactly (spec: "store_carton_display ==
+    # global_carton_display" for non-CN countries).
+    assert p1.counting_scope_key == p2.counting_scope_key, (p1.counting_scope_key, p2.counting_scope_key)
+    assert {p1.carton_display, p2.carton_display} == {"1/2", "2/2"}
+    for p in pkgs:
+        assert p.carton_display == p.global_carton_display, (p.carton_display, p.global_carton_display)
+
+    # And export_grouped_pl() must NOT produce a 04_CN_BY_STORE split for
+    # these -- no China Store split for a non-China shipment.
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_kr_single_dest_"))
+    try:
+        _pge13.export_grouped_pl(packages=pkgs, output_dir=out_dir, write_workbook=D9["write_workbook"])
+        store_dir = out_dir / "04_CN_BY_STORE"
+        written = list(store_dir.glob("*.xlsx")) if store_dir.exists() else []
+        assert written == [], f"non-CN shipment must not produce a Store split, got {written}"
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+test("non-CN country (KR) forces one flat counting scope, never a China-style Store split, even with a matching OR List",
+     t_non_cn_country_forces_single_flat_scope_even_with_or_list_store_match)
+
+
+# =========================================================================
+# v14 (spec section 8): Master Data (DIM/weight file + HS Code file) is
+# ENRICHMENT-ONLY -- a package/item must NEVER be dropped just because
+# Master Data has no matching row for it; it must be visibly marked
+# MASTER_UNMATCHED instead. Item = Item, Package = Package.
+# =========================================================================
+Item9 = D9["Item"]
+
+
+def t_master_match_status_unmatched_when_dim_not_matched():
+    p = Package9(package_code="PKG1", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
+    p.items = [Item9(no="1", product_name="Widget", product_code="SKU1",
+                      barcode="000", unit="PCS", quantity=5, hs_code="1234.56")]
+    assert p.dim_matched is False  # default -- no DIM file row found
+    assert p.master_match_status == "MASTER_UNMATCHED"
+    # the item itself is still fully present -- never dropped
+    assert p.item_count == 1 and p.calc_qty == 5
+
+
+def t_master_match_status_unmatched_when_any_item_hs_code_blank():
+    p = Package9(package_code="PKG1", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
+    p.dim_matched = True
+    p.items = [
+        Item9(no="1", product_name="Widget A", product_code="SKU1", barcode="000", unit="PCS", quantity=5, hs_code="1234.56"),
+        Item9(no="2", product_name="Widget B", product_code="SKU2", barcode="001", unit="PCS", quantity=3, hs_code=""),  # HS Code master had no match
+    ]
+    assert p.master_match_status == "MASTER_UNMATCHED"
+    # BOTH items still present -- the unmatched one is not dropped
+    assert p.item_count == 2 and p.calc_qty == 8
+
+
+def t_master_match_status_matched_when_dim_and_all_hs_codes_found():
+    p = Package9(package_code="PKG1", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
+    p.dim_matched = True
+    p.items = [Item9(no="1", product_name="Widget", product_code="SKU1",
+                      barcode="000", unit="PCS", quantity=5, hs_code="1234.56")]
+    assert p.master_match_status == "MASTER_MATCHED"
+
+
+def t_master_match_status_matched_with_zero_items_and_dim_ok():
+    """Edge case: dim_matched=True but zero items -- master_match_status
+    only reports on Master Data enrichment, not on item-count/qty issues
+    (those are audit_status()/overall_status()'s job, a separate concern)."""
+    p = Package9(package_code="PKG1", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
+    p.dim_matched = True
+    assert p.items == []
+    assert p.master_match_status == "MASTER_MATCHED"
+
+
+test("master_match_status: MASTER_UNMATCHED when the DIM/weight file has no matching row (package never dropped)",
+     t_master_match_status_unmatched_when_dim_not_matched)
+test("master_match_status: MASTER_UNMATCHED when any item's HS Code master lookup misses (item never dropped)",
+     t_master_match_status_unmatched_when_any_item_hs_code_blank)
+test("master_match_status: MASTER_MATCHED when DIM matched and every item's HS Code was found",
+     t_master_match_status_matched_when_dim_and_all_hs_codes_found)
+test("master_match_status: reports purely on Master Data enrichment, independent of item-count issues",
+     t_master_match_status_matched_with_zero_items_and_dim_ok)
+
+
+# =========================================================================
+# v14 (spec section 14): Raw_Data sheet exposes the full diagnostics set
+# per package as additive trailing columns (existing columns/positions
+# unchanged).
+# =========================================================================
+def t_raw_data_sheet_exposes_v14_diagnostics_columns():
+    import openpyxl
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_rawdata_diag_"))
+    try:
+        p = Package9(package_code="PKGA", source_file="CN-1529_HZ_PVG_POP.pdf",
+                     reference_code="CN-1529_HZ_PVG_POP", pdf_package_seq=0)
+        p.items = [Item9(no="1", product_name="Widget", product_code="SKU1",
+                          barcode="000", unit="PCS", quantity=5, hs_code="1234.56")]
+        p.dim_matched = True
+        p.country = "CN"
+        p.country_source = "SHIPPING_MARK_PREFIX"
+        p.shipping_mark = "CN-1529_HZ_PVG_POP"
+        p.shipping_mark_source = "FILENAME_REFERENCE_CODE"
+        p.shipping_mark_confidence = 0.5
+        p.filename_reference = "CN-1529_HZ_PVG_POP"
+        p.or_list_match_status = "OK"
+        p.or_list_store = "Hangzhou"
+        p.counting_scope_key = "OR:OR1|HANGZHOU"
+        p.carton_display = "1/1"
+        p.global_carton_display = "1/1"
+
+        out_path = out_dir / "PL_Total.xlsx"
+        D9["write_workbook"](out_path, [p])
+
+        wb = openpyxl.load_workbook(str(out_path), read_only=True, data_only=True)
+        ws = wb["Raw_Data"]
+        header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        for col in ("master_match_status", "country", "country_source", "shipping_mark",
+                    "shipping_mark_source", "shipping_mark_confidence", "filename_reference",
+                    "or_list_match_status", "or_list_store", "counting_scope_key",
+                    "store_carton_display", "global_carton_display"):
+            assert col in header, f"missing Raw_Data diagnostics column: {col}"
+        row = next(ws.iter_rows(min_row=2, max_row=2, values_only=True))
+        rowd = dict(zip(header, row))
+        assert rowd["master_match_status"] == "MASTER_MATCHED"
+        assert rowd["country"] == "CN"
+        assert rowd["or_list_store"] == "Hangzhou"
+        assert rowd["store_carton_display"] == "1/1"
+        assert rowd["global_carton_display"] == "1/1"
+        wb.close()
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+test("Raw_Data sheet exposes the full v14 diagnostics set per package (additive trailing columns)",
+     t_raw_data_sheet_exposes_v14_diagnostics_columns)
+
+
+# =========================================================================
 # v13 (FIX6): Packing List sheet's B/C columns -- real production template
 # labels these "OR No." / "SO No." (confirmed against a real uploaded
 # PL_Total.xlsx), not "PO No." / "Invoice No." as previously hardcoded.
@@ -1005,6 +1334,59 @@ def t_packing_list_headers_are_or_no_so_no_not_po_invoice():
 
 test("Packing List sheet: B/C headers are 'OR No.'/'SO No.' (matches real template), filled from matched OR/SO, blank when unmatched",
      t_packing_list_headers_are_or_no_so_no_not_po_invoice)
+
+
+def t_packing_list_headers_use_or_lists_own_dynamic_labels():
+    """v14 (spec section 7): when the uploaded OR List uses different
+    business-field labels (e.g. PO/Invoice No. instead of OR No./SO No.),
+    the Packing List sheet's B/C headers must reflect THOSE labels, not
+    the hardcoded default."""
+    import openpyxl
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_dynamic_headers_"))
+    try:
+        p1 = Package9(package_code="PKGA", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
+        p1.or_number, p1.so_number = "PO38068", "INV628036"
+        p1.global_carton_num = "1/1"
+
+        out_path = out_dir / "PL_Total.xlsx"
+        D9["write_workbook"](out_path, [p1], business_field_labels=["PO", "Invoice No."])
+
+        wb = openpyxl.load_workbook(str(out_path))
+        ws = wb["Packing List"]
+        header_row = D9["TABLE_HDR_ROW1"]
+        assert ws.cell(row=header_row, column=2).value == "PO", ws.cell(row=header_row, column=2).value
+        assert ws.cell(row=header_row, column=3).value == "Invoice No.", ws.cell(row=header_row, column=3).value
+        first_item_row = D9["FIRST_ITEM_ROW"]
+        assert ws.cell(row=first_item_row, column=2).value == "PO38068"
+        assert ws.cell(row=first_item_row, column=3).value == "INV628036"
+    finally:
+        shutil.rmtree(out_dir)
+
+
+def t_packing_list_headers_default_when_no_labels_given():
+    """No OR List uploaded (business_field_labels=None) -- must fall back
+    to this codebase's own historical default "OR No."/"SO No.", never a
+    blank or crash."""
+    import openpyxl
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_default_headers_"))
+    try:
+        p1 = Package9(package_code="PKGA", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
+        p1.global_carton_num = "1/1"
+        out_path = out_dir / "PL_Total.xlsx"
+        D9["write_workbook"](out_path, [p1])
+        wb = openpyxl.load_workbook(str(out_path))
+        ws = wb["Packing List"]
+        header_row = D9["TABLE_HDR_ROW1"]
+        assert ws.cell(row=header_row, column=2).value == "OR No."
+        assert ws.cell(row=header_row, column=3).value == "SO No."
+    finally:
+        shutil.rmtree(out_dir)
+
+
+test("Packing List sheet: B/C headers use the OR List's OWN dynamic labels (PO/Invoice No. example)",
+     t_packing_list_headers_use_or_lists_own_dynamic_labels)
+test("Packing List sheet: B/C headers default to OR No./SO No. when no OR List labels are given",
+     t_packing_list_headers_default_when_no_labels_given)
 
 
 

@@ -438,6 +438,22 @@ class Package:
     @property
     def origin(self) -> str:
         return get_origin(self.source_file, self.reference_code)
+    @property
+    def master_match_status(self) -> str:
+        """v14 (spec section 8/14): explicit spec-vocabulary status for
+        Master Data enrichment (DIM/weight file + HS Code file). Master
+        Data is ENRICHMENT-ONLY -- a package/item is NEVER removed from any
+        output because Master Data didn't have a matching row for it; this
+        property just reports that fact under the spec's own status name
+        instead of leaving it implicit in dim_matched / a blank hs_code
+        (both of which already behave this way and are unchanged by this
+        property -- it derives from them, it doesn't drive any new
+        filtering/dropping behavior anywhere)."""
+        if not self.dim_matched:
+            return "MASTER_UNMATCHED"
+        if self.items and any(not (i.hs_code or "").strip() for i in self.items):
+            return "MASTER_UNMATCHED"
+        return "MASTER_MATCHED"
 
 # ── v11: OR # / SO Order # / Shipping Mark -- label-value line detection ───
 # These three fields are package-level metadata that MAY appear printed on
@@ -457,7 +473,22 @@ OR_ALIASES_RAW = ["OR #", "OR NO.", "OR NO", "OR NUMBER", "OR CODE", "OUTBOUND R
 SO_ALIASES_RAW = ["SO ORDER #", "SO ORDER", "SO #", "SO NO.", "SO NO", "SO NUMBER",
                    "SALES ORDER #", "SALES ORDER", "SO"]
 SHIPPING_MARK_ALIASES_RAW = ["SHIPPING MARKS", "SHIPPING MARK", "SHIPMARK #", "SHIPMARK",
-                              "SHIP MARK", "MARKS & NOS", "MARKS AND NUMBERS", "WAREHOUSE OR"]
+                              "SHIP MARK", "MARKS & NOS", "MARKS AND NUMBERS", "WAREHOUSE OR",
+                              # v14 (spec section 1): "Ma tham chieu" (Vietnamese
+                              # PL template field) is the HIGHEST-priority Shipmark
+                              # source per spec, but this codebase has no real PDF
+                              # sample containing it to validate a separate priority
+                              # tier against (documented limitation, same caveat as
+                              # the rest of this alias-matcher) -- added here as
+                              # ANOTHER shipping_mark alias (both accented and
+                              # unaccented spellings, since OCR may strip diacritics)
+                              # so it is at least recognised and captured from PL
+                              # text/table cells, additive and safe. Both spellings
+                              # normalize identically in match_metadata_label_cells()
+                              # (accent-insensitive there); RE_SHIPPING_MARK_LABEL_LINE
+                              # needs both forms listed explicitly since that path
+                              # matches raw text.
+                              "MA THAM CHIEU", "MÃ THAM CHIẾU", "THAM CHIEU", "THAM CHIẾU"]
 # v12: GW (gross weight) as a package-level label line, same convention as
 # OR#/SO#/Shipping Mark. NOTE this is intentionally kept SEPARATE from
 # Package.weight (which is exclusively DIM/Weight-file-sourced, unchanged
@@ -506,6 +537,45 @@ _METADATA_SOURCE_FIELD = {
     "shipping_mark": "shipping_mark_source",
     "pl_gross_weight": "pl_gross_weight_source",
 }
+
+
+# v14 (spec section 1): ordinal confidence per Shipmark source -- a PL
+# table field ("PL_STRUCTURED_FIELD") is the most reliable, a PL text-line
+# regex match ("PL_TEXT") is somewhat less reliable (more prone to a
+# stray/unrelated line matching), the filename fallback
+# ("FILENAME_REFERENCE_CODE") is the weakest signal (it's not from the PL's
+# own content at all). Never blank/"" -- an unresolved package still gets
+# 0.0, never None, so every diagnostics consumer can sort/filter on it
+# without a None-check.
+_SHIPPING_MARK_SOURCE_CONFIDENCE = {
+    "PL_STRUCTURED_FIELD": 1.0,
+    "PL_TEXT": 0.85,
+    "FILENAME_REFERENCE_CODE": 0.5,
+    "": 0.0,
+}
+
+
+def resolve_shipping_mark_confidence(source: str) -> float:
+    return _SHIPPING_MARK_SOURCE_CONFIDENCE.get(source or "", 0.0)
+
+
+# v14 (spec sections 2-3): country detection from the resolved Shipmark's
+# prefix -- "^(CN|KR|JP|BE|US|TW)" per spec, anchored at the very start of
+# the string and requiring the next character (if any) to NOT be another
+# letter, so "US-1234" matches "US" but "USER-1234" or "USA-1234" do not
+# (never a guess beyond the literal 6-code list the spec names). Distinct
+# from any store token embedded elsewhere in the Shipmark (e.g. the "KR" in
+# "CN-1529_KR_PVG_POP" is a STORE token, not a country -- this only ever
+# looks at the leading prefix).
+RE_SHIPMARK_COUNTRY_PREFIX = re.compile(r'^(CN|KR|JP|BE|US|TW)(?![A-Z])', re.IGNORECASE)
+
+
+def detect_shipment_country(shipmark: str) -> str:
+    """Returns one of CN/KR/JP/BE/US/TW, or "" if the Shipmark's prefix
+    doesn't match any known country code (never guessed)."""
+    text = (shipmark or "").strip()
+    m = RE_SHIPMARK_COUNTRY_PREFIX.match(text)
+    return m.group(1).upper() if m else ""
 
 
 def _norm_label_cell(s: str) -> str:
@@ -1655,7 +1725,19 @@ def compute_counting_scope_key(pkg: Package) -> Tuple[str, str]:
     except ImportError:
         store_identity_fn = lambda s: str(s or "").strip().upper()
 
-    if pkg.or_list_match_status == "OK" and pkg.or_list_store:
+    # v14 (spec sections 3/11): non-China countries (KR/JP/BE/US/TW) are
+    # SINGLE_DESTINATION -- never apply the China multi-Store split/
+    # numbering logic to them, even if an OR List or the CN-only classifier
+    # happens to produce a store-looking match. `pkg.country` is only ever
+    # a known non-"" value once detect_shipment_country() has matched one
+    # of the 6 explicit country codes (never a guess), and "" (unknown/not
+    # yet detected -- e.g. a caller/test that never touched this v14
+    # field) intentionally falls through to the pre-v14 behavior below
+    # unchanged, so every existing caller keeps working exactly as before.
+    _NON_CN_COUNTRIES = {"KR", "JP", "BE", "US", "TW"}
+    if pkg.country in _NON_CN_COUNTRIES:
+        store = "UNRESOLVED"
+    elif pkg.or_list_match_status == "OK" and pkg.or_list_store:
         store = pkg.or_list_store
     elif pkg.store and pkg.store != "REVIEW":
         store = pkg.store
@@ -2155,7 +2237,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         status, remark = overall_status(pkg)
         ws2.append([
             pkg.source_file, pkg.reference_code, pkg.package_code,
-            pkg.pdf_package_seq, pkg.global_carton_num,
+            pkg.pdf_package_seq, getattr(pkg, carton_display_field),
             pkg.item_count, calc, decl,
             q_ok, d_ok, status, remark,
         ])
@@ -2180,6 +2262,13 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         "uom", "condition", "quantity", "declared_total", "calculated_total",
         "package_validation_status", "dim_match_status", "dim_source_method",
         "length", "width", "height", "weight", "cbm", "diagnostic_reason",
+        # v14 (spec section 14): full per-package diagnostics -- additive
+        # trailing columns only, every column above is unchanged (position
+        # and meaning) so no existing reader of this sheet breaks.
+        "master_match_status", "country", "country_source",
+        "shipping_mark", "shipping_mark_source", "shipping_mark_confidence",
+        "filename_reference", "or_list_match_status", "or_list_store",
+        "counting_scope_key", "store_carton_display", "global_carton_display",
     ]
     ws3.append(raw_headers)
     for cell in ws3[1]:
@@ -2190,6 +2279,12 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         dim_status = "EXACT_MATCH" if pkg.dim_matched else "MISMATCH"
         rows = pkg.items if pkg.items else [None]
         for item in rows:
+            diag_tail = [
+                pkg.master_match_status, pkg.country, pkg.country_source,
+                pkg.shipping_mark, pkg.shipping_mark_source, pkg.shipping_mark_confidence,
+                pkg.filename_reference, pkg.or_list_match_status, pkg.or_list_store,
+                pkg.counting_scope_key, pkg.carton_display, pkg.global_carton_display,
+            ]
             if item is None:
                 ws3.append([
                     pkg.source_file, pkg.first_page, pkg.reference_code, normalize(pkg.reference_code),
@@ -2198,7 +2293,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     pstatus, dim_status, pkg.dim_source_method,
                     pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
                     "ZERO_ITEMS_IN_PACKAGE",
-                ])
+                ] + diag_tail)
             else:
                 ws3.append([
                     pkg.source_file, item.source_page, pkg.reference_code, normalize(pkg.reference_code),
@@ -2209,7 +2304,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     pstatus, dim_status, pkg.dim_source_method,
                     pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
                     item.parse_method,
-                ])
+                ] + diag_tail)
     _auto_w(ws3)
     ws3.freeze_panes = "A2"
 
@@ -2397,13 +2492,33 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     # already captured by the parser (Parser._capture_metadata / v11).
     log.info("Resolving OR# / SO# / Shipping Mark for every package...")
     for pkg in packages:
+        # v14: filename_reference is ALWAYS recorded, independent of which
+        # source ultimately wins for shipping_mark itself (spec section 14
+        # diagnostics -- the filename signal must stay auditable even when
+        # a PDF-sourced value was used).
+        pkg.filename_reference = pkg.reference_code
         if not pkg.shipping_mark:
             pkg.shipping_mark = pkg.reference_code
             pkg.shipping_mark_source = "FILENAME_REFERENCE_CODE"
+        pkg.shipping_mark_raw = pkg.shipping_mark
+        pkg.shipping_mark_confidence = resolve_shipping_mark_confidence(pkg.shipping_mark_source)
+        # v14 (spec sections 2-3): country from the resolved Shipmark's
+        # prefix. Falls back to reference_code's own prefix when the
+        # resolved shipping_mark itself doesn't carry a recognisable
+        # country code (e.g. it resolved from PL text/table content that
+        # doesn't start with the shipment code) -- filename_reference is
+        # still Shipmark-derived data, just from a lower-priority source,
+        # so this fallback stays within the spec's own priority list
+        # rather than inventing a new signal.
+        pkg.country = detect_shipment_country(pkg.shipping_mark) or detect_shipment_country(pkg.filename_reference)
+        pkg.country_source = "SHIPPING_MARK_PREFIX" if pkg.country else ""
     log.info(f"  OR# found (from PL text): {sum(1 for p in packages if p.or_number)}/{len(packages)}")
     log.info(f"  SO# found (from PL text): {sum(1 for p in packages if p.so_number)}/{len(packages)}")
     log.info(f"  Shipping Mark from PL text (not filename fallback): "
              f"{sum(1 for p in packages if p.shipping_mark_source not in ('', 'FILENAME_REFERENCE_CODE'))}/{len(packages)}")
+    n_country = sum(1 for p in packages if p.country)
+    log.info(f"  Country detected (Shipmark prefix): {n_country}/{len(packages)} "
+             f"({sorted({p.country for p in packages if p.country})})")
 
     # v11: business sort (natural _1/_2/... order + factory order) BEFORE
     # carton numbers are assigned -- numbering must never be computed first
