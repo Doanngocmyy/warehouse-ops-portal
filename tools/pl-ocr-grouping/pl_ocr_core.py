@@ -2128,7 +2128,8 @@ def _resolve_notify_party(packages: List[Package], is_cn: bool) -> str:
 
 
 # ── Workbook writer ────────────────────────────────────────────────────────
-def write_workbook(output_path: Path, packages: List[Package], run_meta: Optional[dict] = None):
+def write_workbook(output_path: Path, packages: List[Package], run_meta: Optional[dict] = None,
+    carton_display_field: str = "global_carton_num"):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -2156,7 +2157,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
             ws1.append([
                 item_no, pkg_or, pkg_so,                # Item# / OR No. / SO No.
                 "", "", "", "", "",                     # Product/SKU/Barcode/UOM/Qty (no items)
-                pkg.global_carton_num, pkg.package_code,
+                getattr(pkg, carton_display_field), pkg.package_code,
                 pkg.length, pkg.width, pkg.height,
                 pkg.weight, pkg.cbm,
                 origin, "", (pkg.shipping_mark or pkg.reference_code),  # HTS (manual) / Shipping Mark (v11: parsed label, else PDF filename)
@@ -2170,7 +2171,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     item_no, pkg_or, pkg_so,                          # Item# / OR No. / SO No.
                     item.product_name, item.product_code, item.barcode,
                     item.unit, item.quantity,
-                    pkg.global_carton_num, pkg.package_code,
+                    getattr(pkg, carton_display_field), pkg.package_code,
                     pkg.length, pkg.width, pkg.height,
                     pkg.weight, pkg.cbm,
                     origin, item.hs_code, (pkg.shipping_mark or pkg.reference_code),  # Shipping Mark (v11: parsed label, else PDF filename)
@@ -2646,7 +2647,8 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     }
     global LAST_RUN_META
     LAST_RUN_META = run_meta
-    write_workbook(output_path, packages, run_meta=run_meta)
+    write_workbook(output_path, packages, run_meta=run_meta,
+        carton_display_field="global_carton_display")
     return packages
 
 # ── Entry point ────────────────────────────────────────────────────────────
