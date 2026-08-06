@@ -414,6 +414,11 @@ class Package:
     # <normalized_store>", e.g. "OR:OR1016|KERRY" or "UPLOAD_BATCH|KERRY".
     counting_scope_key: str = ""
     counting_scope_source: str = ""  # OR_LIST_GROUPING | UPLOAD_BATCH_DEFAULT | ""
+    # Flat shipment-wide carton numbering used by PL_TOTAL only.
+    # Store PL/Sublist continue to use carton_display/global_carton_num.
+    global_carton_sequence: int = 0
+    global_carton_total: int = 0
+    global_carton_display: str = ""
     # v12: Store/OR/SO resolved against an (optional) OR List -- kept
     # separate from `store` (existing field, CN-only, filled by
     # classify_packages_for_port/match_store) and from or_number/so_number
@@ -1785,6 +1790,20 @@ def assign_global_numbers(packages: List[Package]):
         log.info(f"Carton numbers for scope {label!r}: 1/{total} ... {total}/{total}")
 
 # ── v8: CN store/port classification (same rule as pl_group_export.py) ─────
+def assign_true_global_numbers(packages: List[Package]):
+    """Assign flat 1/N..N/N numbering across the complete sorted shipment."""
+    total = len(packages)
+    for sequence, pkg in enumerate(packages, start=1):
+        pkg.global_carton_sequence = sequence
+        pkg.global_carton_total = total
+        pkg.global_carton_display = f"{sequence}/{total}" if total else ""
+    if total:
+        log.info(
+            f"Global (flat, shipment-wide) carton numbers: "
+            f"1/{total} ... {total}/{total}"
+        )
+
+
 def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recursive: bool):
     """Fill pkg.port / pkg.store for every CN-factory package, using the exact
     same detect_factory() + match_store() rule already used to split CN
@@ -2395,6 +2414,88 @@ TABLE_CFG = {
     "edge_min_length": 3, "min_words_vertical": 1,
 }
 
+_COUNTRY_SHIPMARK_RE = re.compile(
+    r"^(?:CN|KR|JP|BE|US|TW)[-_][A-Z0-9][A-Z0-9._-]{2,}$",
+    re.IGNORECASE,
+)
+
+_PDF_SHIPMARK_LABEL_PATTERNS = (
+    re.compile(
+        r"(?:M[aã]\s*tham\s*chi[eế]u|Ma\s*tham\s*chieu)"
+        r"\s*[:：]\s*"
+        r"((?:CN|KR|JP|BE|US|TW)[-_][A-Z0-9][A-Z0-9._-]{2,})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:Shipping\s*Mark|Shipmark|Reference\s*(?:Code|No\.?)?)"
+        r"\s*[:：]\s*"
+        r"((?:CN|KR|JP|BE|US|TW)[-_][A-Z0-9][A-Z0-9._-]{2,})",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _clean_pdf_shipmark(value: str) -> str:
+    value = (value or "").strip().upper()
+    value = re.sub(r"\s+", "", value)
+    return value.rstrip(".,;:|")
+
+
+def extract_shipping_mark_from_pdf_content(pdf_path: Path) -> Tuple[str, str, float]:
+    """Extract Shipmark from text inside the PDF, never from its filename."""
+    if not pdf_path or not pdf_path.exists():
+        return "", "", 0.0
+
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            page_texts = [(page.extract_text() or "") for page in pdf.pages]
+    except Exception as exc:
+        log.warning(f"Could not read PDF content for Shipmark: {pdf_path.name}: {exc}")
+        return "", "", 0.0
+
+    text = "\n".join(page_texts)
+
+    for index, pattern in enumerate(_PDF_SHIPMARK_LABEL_PATTERNS):
+        match = pattern.search(text)
+        if match:
+            value = _clean_pdf_shipmark(match.group(1))
+            if _COUNTRY_SHIPMARK_RE.fullmatch(value):
+                source = (
+                    "PDF_REFERENCE_FIELD"
+                    if index == 0
+                    else "PDF_SHIPPING_MARK_FIELD"
+                )
+                return value, source, 1.0
+
+    for raw_line in text.splitlines():
+        line = _clean_pdf_shipmark(raw_line)
+        if _COUNTRY_SHIPMARK_RE.fullmatch(line):
+            return line, "PDF_STANDALONE_CODE", 0.90
+
+    return "", "", 0.0
+
+
+def _find_source_pdf(
+    pl_folder: Path,
+    source_file: str,
+    recursive: bool,
+) -> Optional[Path]:
+    """Resolve source PDF by basename; do not infer business data."""
+    if not source_file:
+        return None
+
+    direct = pl_folder / source_file
+    if direct.exists():
+        return direct
+
+    iterator = pl_folder.rglob("*.pdf") if recursive else pl_folder.glob("*.pdf")
+    source_cf = source_file.casefold()
+    for candidate in iterator:
+        if candidate.name.casefold() == source_cf:
+            return candidate
+    return None
+
+
 def run_pipeline(pl_folder: Path, dim_xlsx: Path,
                  output_path: Optional[Path] = None,
                  dim_sheet: Optional[str] = None,
@@ -2499,8 +2600,27 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
         # a PDF-sourced value was used).
         pkg.filename_reference = pkg.reference_code
         if not pkg.shipping_mark:
+            _source_pdf = _find_source_pdf(
+                pl_folder, pkg.source_file, recursive
+            )
+            _pdf_mark, _pdf_source, _pdf_confidence = (
+                extract_shipping_mark_from_pdf_content(_source_pdf)
+                if _source_pdf else ("", "", 0.0)
+            )
+            if _pdf_mark:
+                pkg.shipping_mark = _pdf_mark
+                pkg.shipping_mark_source = _pdf_source
+                if hasattr(pkg, "shipping_mark_raw"):
+                    pkg.shipping_mark_raw = _pdf_mark
+                if hasattr(pkg, "shipping_mark_confidence"):
+                    pkg.shipping_mark_confidence = _pdf_confidence
+        if not pkg.shipping_mark:
             pkg.shipping_mark = pkg.reference_code
             pkg.shipping_mark_source = "FILENAME_REFERENCE_CODE"
+            if hasattr(pkg, "shipping_mark_raw"):
+                pkg.shipping_mark_raw = pkg.reference_code
+            if hasattr(pkg, "shipping_mark_confidence"):
+                pkg.shipping_mark_confidence = 0.20
         pkg.shipping_mark_raw = pkg.shipping_mark
         pkg.shipping_mark_confidence = resolve_shipping_mark_confidence(pkg.shipping_mark_source)
         # v14 (spec sections 2-3): country from the resolved Shipmark's
@@ -2597,6 +2717,7 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     # section 9), not as one flat sequence across the whole upload.
     assign_counting_scope_keys(packages)
     assign_global_numbers(packages)
+    assign_true_global_numbers(packages)
 
     matched = 0
     dim_mismatches: List[dict] = []
