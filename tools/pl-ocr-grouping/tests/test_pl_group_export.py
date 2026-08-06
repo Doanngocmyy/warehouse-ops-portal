@@ -227,9 +227,10 @@ _REAL_OR_ROWS = [
 
 
 def _real_or_index():
+    from collections import OrderedDict
     rows = [
         oli.OrListRow(row_number=i + 2, store_raw=store, store_norm="",
-                       or_raw=or_v, or_norm=or_v.upper(), so_raw=so_v, so_norm=so_v.upper())
+                       business_fields=OrderedDict([("OR No.", or_v), ("SO No.", so_v)]))
         for i, (store, or_v, so_v) in enumerate(_REAL_OR_ROWS)
     ]
     idx = {}
@@ -334,6 +335,82 @@ test("Store resolves identically for POP/VN/CN factories (v13 FIX4: not CN-only 
 test("an unconfigured short code is never silently guessed into a wrong store",
      t_unconfigured_short_code_never_silently_guessed)
 test("no OR List uploaded -> NO_OR_LIST status, never a crash", t_no_or_list_returns_no_or_list_status)
+
+
+# =========================================================================
+# v14 (spec section 4): expanded Store alias config -- KRY/KRYY/KER,
+# "Hang Zhou", "Guangzou", "I A P M", "Shenzen".
+# =========================================================================
+def t_kerry_short_code_aliases_kry_kryy_ker_all_resolve_unambiguously():
+    """KR/KRY/KRYY/KER are explicit shipping_mark_tokens (v14, spec section
+    4) -- resolved via match_store_and_or's SHIPMARK_TOKEN_EXACT tier,
+    same mechanism/test pattern as the pre-existing HZ/KR/GZ/SZ/IAPM test
+    above (match_store() itself doesn't consult shipping_mark_tokens at
+    all -- it's a separate, receiver/alias-substring-only matcher used only
+    for the CN-only classify_packages_for_port() path)."""
+    idx = _real_or_index()
+    for code in ("KR", "KRY", "KRYY", "KER"):
+        mark = f"CN-1529_{code}_PVG_POP"
+        m = pge.match_store_and_or(_FakePkg(shipping_mark=mark), idx)
+        assert m.status == "OK", f"{mark}: expected OK, got {m.status} ({m.review_reason})"
+        assert m.match_source == "SHIPMARK_TOKEN_EXACT"
+        assert m.matched_or == "po38071" and m.matched_so == "inv628038", (mark, m.matched_or, m.matched_so)
+
+
+def t_hangzhou_spaced_spelling_hang_zhou_resolves():
+    store, conf, _ = pge.match_store("20260609 CN - Hang Zhou Replen")
+    assert store == "HANGZHOU", (store, conf)
+
+
+def t_guangzhou_misspelling_guangzou_resolves():
+    store, conf, _ = pge.match_store("20260609 CN - Guangzou Parc Central Replen")
+    assert store == "GUANGZHOU", (store, conf)
+
+
+def t_iapm_spaced_letters_resolves():
+    idx = _real_or_index()
+    m = pge.match_store_and_or(_FakePkg(shipping_mark="CN-1529_I A P M_PVG_POP"), idx)
+    assert m.status == "OK", f"expected OK, got {m.status} ({m.review_reason})"
+    assert m.match_source == "SHIPMARK_TOKEN_EXACT"
+    assert m.matched_or == "po38072" and m.matched_so == "inv628039", (m.matched_or, m.matched_so)
+
+
+def t_shenzhen_misspelling_shenzen_resolves():
+    store, conf, _ = pge.match_store("20260609 CN - Shenzen Mixc City Replen")
+    assert store == "SHENZHEN", (store, conf)
+
+
+def t_expanded_aliases_never_create_cross_store_ambiguity_for_the_real_7_stores():
+    """Regression guard for the exact bug found while adding these aliases:
+    a naive addition of 'SH-Airport'/'SH-Taikooli' as free-text ALIASES
+    (STORE_MASTER "aliases" list, feeding match_store()'s receiver/alias-
+    substring lookup) created a shared bare 'SH' token ambiguous between
+    the two Shanghai stores. Every real compound Shipmark code must still
+    resolve cleanly through match_store_and_or (the exact-token matcher
+    used for actual Store resolution)."""
+    idx = _real_or_index()
+    cases = {
+        "CN-1529_SH-Airport_PVG_POP": "po38074",
+        "CN-1529_SH-Taikooli_PVG_POP": "po38076",
+    }
+    for mark, expected_or in cases.items():
+        m = pge.match_store_and_or(_FakePkg(shipping_mark=mark), idx)
+        assert m.status == "OK", f"{mark}: expected OK, got {m.status} ({m.review_reason})"
+        assert m.matched_or == expected_or, (mark, m.matched_or)
+
+
+test("Kerry short-code aliases KR/KRY/KRYY/KER all resolve unambiguously (spec section 4)",
+     t_kerry_short_code_aliases_kry_kryy_ker_all_resolve_unambiguously)
+test("Hangzhou spaced spelling 'Hang Zhou' resolves (spec section 4)",
+     t_hangzhou_spaced_spelling_hang_zhou_resolves)
+test("Guangzhou misspelling 'Guangzou' resolves (spec section 4)",
+     t_guangzhou_misspelling_guangzou_resolves)
+test("IAPM spaced-letter spelling 'I A P M' resolves via token-collapsing (spec section 4)",
+     t_iapm_spaced_letters_resolves)
+test("Shenzhen misspelling 'Shenzen' resolves (spec section 4)",
+     t_shenzhen_misspelling_shenzen_resolves)
+test("expanded alias config never creates cross-store ambiguity for the real compound Shipmark codes (regression guard)",
+     t_expanded_aliases_never_create_cross_store_ambiguity_for_the_real_7_stores)
 
 
 print(f"\n{_passed} passed, {_failed} failed")

@@ -836,7 +836,10 @@ def t_end_to_end_or_list_header_not_found_surfaces_distinctly_in_run_summary():
         wb = _oxl.Workbook()
         ws = wb.active
         ws.append(["Warehouse", "Reference", "Notes"])  # no STORE/OR aliases at all
-        ws.append(["A", "B", "C"])
+        # v14: a blank first cell on the data row denies even the new
+        # positional fallback tier (spec section 5) its "data continues
+        # under column A" signal -- this now genuinely stays unparseable.
+        ws.append(["", "B", "C"])
         wb.save(str(bad_or_list))
 
         result_ns = _run_full_module(pdf_dir, SYN_DIM, master_xlsx, td, or_list_path=bad_or_list)
