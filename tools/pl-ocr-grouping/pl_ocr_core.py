@@ -163,6 +163,40 @@ _ZERO_WIDTH_RE    = re.compile('[\u200B\u200C\u200D\u2060\uFEFF\xad]')
 _DASH_VARIANTS_RE = re.compile('[\u2010\u2011\u2012\u2013\u2014\u2015\uFFFE\uFFFF]')
 _NBSP_RE          = re.compile('[\xa0\u202f]')
 
+
+def _apply_requested_excel_view_preferences(workbook) -> None:
+    from openpyxl.styles import Alignment
+
+    target_headers = {"SKU#", "SHIPPING MARK"}
+
+    for worksheet in workbook.worksheets:
+        worksheet.freeze_panes = None
+
+        scan_rows = min(max(worksheet.max_row, 1), 30)
+        for row in worksheet.iter_rows(min_row=1, max_row=scan_rows):
+            for header_cell in row:
+                header = str(header_cell.value or "").strip().upper()
+                if header not in target_headers:
+                    continue
+
+                col_idx = header_cell.column
+                for col_cells in worksheet.iter_cols(
+                    min_col=col_idx,
+                    max_col=col_idx,
+                    min_row=header_cell.row,
+                    max_row=max(worksheet.max_row, header_cell.row),
+                ):
+                    for cell in col_cells:
+                        old = cell.alignment
+                        cell.alignment = Alignment(
+                            horizontal="left",
+                            vertical=old.vertical or "center",
+                            wrap_text=old.wrap_text,
+                            shrink_to_fit=old.shrink_to_fit,
+                            text_rotation=old.text_rotation,
+                        )
+
+
 def fix_unicode_artifacts(s) -> str:
     """Canonical Unicode cleanup shared by every code/reference normalizer:
     NFKC-fold, convert PDF-extraction dash artifacts (U+FFFE/U+FFFF, en/em
@@ -335,6 +369,11 @@ class Item:
     gtin_raw: str = ""
     source_page: Optional[int] = None
     gtin_valid: bool = False
+    # Master-data enrichment audit. Product name is replaced only when the
+    # same master name is independently confirmed by BOTH SKU and EAN.
+    product_name_raw: str = ""
+    product_name_source: str = "PL_PDF"
+    product_name_master_verified: bool = False
     dedup_key: Tuple = field(default=(), repr=False, compare=False)
 
     @property
@@ -583,8 +622,17 @@ def detect_shipment_country(shipmark: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-def _norm_label_cell(s: str) -> str:
-    return re.sub(r'[^A-Z0-9]', '', strip_accents(s).upper())
+def normalize_packaging_code(value: object) -> str:
+    """Return a stable, case-insensitive DIM lookup key for Packaging Code.
+
+    The raw value on Package is never changed.  Matching ignores letter case,
+    whitespace/newlines and Unicode extraction artefacts, but deliberately does
+    not fuzzy-correct characters such as O/0 or I/1.
+    """
+    if value is None:
+        return ""
+    value = fix_unicode_artifacts(value)
+    return re.sub(r"[^A-Z0-9]", "", str(value).upper())
 
 
 def match_metadata_label_line(line: str):
@@ -811,7 +859,7 @@ def parse_item_cells(cells: List[str], source_page: Optional[int] = None) -> Opt
                 barcode=barcode, unit=unit or "PCS", quantity=quantity,
                 parse_method="table", condition=condition, sku_raw=sku_raw,
                 gtin_raw=gtin_raw, source_page=source_page,
-                gtin_valid=is_valid_gtin13(barcode))
+                gtin_valid=is_valid_gtin13(barcode), product_name_raw=product_name)
 
 def parse_item_text(accumulated: str, source_page: Optional[int] = None) -> Optional[Item]:
     text = fix_unicode_artifacts(join_split_product_code(sanitize_ocr_cell(accumulated)))
@@ -872,7 +920,7 @@ def parse_item_text(accumulated: str, source_page: Optional[int] = None) -> Opti
                 barcode=barcode, unit=unit, quantity=quantity,
                 parse_method="text", condition=condition, sku_raw=sku_raw,
                 gtin_raw=barcode, source_page=source_page,
-                gtin_valid=is_valid_gtin13(barcode))
+                gtin_valid=is_valid_gtin13(barcode), product_name_raw=product_name)
 
 # ── Parser state machine ───────────────────────────────────────────────────
 class Parser:
@@ -1195,6 +1243,28 @@ class DimMapper:
         self._load(xlsx_path, sheet_name)
 
     # ── loading ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _normalize_product_name(value: str) -> str:
+        value = fix_unicode_artifacts(clean_excel_key(value))
+        return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _same_product_name(left: str, right: str) -> bool:
+        return norm_col_name(left) == norm_col_name(right) and bool(norm_col_name(left))
+
+    @staticmethod
+    def _put_unique_name(index: Dict[str, str], ambiguous: set,
+                         key: str, product_name: str) -> None:
+        if not key or not product_name or key in ambiguous:
+            return
+        previous = index.get(key)
+        if previous is None:
+            index[key] = product_name
+        elif not HsCodeMapper._same_product_name(previous, product_name):
+            # Conflicting master rows must never silently choose one name.
+            index.pop(key, None)
+            ambiguous.add(key)
+
     def _load(self, path: Path, sheet_name: Optional[str] = None):
         log.info(f"Loading DIM <- {path.name}")
         try:
@@ -1325,7 +1395,7 @@ class DimMapper:
                 ref_norm = last_ref or ""
             else:
                 last_ref = ref_norm
-            pkg_norm = normalize(str(raw_pkg)) if raw_pkg not in (None, "") else ""
+            pkg_norm = normalize_packaging_code(raw_pkg) if raw_pkg not in (None, "") else ""
             if not ref_norm or not pkg_norm or pkg_norm == "NAN":
                 continue  # blank row / spacer row, not malformed
             if method == "PARTIAL_HEADER_POSITIONAL" and pkg_col is not None:
@@ -1366,7 +1436,7 @@ class DimMapper:
                 self.malformed_rows += 1
                 self.diagnostics.append(self._diag(
                     sheet_name, r, "PACKAGE_CODE_POSITIONAL_FALLBACK", pkg_col,
-                    None, None, raw_pkg, normalize_code(str(raw_pkg)),
+                    None, None, raw_pkg, normalize_packaging_code(raw_pkg),
                     {}, None, None, "INSUFFICIENT_POSITIONAL_FIELDS"))
                 log.warning(f"  Row {r}: INSUFFICIENT_POSITIONAL_FIELDS "
                             f"(package code at col {pkg_col}, needs 5 cells after it, "
@@ -1390,7 +1460,7 @@ class DimMapper:
                 last_ref = ref_norm
             else:
                 ref_norm = last_ref or ""
-            pkg_norm = normalize_code(str(raw_pkg))
+            pkg_norm = normalize_packaging_code(raw_pkg)
             if not ref_norm:
                 self.malformed_rows += 1
                 self.diagnostics.append(self._diag(
@@ -1504,14 +1574,14 @@ class DimMapper:
 
     # ── lookup (used by run_pipeline) ────────────────────────────────────
     def lookup(self, ref: str, pkg: str) -> Optional[dict]:
-        key = f"{normalize(ref)}|{normalize(pkg)}"
+        key = f"{normalize(ref)}|{normalize_packaging_code(pkg)}"
         return self._data.get(key)
 
     def diagnose_miss(self, source_file: str, raw_ref: str, raw_pkg: str) -> dict:
         """Read-only diagnostic for a PDF package that found no exact DIM
         match: nearest reference/package candidates are for REVIEW ONLY --
         never used to auto-assign a DIM record (spec: no fuzzy auto-match)."""
-        ref_norm, pkg_norm = normalize(raw_ref), normalize(raw_pkg)
+        ref_norm, pkg_norm = normalize(raw_ref), normalize_packaging_code(raw_pkg)
         key = f"{ref_norm}|{pkg_norm}"
         nearest_ref = difflib.get_close_matches(ref_norm, self._known_refs, n=1, cutoff=0.6)
         nearest_pkg = difflib.get_close_matches(pkg_norm, self._known_pkgs, n=1, cutoff=0.6)
@@ -1551,6 +1621,13 @@ class HsCodeMapper:
         self._data_exact: Dict[str, str] = {}
         self._data_norm: Dict[str, str] = {}
         self._data_barcode: Dict[str, str] = {}
+        # Product-name indexes are intentionally separate from HS lookup.
+        # A name is trusted only when SKU and EAN independently resolve to
+        # the same normalized master name.
+        self._name_by_sku: Dict[str, str] = {}
+        self._name_by_barcode: Dict[str, str] = {}
+        self._ambiguous_name_skus: set = set()
+        self._ambiguous_name_barcodes: set = set()
         if master_path:
             self._load(master_path, sheet_name)
 
@@ -1591,7 +1668,7 @@ class HsCodeMapper:
             df = pd.read_excel(path, sheet_name=sheet, header=header_row_idx, dtype=str)
             df.columns = [clean_excel_key(c) for c in df.columns]
 
-            sku_col = hs_col = None
+            sku_col = hs_col = name_col = None
             barcode_cols: List[str] = []
             for c in df.columns:
                 n = norm_col_name(c)
@@ -1599,7 +1676,16 @@ class HsCodeMapper:
                     sku_col = c
                 if n == "HSCODE" or ("HS" in n and "CODE" in n):
                     hs_col = c
-                if n in {"EAN", "BARCODE", "UPC"} or "EAN" in n or "BARCODE" in n:
+                if n in {
+                    "PRODUCTNAME", "PRODUCTNAMEENGLISH", "ENGLISHNAME",
+                    "ITEMNAME", "DESCRIPTION", "PRODUCTDESCRIPTION",
+                    "TENHANG", "TENHANGHOA", "TENSANPHAM",
+                } or (
+                    ("PRODUCT" in n or "ITEM" in n) and
+                    ("NAME" in n or "DESCRIPTION" in n) and "CODE" not in n
+                ):
+                    name_col = c
+                if n in {"EAN", "BARCODE", "UPC", "GTIN"} or "EAN" in n or "BARCODE" in n or "GTIN" in n:
                     barcode_cols.append(c)
 
             if not sku_col or not hs_col:
@@ -1610,23 +1696,47 @@ class HsCodeMapper:
             for _, row in df.iterrows():
                 sku = clean_excel_key(row.get(sku_col))
                 hs = clean_excel_key(row.get(hs_col))
-                if not sku or not hs:
-                    continue
-                self._data_exact[sku] = hs
-                self._data_exact[sku.upper()] = hs
                 sku_norm = normalize_sku_key(sku)
-                if sku_norm:
-                    self._data_norm[sku_norm] = hs
+                barcodes = []
                 for bc in barcode_cols:
                     barcode = re.sub(r"\D", "", clean_excel_key(row.get(bc)))
                     if barcode:
+                        barcodes.append(barcode)
+
+                # Existing HS enrichment remains available by SKU or EAN.
+                if sku and hs:
+                    self._data_exact[sku] = hs
+                    self._data_exact[sku.upper()] = hs
+                    if sku_norm:
+                        self._data_norm[sku_norm] = hs
+                    for barcode in barcodes:
                         self._data_barcode[barcode] = hs
-                loaded += 1
+                    loaded += 1
+
+                # Product-name enrichment is conservative: indexes may be
+                # built independently, but lookup_product_name_verified()
+                # only returns a name when BOTH SKU and EAN agree.
+                product_name = self._normalize_product_name(
+                    row.get(name_col) if name_col else ""
+                )
+                if product_name:
+                    self._put_unique_name(
+                        self._name_by_sku, self._ambiguous_name_skus,
+                        sku_norm, product_name
+                    )
+                    for barcode in barcodes:
+                        self._put_unique_name(
+                            self._name_by_barcode,
+                            self._ambiguous_name_barcodes,
+                            barcode, product_name
+                        )
             log.info(f"  Sheet '{sheet}': loaded {loaded} HS Code records")
 
         log.info(
             f"  Total HS Code records: exact={len(self._data_exact)}, "
-            f"normalized={len(self._data_norm)}, barcode={len(self._data_barcode)}"
+            f"normalized={len(self._data_norm)}, barcode={len(self._data_barcode)}, "
+            f"verified-name SKU keys={len(self._name_by_sku)}, "
+            f"verified-name EAN keys={len(self._name_by_barcode)}"
         )
 
     def lookup(self, sku: str, barcode: str = "") -> str:
@@ -1641,6 +1751,24 @@ class HsCodeMapper:
         barcode_clean = re.sub(r"\D", "", clean_excel_key(barcode))
         if barcode_clean in self._data_barcode:
             return self._data_barcode[barcode_clean]
+        return ""
+
+    def lookup_product_name_verified(self, sku: str, barcode: str) -> str:
+        """Return master Product Name only when SKU and EAN agree exactly.
+
+        Missing/ambiguous/conflicting keys return "", so the original Product
+        Name parsed from the transport Packing List is preserved.
+        """
+        sku_key = normalize_sku_key(sku)
+        barcode_key = re.sub(r"\D", "", clean_excel_key(barcode))
+        if not sku_key or not barcode_key:
+            return ""
+        if sku_key in self._ambiguous_name_skus or barcode_key in self._ambiguous_name_barcodes:
+            return ""
+        by_sku = self._name_by_sku.get(sku_key, "")
+        by_ean = self._name_by_barcode.get(barcode_key, "")
+        if by_sku and by_ean and self._same_product_name(by_sku, by_ean):
+            return by_sku
         return ""
 
 # ── v11: business document/carton ordering ─────────────────────────────────
@@ -2234,7 +2362,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         ws1.row_dimensions[r].height = ws1.row_dimensions[r].height or 18
     for letter, width in PL_COL_WIDTHS.items():
         ws1.column_dimensions[letter].width = width
-    ws1.freeze_panes = f"A{FIRST_ITEM_ROW}"
+    ws1.freeze_panes = None
 
     # ── Match_Status (internal QC only — keeps color-coding on purpose) ─────
     ws2 = wb.create_sheet("Match_Status")
@@ -2268,7 +2396,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
             if fnt:
                 ws2.cell(row=i, column=c).font = fnt
     _auto_w(ws2)
-    ws2.freeze_panes = "A2"
+    ws2.freeze_panes = None
 
     # ── Raw_Data (spec section 12): one un-merged row per item, full audit
     # trail. Unlike the "Packing List" sheet above, nothing here is merged,
@@ -2279,6 +2407,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         "source_filename", "source_page", "reference_raw", "reference_normalized",
         "package_code_raw", "package_code_normalized", "package_sequence",
         "gtin", "gtin_valid_13digit", "sku_raw", "sku_normalized", "description",
+        "description_raw", "description_source", "description_master_verified",
         "uom", "condition", "quantity", "declared_total", "calculated_total",
         "package_validation_status", "dim_match_status", "dim_source_method",
         "length", "width", "height", "weight", "cbm", "diagnostic_reason",
@@ -2319,6 +2448,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     pkg.source_file, item.source_page, pkg.reference_code, normalize(pkg.reference_code),
                     pkg.package_code, normalize_code(pkg.package_code), pkg.pdf_package_seq,
                     item.barcode, item.gtin_valid, item.sku_raw, item.product_code, item.product_name,
+                    item.product_name_raw, item.product_name_source, item.product_name_master_verified,
                     item.unit, item.condition, item.quantity,
                     pkg.declared_total_qty, pkg.calc_qty,
                     pstatus, dim_status, pkg.dim_source_method,
@@ -2326,7 +2456,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     item.parse_method,
                 ] + diag_tail)
     _auto_w(ws3)
-    ws3.freeze_panes = "A2"
+    ws3.freeze_panes = None
 
     # ── Audit_Summary (spec section 12) ──────────────────────────────────
     ws4 = wb.create_sheet("Audit_Summary")
@@ -2386,6 +2516,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
     output_path = Path(output_path)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     try:
+        _apply_requested_excel_view_preferences(wb)
         wb.save(str(tmp_path))
     except PermissionError as e:
         raise PermissionError(
@@ -2735,6 +2866,8 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
 
     hs_matched = 0
     hs_total = 0
+    product_names_verified = 0
+    product_names_preserved = 0
     for pkg in packages:
         pkg_hs_codes = []
         for item in pkg.items:
@@ -2743,9 +2876,31 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
             if item.hs_code:
                 hs_matched += 1
                 pkg_hs_codes.append(item.hs_code)
+
+            # Use Master Product Name only when the SAME name is confirmed
+            # independently by both SKU and EAN. Otherwise preserve the
+            # original PDF/transport-list Product Name, including a mistaken
+            # SKU-looking value rather than replacing it with a blank.
+            original_name = item.product_name
+            verified_name = hs_mapper.lookup_product_name_verified(
+                item.product_code, item.barcode
+            )
+            if verified_name:
+                item.product_name_raw = item.product_name_raw or original_name
+                item.product_name = verified_name
+                item.product_name_source = "MASTER_SKU_EAN_VERIFIED"
+                item.product_name_master_verified = True
+                product_names_verified += 1
+            else:
+                item.product_name_raw = item.product_name_raw or original_name
+                item.product_name_source = "PL_PDF_PRESERVED"
+                item.product_name_master_verified = False
+                product_names_preserved += 1
         # For zero-item packages only, keep a carton-level fallback blank.
         pkg.hs_code = ", ".join(sorted(set(pkg_hs_codes))) if pkg_hs_codes else ""
     log.info(f"HS Code matched: {hs_matched}/{hs_total}")
+    log.info("Product Name enrichment: %s MASTER_SKU_EAN_VERIFIED, %s PL_PDF_PRESERVED",
+             product_names_verified, product_names_preserved)
 
     counts: Dict[str, int] = defaultdict(int)
     audit_counts: Dict[str, int] = defaultdict(int)

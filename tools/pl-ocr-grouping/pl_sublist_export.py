@@ -126,6 +126,40 @@ TEXT_FORMAT = "@"  # forces text storage -- no scientific notation, no leading-z
 # 2) Pure data model (spec section 11) -- never mutates the source package
 # =========================================================================
 @dataclass
+
+def _apply_requested_excel_view_preferences(workbook) -> None:
+    from openpyxl.styles import Alignment
+
+    target_headers = {"SKU#", "SHIPPING MARK"}
+
+    for worksheet in workbook.worksheets:
+        worksheet.freeze_panes = None
+
+        scan_rows = min(max(worksheet.max_row, 1), 30)
+        for row in worksheet.iter_rows(min_row=1, max_row=scan_rows):
+            for header_cell in row:
+                header = str(header_cell.value or "").strip().upper()
+                if header not in target_headers:
+                    continue
+
+                col_idx = header_cell.column
+                for col_cells in worksheet.iter_cols(
+                    min_col=col_idx,
+                    max_col=col_idx,
+                    min_row=header_cell.row,
+                    max_row=max(worksheet.max_row, header_cell.row),
+                ):
+                    for cell in col_cells:
+                        old = cell.alignment
+                        cell.alignment = Alignment(
+                            horizontal="left",
+                            vertical=old.vertical or "center",
+                            wrap_text=old.wrap_text,
+                            shrink_to_fit=old.shrink_to_fit,
+                            text_rotation=old.text_rotation,
+                        )
+
+
 class SublistItemRow:
     item_no: str
     ean: str
@@ -429,6 +463,7 @@ def generate_sublist_workbook(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     try:
+        _apply_requested_excel_view_preferences(wb)
         wb.save(str(tmp_path))
     except PermissionError as e:
         raise PermissionError(

@@ -64,6 +64,40 @@ except ImportError:  # pragma: no cover - pdfplumber is a hard dependency of the
 # =========================================================================
 # 1) Normalization helpers (self-contained — no dependency on the notebook)
 # =========================================================================
+
+def _apply_requested_excel_view_preferences(workbook) -> None:
+    from openpyxl.styles import Alignment
+
+    target_headers = {"SKU#", "SHIPPING MARK"}
+
+    for worksheet in workbook.worksheets:
+        worksheet.freeze_panes = None
+
+        scan_rows = min(max(worksheet.max_row, 1), 30)
+        for row in worksheet.iter_rows(min_row=1, max_row=scan_rows):
+            for header_cell in row:
+                header = str(header_cell.value or "").strip().upper()
+                if header not in target_headers:
+                    continue
+
+                col_idx = header_cell.column
+                for col_cells in worksheet.iter_cols(
+                    min_col=col_idx,
+                    max_col=col_idx,
+                    min_row=header_cell.row,
+                    max_row=max(worksheet.max_row, header_cell.row),
+                ):
+                    for cell in col_cells:
+                        old = cell.alignment
+                        cell.alignment = Alignment(
+                            horizontal="left",
+                            vertical=old.vertical or "center",
+                            wrap_text=old.wrap_text,
+                            shrink_to_fit=old.shrink_to_fit,
+                            text_rotation=old.text_rotation,
+                        )
+
+
 def _strip_accents(s: str) -> str:
     nfd = unicodedata.normalize("NFD", str(s or "").strip())
     return "".join(c for c in nfd if unicodedata.category(c) != "Mn").upper()
