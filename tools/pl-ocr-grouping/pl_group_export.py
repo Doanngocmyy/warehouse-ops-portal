@@ -784,13 +784,244 @@ def _or_row_kind(row) -> int:
     return 0
 
 
-def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") -> StoreOrMatchResult:
-    """Resolve Store -> OR -> SO from the uploaded OR List.
 
-    The first column is a Store source (often Memo), not necessarily a literal
-    Store-name column. Several Memo rows may legitimately belong to one Store.
-    Different SO values across those rows must not erase Store or consensus OR.
-    """
+
+
+# === KEC_SAFE_STORE_RESOLVER_V4 START ===
+
+_KEC_STORE_DISPLAY = {
+    "CHINA_WORLD": "China World NB1026",
+    "GUANGZHOU": "Guangzhou Central Parc",
+    "HANGZHOU": "Hangzhou Mixc",
+    "IAPM": "Iapm",
+    "KERRY": "Kerry Center flagship",
+    "SHANGHAI_HONGQIAO": "Shanghai Hongqiao Airport",
+    "SHANGHAI_TAIKOOLI": "Shanghai Taikooli (Shop B1-07b)",
+    "SHENZHEN": "Shenzhen Mixc City (Shop T228)",
+}
+
+_KEC_STORE_PORT = {
+    "CHINA_WORLD": "PEK",
+    "GUANGZHOU": "SZX",
+    "HANGZHOU": "PVG",
+    "IAPM": "PVG",
+    "KERRY": "PVG",
+    "SHANGHAI_HONGQIAO": "PVG",
+    "SHANGHAI_TAIKOOLI": "PVG",
+    "SHENZHEN": "SZX",
+}
+
+_KEC_STORE_ALIASES = {
+    "CHINA_WORLD": (
+        "CNWORLD", "CN WORLD", "CHINAWORLD", "CHINA WORLD",
+        "CHINA WORLD NB1026", "CNWORLD NB1026", "NB1026",
+    ),
+    "GUANGZHOU": (
+        "GZ", "GUANGZHOU", "GUANG ZHOU",
+        "GUANGZHOU CENTRAL PARC", "GUANGZHOU PARC CENTRAL",
+        "CENTRAL PARC", "PARC CENTRAL",
+    ),
+    "HANGZHOU": (
+        "HZ", "HANGZHOU", "HANG ZHOU",
+        "HANGZHOU MIXC", "HANGZHOU MIX C", "MIXC HANGZHOU",
+    ),
+    "IAPM": ("IAPM", "IAPM SHANGHAI"),
+    "KERRY": (
+        "KR", "KERRY", "KERY",
+        "KERRY CENTER", "KERRY CENTRE",
+        "KERRY CENTER FLAGSHIP", "KERRY CENTRE FLAGSHIP",
+    ),
+    "SHANGHAI_HONGQIAO": (
+        "SH AIRPORT", "SHAIRPORT", "SH HONGQIAO", "SHHONGQIAO",
+        "HONGQIAO", "HONGQIAO AIRPORT",
+        "SHANGHAI HONGQIAO", "SHANGHAI HONGQIAO AIRPORT",
+    ),
+    "SHANGHAI_TAIKOOLI": (
+        "SH TAIKOOLI", "SHTAIKOOLI", "SH TAIKOO LI",
+        "TAIKOOLI", "TAIKOO LI", "TAIKOLI",
+        "SHANGHAI TAIKOOLI",
+    ),
+    "SHENZHEN": (
+        "SZ", "SHENZHEN", "SHEN ZHEN",
+        "SHENZHEN MIXC", "SHENZHEN MIXC CITY",
+        "MIXC CITY SHENZHEN", "T228",
+    ),
+}
+
+_KEC_SHORT_ALIASES = {"GZ", "HZ", "KR", "SZ"}
+_KEC_PORTS = {"PEK", "PVG", "SZX", "TFU"}
+_KEC_GENERIC_TOKENS = {
+    "CN", "TOPOLOGIE", "SHOP", "MALL", "REPLEN", "MATERIAL",
+    "EXTRA", "STRAPS", "STRAP", "FLAGSHIP",
+    "PEK", "PVG", "SZX", "TFU", "VN", "POP",
+}
+
+def _kec_words(value: str):
+    raw = str(value or "").upper()
+    raw = re.sub(r"(?<![A-Z0-9])KERY(?![A-Z0-9])", "KERRY", raw)
+    return re.findall(r"[A-Z0-9]+", raw)
+
+def _kec_is_cn_signal(value: str) -> bool:
+    return "CN" in set(_kec_words(value))
+
+def _kec_signal_port(value: str):
+    ports = [t for t in _kec_words(value) if t in _KEC_PORTS]
+    return ports[0] if len(set(ports)) == 1 else None
+
+def _kec_port_ok(store_key: str, signal: str) -> bool:
+    seen = _kec_signal_port(signal)
+    return True if not seen else seen == _KEC_STORE_PORT.get(store_key)
+
+def _kec_damerau_le1(a: str, b: str) -> bool:
+    a = str(a or "").upper()
+    b = str(b or "").upper()
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+
+    if len(a) == len(b):
+        diffs = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(diffs) == 1:
+            return True
+        if len(diffs) == 2:
+            i, j = diffs
+            return j == i + 1 and a[i] == b[j] and a[j] == b[i]
+        return False
+
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    i = j = edits = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+            j += 1
+        else:
+            edits += 1
+            j += 1
+            if edits > 1:
+                return False
+    return True
+
+def _kec_exact_alias_score(store_key: str, signal: str, alias: str) -> int:
+    if not _kec_port_ok(store_key, signal):
+        return 0
+
+    words = _kec_words(signal)
+    aw = _kec_words(alias)
+    if not words or not aw:
+        return 0
+
+    word_set = set(words)
+    compact = "".join(words)
+    acompact = "".join(aw)
+
+    if len(aw) == 1 and aw[0] in _KEC_SHORT_ALIASES:
+        if not _kec_is_cn_signal(signal):
+            return 0
+        return 5000 if aw[0] in word_set else 0
+
+    if len(aw) == 1 and aw[0] in {"NB1026", "T228"}:
+        return 4800 if aw[0] in word_set else 0
+
+    if acompact and acompact in compact:
+        return 4000 + len(acompact)
+
+    meaningful = [x for x in aw if x not in _KEC_GENERIC_TOKENS]
+    if meaningful and all(x in word_set for x in meaningful):
+        return 3000 + sum(len(x) for x in meaningful)
+
+    return 0
+
+def _kec_typo_score(store_key: str, signal: str) -> int:
+    if not _kec_is_cn_signal(signal):
+        return 0
+    if not _kec_port_ok(store_key, signal):
+        return 0
+
+    signal_tokens = [
+        t for t in _kec_words(signal)
+        if len(t) >= 4 and t not in _KEC_GENERIC_TOKENS and not t.isdigit()
+    ]
+    if not signal_tokens:
+        return 0
+
+    alias_tokens = set()
+    for alias in _KEC_STORE_ALIASES[store_key]:
+        aw = _kec_words(alias)
+        if len(aw) == 1 and aw[0] in _KEC_SHORT_ALIASES:
+            continue
+        for t in aw:
+            if len(t) >= 4 and t not in _KEC_GENERIC_TOKENS and not t.isdigit():
+                alias_tokens.add(t)
+
+    hits = []
+    for st in signal_tokens:
+        for at in alias_tokens:
+            if _kec_damerau_le1(st, at):
+                hits.append((st, at))
+
+    if not hits:
+        return 0
+    return 1000 + max(max(len(a), len(b)) for a, b in hits)
+
+def _kec_resolve_store_identity(value: str):
+    if not value:
+        return None
+
+    exact_scores = {}
+    for key, aliases in _KEC_STORE_ALIASES.items():
+        best = max((_kec_exact_alias_score(key, value, a) for a in aliases), default=0)
+        if best:
+            exact_scores[key] = best
+
+    if exact_scores:
+        top = max(exact_scores.values())
+        winners = [k for k, v in exact_scores.items() if v == top]
+        return winners[0] if len(winners) == 1 else None
+
+    typo_scores = {}
+    for key in _KEC_STORE_ALIASES:
+        score = _kec_typo_score(key, value)
+        if score:
+            typo_scores[key] = score
+
+    if not typo_scores:
+        return None
+
+    top = max(typo_scores.values())
+    winners = [k for k, v in typo_scores.items() if v == top]
+    return winners[0] if len(winners) == 1 else None
+
+def _kec_store_name_from_memo(raw_value: str) -> str:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return ""
+
+    hits = list(re.finditer(r"(?i)\bCN\s*-\s*", raw))
+    if hits:
+        raw = raw[hits[-1].end():].strip()
+
+    raw = re.sub(r"^\s*\d{6,8}\s+", "", raw).strip()
+    raw = re.split(
+        r"(?i)\s+(?:REPLEN\b|REP(?=\d{6,8}\b))",
+        raw,
+        maxsplit=1,
+    )[0]
+    return re.sub(r"\s+", " ", raw).strip(" -_/")
+
+def _kec_or_row_kind(row) -> int:
+    memo = str(getattr(row, "store_raw", "") or "").upper()
+    if "EXTRA STRAP" in memo:
+        return 2
+    if "MATERIAL" in memo:
+        return 1
+    return 0
+
+# === KEC_SAFE_STORE_RESOLVER_V4 END ===
+
+
+
+def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") -> StoreOrMatchResult:
     result = StoreOrMatchResult()
     if not or_index:
         result.status = "NO_OR_LIST"
@@ -802,92 +1033,94 @@ def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") 
         return result
 
     identity_to_rows: Dict[str, list] = {}
-    for r in all_rows:
-        identity = _canonical_store_identity_for_or_row(r.store_raw)
-        identity_to_rows.setdefault(identity, []).append(r)
+    for row in all_rows:
+        memo_store = _kec_store_name_from_memo(getattr(row, "store_raw", ""))
+        identity = _kec_resolve_store_identity(memo_store)
+        if identity:
+            identity_to_rows.setdefault(identity, []).append(row)
 
-    store_values = [r.store_raw for r in all_rows]
-    token_idx = _store_alias_token_index(store_values)
     store_identity = None
-
-    for text, source in (
-        (getattr(pkg, "shipping_mark", ""), "SHIPMARK_TOKEN_EXACT"),
-        (getattr(pkg, "reference_code", ""), "FILENAME_TOKEN_EXACT"),
-        (receiver_text, "RECEIVER_TEXT_EXACT"),
+    match_source = ""
+    for signal, source in (
+        (getattr(pkg, "shipping_mark", ""), "SHIPMARK_SAFE_ALIAS"),
+        (getattr(pkg, "reference_code", ""), "FILENAME_SAFE_ALIAS"),
+        (receiver_text, "RECEIVER_SAFE_ALIAS"),
     ):
-        if not text:
-            continue
-        hit, ambiguous = _exact_token_store_match(text, token_idx)
-        if hit:
-            store_identity, result.match_source = hit, source
+        identity = _kec_resolve_store_identity(signal)
+        if identity and identity in identity_to_rows:
+            store_identity = identity
+            match_source = source
             break
-        if ambiguous:
-            result.status = "REVIEW"
-            result.review_reason = f"Ambiguous store token match in {source}: candidates={ambiguous}"
-            result.candidate_store = "/".join(sorted(ambiguous))
-            return result
 
     if not store_identity:
-        signal = " ".join(t for t in (
-            getattr(pkg, "shipping_mark", ""),
-            getattr(pkg, "reference_code", ""),
-            receiver_text,
-        ) if t)
-        cand, score, suggestion = _fuzzy_match_against_candidates(signal, store_values)
-        if cand == "REVIEW" or not cand:
-            result.status = "REVIEW"
-            result.review_reason = "No confident Store match (exact-token and fuzzy both failed)."
-            result.candidate_store = suggestion
-            result.candidate_score = score
-            return result
-        store_identity = _canonical_store_identity_for_or_row(cand)
-        result.match_source = "FUZZY"
-        result.candidate_score = score
+        result.status = "REVIEW"
+        result.review_reason = "No unique safe Store match from Shipping Mark / filename / receiver."
+        return result
 
     store_rows = identity_to_rows.get(store_identity, [])
     if not store_rows:
         result.status = "REVIEW"
-        result.review_reason = f"Store identity {store_identity!r} matched, but no OR List rows canonicalize to it."
-        result.candidate_store = store_identity
+        result.review_reason = f"Store {store_identity!r} resolved but no OR-list rows were indexed."
+        result.candidate_store = _KEC_STORE_DISPLAY.get(store_identity, store_identity)
         return result
 
-    ordered_rows = sorted(store_rows, key=lambda r: (_or_row_kind(r), getattr(r, "row_number", 0)))
-    base_row = ordered_rows[0]
-    result.matched_store = _store_name_from_or_memo(
-        getattr(base_row, "store_raw", ""), canonical_identity=store_identity
+    ordered_rows = sorted(
+        store_rows,
+        key=lambda r: (_kec_or_row_kind(r), getattr(r, "row_number", 0)),
     )
+    base_row = ordered_rows[0]
+
+    result.matched_store = _KEC_STORE_DISPLAY.get(store_identity, store_identity)
+    result.match_source = match_source
 
     labels = []
     for r in ordered_rows:
-        fields = getattr(r, "business_fields", {}) or {}
-        for label in fields.keys():
+        for label in (getattr(r, "business_fields", {}) or {}).keys():
             if label not in labels:
                 labels.append(label)
 
-    from collections import OrderedDict
-    resolved_fields = OrderedDict()
+    try:
+        from collections import OrderedDict
+        resolved_fields = OrderedDict()
+    except Exception:
+        resolved_fields = {}
+
     for label in labels:
-        values = []
+        base_value = str(
+            (getattr(base_row, "business_fields", {}) or {}).get(label, "") or ""
+        ).strip()
+
+        unique = []
         for r in ordered_rows:
-            v = str((getattr(r, "business_fields", {}) or {}).get(label, "") or "").strip()
-            if v and v not in values:
-                values.append(v)
-        if len(values) == 1:
-            resolved = values[0]
-        elif len(values) > 1:
-            resolved = str((getattr(base_row, "business_fields", {}) or {}).get(label, "") or "").strip()
-            if not resolved:
-                resolved = values[0]
+            v = str(
+                (getattr(r, "business_fields", {}) or {}).get(label, "") or ""
+            ).strip()
+            if v and v not in unique:
+                unique.append(v)
+
+        if len(unique) == 1:
+            resolved_fields[label] = unique[0]
+        elif base_value:
+            resolved_fields[label] = base_value
         else:
-            resolved = ""
-        resolved_fields[label] = resolved
+            resolved_fields[label] = unique[0] if unique else ""
 
     result.matched_business_fields = resolved_fields
     vals = list(resolved_fields.values())
-    result.matched_or = vals[0] if len(vals) >= 1 else getattr(base_row, "or_raw", "")
-    result.matched_so = vals[1] if len(vals) >= 2 else getattr(base_row, "so_raw", "")
+
+    result.matched_or = (
+        vals[0] if len(vals) >= 1
+        else str(getattr(base_row, "or_raw", "") or "").strip()
+    )
+    result.matched_so = (
+        vals[1] if len(vals) >= 2
+        else str(getattr(base_row, "so_raw", "") or "").strip()
+    )
     result.status = "OK"
     return result
+
+
+
 
 
 
