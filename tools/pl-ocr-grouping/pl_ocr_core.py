@@ -1243,28 +1243,6 @@ class DimMapper:
         self._load(xlsx_path, sheet_name)
 
     # ── loading ──────────────────────────────────────────────────────────
-    @staticmethod
-    def _normalize_product_name(value: str) -> str:
-        value = fix_unicode_artifacts(clean_excel_key(value))
-        return re.sub(r"\s+", " ", value).strip()
-
-    @staticmethod
-    def _same_product_name(left: str, right: str) -> bool:
-        return norm_col_name(left) == norm_col_name(right) and bool(norm_col_name(left))
-
-    @staticmethod
-    def _put_unique_name(index: Dict[str, str], ambiguous: set,
-                         key: str, product_name: str) -> None:
-        if not key or not product_name or key in ambiguous:
-            return
-        previous = index.get(key)
-        if previous is None:
-            index[key] = product_name
-        elif not HsCodeMapper._same_product_name(previous, product_name):
-            # Conflicting master rows must never silently choose one name.
-            index.pop(key, None)
-            ambiguous.add(key)
-
     def _load(self, path: Path, sheet_name: Optional[str] = None):
         log.info(f"Loading DIM <- {path.name}")
         try:
@@ -1630,6 +1608,31 @@ class HsCodeMapper:
         self._ambiguous_name_barcodes: set = set()
         if master_path:
             self._load(master_path, sheet_name)
+
+    @staticmethod
+    def _normalize_product_name(value: str) -> str:
+        """Normalize a Master Data product name for conservative comparison."""
+        value = fix_unicode_artifacts(clean_excel_key(value))
+        return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _same_product_name(left: str, right: str) -> bool:
+        left_norm = norm_col_name(left)
+        right_norm = norm_col_name(right)
+        return bool(left_norm) and left_norm == right_norm
+
+    @staticmethod
+    def _put_unique_name(index: Dict[str, str], ambiguous: set,
+                         key: str, product_name: str) -> None:
+        """Index only unambiguous keys; conflicting Master rows are rejected."""
+        if not key or not product_name or key in ambiguous:
+            return
+        previous = index.get(key)
+        if previous is None:
+            index[key] = product_name
+        elif not HsCodeMapper._same_product_name(previous, product_name):
+            index.pop(key, None)
+            ambiguous.add(key)
 
     def _load(self, path: Path, sheet_name: Optional[str] = None):
         if not path or not path.exists():
