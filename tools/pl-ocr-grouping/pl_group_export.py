@@ -758,46 +758,61 @@ def _fuzzy_match_against_candidates(signal_text: str, candidates, threshold: flo
     return best_cand, round(best_score, 3), ""
 
 
+
+def _store_name_from_or_memo(raw_value: str, canonical_identity: str = "") -> str:
+    """Extract a human-readable Store name from the OR List first/Memo column."""
+    raw = str(raw_value or "").strip()
+    if raw:
+        hits = list(re.finditer(r"(?i)\bCN\s*-\s*", raw))
+        if hits:
+            raw = raw[hits[-1].end():].strip()
+        raw = re.sub(r"^\s*\d{6,8}\s+", "", raw).strip()
+        raw = re.split(r"(?i)\s+(?:REPLEN\b|REP(?=\d{6,8}\b))", raw, maxsplit=1)[0].strip()
+        raw = re.sub(r"\s+", " ", raw).strip(" -_/")
+        if raw:
+            return raw
+    return str(canonical_identity or "").strip()
+
+
+def _or_row_kind(row) -> int:
+    """Normal Replen first, then Material, then Extra Straps."""
+    memo = str(getattr(row, "store_raw", "") or "").upper()
+    if "MATERIAL" in memo:
+        return 1
+    if "EXTRA STRAP" in memo:
+        return 2
+    return 0
+
+
 def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") -> StoreOrMatchResult:
-    """Resolve Store (and its OR/SO) for `pkg` against an OR List already
-    loaded into `or_index` (pl_or_list_import.build_or_index() -- or_norm ->
-    [OrListRow, ...]). Priority (spec section 5):
-      1) exact store-alias TOKEN in Shipmark
-      2) exact store-alias TOKEN in filename/reference_code
-      3) exact store name TOKEN in receiver/consignee text
-      4) conservative fuzzy fallback across the OR List's own store names
-    Exact token matching always wins over fuzzy. Returns status=REVIEW
-    (never a guess) on any conflict: ambiguous token, multiple store
-    candidates, or an OR value that maps to more than one Store in the OR
-    List itself."""
+    """Resolve Store -> OR -> SO from the uploaded OR List.
+
+    The first column is a Store source (often Memo), not necessarily a literal
+    Store-name column. Several Memo rows may legitimately belong to one Store.
+    Different SO values across those rows must not erase Store or consensus OR.
+    """
     result = StoreOrMatchResult()
     if not or_index:
         result.status = "NO_OR_LIST"
         return result
 
     all_rows = [r for rows in or_index.values() for r in rows]
-    store_values = sorted({r.store_raw for r in all_rows})
-    # v13 (FIX2): key identity_to_raw by the CANONICAL store identity (via
-    # _canonical_store_identity_for_or_row), not the raw literal OR List
-    # text -- otherwise a Shipmark match resolved to canonical "GUANGZHOU"
-    # (via the explicit "GZ" shipping_mark_tokens alias) could never find
-    # its way back to the OR List's own raw row text, which is keyed by the
-    # full free-text description, not the canonical enum name.
-    identity_to_raw: Dict[str, set] = {}
-    for r in all_rows:
-        identity_to_raw.setdefault(_canonical_store_identity_for_or_row(r.store_raw), set()).add(r.store_raw)
-    token_idx = _store_alias_token_index(store_values)
+    if not all_rows:
+        result.status = "NO_OR_LIST"
+        return result
 
+    identity_to_rows: Dict[str, list] = {}
+    for r in all_rows:
+        identity = _canonical_store_identity_for_or_row(r.store_raw)
+        identity_to_rows.setdefault(identity, []).append(r)
+
+    store_values = [r.store_raw for r in all_rows]
+    token_idx = _store_alias_token_index(store_values)
     store_identity = None
-    # NOTE: in production pkg.shipping_mark is already resolved to
-    # pkg.reference_code as a fallback upstream (run_pipeline(), v11) when
-    # no explicit Shipping Mark label was found in the PL text, so this
-    # first tier effectively also covers "no distinct Shipmark" cases; the
-    # reference_code tier below still runs independently for a pure/testable
-    # function that doesn't assume that upstream resolution already happened.
+
     for text, source in (
-        (pkg.shipping_mark, "SHIPMARK_TOKEN_EXACT"),
-        (pkg.reference_code, "FILENAME_TOKEN_EXACT"),
+        (getattr(pkg, "shipping_mark", ""), "SHIPMARK_TOKEN_EXACT"),
+        (getattr(pkg, "reference_code", ""), "FILENAME_TOKEN_EXACT"),
         (receiver_text, "RECEIVER_TEXT_EXACT"),
     ):
         if not text:
@@ -813,7 +828,11 @@ def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") 
             return result
 
     if not store_identity:
-        signal = " ".join(t for t in (pkg.shipping_mark, pkg.reference_code, receiver_text) if t)
+        signal = " ".join(t for t in (
+            getattr(pkg, "shipping_mark", ""),
+            getattr(pkg, "reference_code", ""),
+            receiver_text,
+        ) if t)
         cand, score, suggestion = _fuzzy_match_against_candidates(signal, store_values)
         if cand == "REVIEW" or not cand:
             result.status = "REVIEW"
@@ -821,51 +840,55 @@ def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") 
             result.candidate_store = suggestion
             result.candidate_score = score
             return result
-        store_identity, result.match_source, result.candidate_score = _store_identity(cand), "FUZZY", score
+        store_identity = _canonical_store_identity_for_or_row(cand)
+        result.match_source = "FUZZY"
+        result.candidate_score = score
 
-    # Map the matched (normalized) store identity back onto the OR List's
-    # own raw store spelling(s) that share it -- this is what the OR List's
-    # rows are actually keyed by.
-    raw_candidates = identity_to_raw.get(store_identity)
-    if not raw_candidates:
-        result.status = "REVIEW"
-        result.review_reason = f"Store identity '{store_identity}' matched via {result.match_source}, " \
-                                f"but has no corresponding row in the OR List (only in STORE_MASTER)."
-        result.candidate_store = store_identity
-        return result
-    if len(raw_candidates) > 1:
-        result.status = "REVIEW"
-        result.review_reason = f"Store identity '{store_identity}' spelled multiple ways in the OR List: " \
-                                f"{sorted(raw_candidates)}"
-        result.candidate_store = "/".join(sorted(raw_candidates))
-        return result
-    store = next(iter(raw_candidates))
-
-    # Now resolve OR/SO for that store from the OR List.
-    store_rows = [r for r in all_rows if r.store_raw == store]
+    store_rows = identity_to_rows.get(store_identity, [])
     if not store_rows:
         result.status = "REVIEW"
-        result.review_reason = f"Store '{store}' matched, but has no row in the OR List."
-        result.candidate_store = store
+        result.review_reason = f"Store identity {store_identity!r} matched, but no OR List rows canonicalize to it."
+        result.candidate_store = store_identity
         return result
 
-    # v14: compare the FULL business_fields tuple (not just the 1st field)
-    # -- two rows for the same store are only truly consistent if every
-    # dynamic field agrees, not just the field this code used to call "OR".
-    distinct_field_sets = {tuple(r.business_fields.items()) for r in store_rows}
-    if len(distinct_field_sets) > 1:
-        result.status = "REVIEW"
-        result.review_reason = f"Store '{store}' has multiple different business-field values in the OR List: "                                 f"{[dict(fs) for fs in sorted(distinct_field_sets, key=str)]}"
-        result.candidate_store = store
-        return result
+    ordered_rows = sorted(store_rows, key=lambda r: (_or_row_kind(r), getattr(r, "row_number", 0)))
+    base_row = ordered_rows[0]
+    result.matched_store = _store_name_from_or_memo(
+        getattr(base_row, "store_raw", ""), canonical_identity=store_identity
+    )
 
-    row = store_rows[0]
-    result.matched_store = store
-    result.matched_business_fields = OrderedDict(row.business_fields)
-    result.matched_or = row.or_raw
-    result.matched_so = row.so_raw
+    labels = []
+    for r in ordered_rows:
+        fields = getattr(r, "business_fields", {}) or {}
+        for label in fields.keys():
+            if label not in labels:
+                labels.append(label)
+
+    from collections import OrderedDict
+    resolved_fields = OrderedDict()
+    for label in labels:
+        values = []
+        for r in ordered_rows:
+            v = str((getattr(r, "business_fields", {}) or {}).get(label, "") or "").strip()
+            if v and v not in values:
+                values.append(v)
+        if len(values) == 1:
+            resolved = values[0]
+        elif len(values) > 1:
+            resolved = str((getattr(base_row, "business_fields", {}) or {}).get(label, "") or "").strip()
+            if not resolved:
+                resolved = values[0]
+        else:
+            resolved = ""
+        resolved_fields[label] = resolved
+
+    result.matched_business_fields = resolved_fields
+    vals = list(resolved_fields.values())
+    result.matched_or = vals[0] if len(vals) >= 1 else getattr(base_row, "or_raw", "")
+    result.matched_so = vals[1] if len(vals) >= 2 else getattr(base_row, "so_raw", "")
     result.status = "OK"
     return result
+
 
 
 # =========================================================================
