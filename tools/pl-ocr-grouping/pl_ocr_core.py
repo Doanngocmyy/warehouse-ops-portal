@@ -627,6 +627,34 @@ def _norm_label_cell(s: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", strip_accents(str(s or "")).upper())
 
 
+def normalize_dim_reference(value: object) -> str:
+    """Return a stable DIM reference key.
+
+    Matching remains strict/case-insensitive through the existing normalize()
+    function.  Only confirmed business-master aliases are canonicalized here.
+
+    Confirmed production typo:
+        CN-2587_Kery_PVG_*  -> CN-2587_Kerry_PVG_*
+
+    This is deliberately NOT fuzzy matching.
+    """
+    if value is None:
+        return ""
+
+    raw = fix_unicode_artifacts(value)
+    raw = str(raw).strip()
+
+    # Canonicalize KERY only when it is a complete delimited token.
+    # Do not globally fuzzy-correct arbitrary reference text.
+    raw = re.sub(
+        r"(?i)(^|[_\-\s])KERY(?=([_\-\s]|$))",
+        lambda m: m.group(1) + "KERRY",
+        raw,
+    )
+
+    return normalize(raw)
+
+
 def normalize_packaging_code(value: object) -> str:
     """Return a stable, case-insensitive DIM lookup key for Packaging Code.
 
@@ -1557,14 +1585,14 @@ class DimMapper:
 
     # ── lookup (used by run_pipeline) ────────────────────────────────────
     def lookup(self, ref: str, pkg: str) -> Optional[dict]:
-        key = f"{normalize(ref)}|{normalize_packaging_code(pkg)}"
+        key = f"{normalize_dim_reference(ref)}|{normalize_packaging_code(pkg)}"
         return self._data.get(key)
 
     def diagnose_miss(self, source_file: str, raw_ref: str, raw_pkg: str) -> dict:
         """Read-only diagnostic for a PDF package that found no exact DIM
         match: nearest reference/package candidates are for REVIEW ONLY --
         never used to auto-assign a DIM record (spec: no fuzzy auto-match)."""
-        ref_norm, pkg_norm = normalize(raw_ref), normalize_packaging_code(raw_pkg)
+        ref_norm, pkg_norm = normalize_dim_reference(raw_ref), normalize_packaging_code(raw_pkg)
         key = f"{ref_norm}|{pkg_norm}"
         nearest_ref = difflib.get_close_matches(ref_norm, self._known_refs, n=1, cutoff=0.6)
         nearest_pkg = difflib.get_close_matches(pkg_norm, self._known_pkgs, n=1, cutoff=0.6)
