@@ -2861,7 +2861,16 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     matched = 0
     dim_mismatches: List[dict] = []
     for pkg in packages:
-        d = dim.lookup(pkg.reference_code, pkg.package_code)
+        # DIM identity must come from the Shipping Mark parsed from PDF content.
+        # reference_code is the filename stem and is only a last-resort fallback.
+        # Example:
+        #   filename:      CN-1529_SH-Airport_PVG_CN v.pdf
+        #   PDF shipmark:  CN-1529_SH-Airport_PVG_CN
+        # DIM must therefore match on the PDF shipmark, never the trailing
+        # filename-only " v" when a real Shipping Mark was successfully parsed.
+        dim_reference = (pkg.shipping_mark or pkg.reference_code or "").strip()
+
+        d = dim.lookup(dim_reference, pkg.package_code)
         if d:
             pkg.length, pkg.width, pkg.height = d["length"], d["width"], d["height"]
             pkg.weight, pkg.cbm = d["weight"], d["cbm"]
@@ -2869,7 +2878,13 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
             pkg.dim_source_method = dim.detection_method
             matched += 1
         else:
-            dim_mismatches.append(dim.diagnose_miss(pkg.source_file, pkg.reference_code, pkg.package_code))
+            dim_mismatches.append(
+                dim.diagnose_miss(
+                    pkg.source_file,
+                    dim_reference,
+                    pkg.package_code,
+                )
+            )
     log.info(f"DIM matched: {matched}/{len(packages)}")
 
     hs_matched = 0
