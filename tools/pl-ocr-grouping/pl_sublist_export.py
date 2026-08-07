@@ -158,6 +158,7 @@ def _apply_requested_excel_view_preferences(workbook) -> None:
                         )
 
 
+@dataclass
 class SublistItemRow:
     item_no: str
     ean: str
