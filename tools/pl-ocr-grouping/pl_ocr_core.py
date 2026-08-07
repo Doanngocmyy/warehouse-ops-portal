@@ -109,6 +109,16 @@ VN_KEYWORDS  = {"POP", "JION", "QIFENG", "SBGEAR", "SB_GEAR"}
 TABLE_HDR_KW = {"stt","barcode","ma vach","ma hang","ten hang",
                 "don vi","so luong","tinh trang","condition","quantity"}
 
+# Material / packing-supply SKU families confirmed by business rule.
+# IMPORTANT: source data uses TP-PLB-* and TP-PKG-* (not TP-PBL/TP-PGK).
+# These rows are valid without EAN and must be preserved from the Packing List
+# exactly as parsed; Master Data is not allowed to overwrite/filter them.
+MATERIAL_SKU_PREFIXES = ("TP-PLB-", "TP-PKG-")
+RE_MATERIAL_UOM = re.compile(
+    r'^(?:CARTON|CTN|PACK|BOX|BAG|PCS)(?:[_\-][A-Z0-9]+)*$',
+    re.IGNORECASE,
+)
+
 RE_PKG_HEADER = re.compile(
     r'(?:M[aã]\s*ki[eệ]n\s*h[aà]ng\s*[:\-]?\s*)?'
     r'(PGKEC[A-Z0-9]{5,})'
@@ -227,6 +237,26 @@ def normalize_code(text) -> str:
     text = fix_unicode_artifacts(text)
     text = re.sub(r"\s+", "", text)
     return text.upper()
+
+def is_material_sku(sku: object) -> bool:
+    """Business-rule classifier for packing/material SKUs.
+
+    TP-PLB-* and TP-PKG-* are material rows. They are accepted by SKU + Qty
+    even when EAN is blank or the barcode cell repeats the SKU, and they are
+    excluded from Master Data name/HS enrichment so PL source data is kept.
+    """
+    code = normalize_code(sku)
+    return any(code.startswith(prefix) for prefix in MATERIAL_SKU_PREFIXES)
+
+
+def contains_material_sku(text: object) -> bool:
+    """True when OCR/table text contains a recognized material SKU token."""
+    cleaned = fix_unicode_artifacts(sanitize_ocr_cell(str(text or "")))
+    for m in RE_PROD_CODE.finditer(join_split_product_code(cleaned)):
+        if is_material_sku(m.group(1).rstrip('-')):
+            return True
+    return False
+
 
 def strip_accents(s: str) -> str:
     nfd = unicodedata.normalize('NFD', str(s).strip())
@@ -495,7 +525,10 @@ class Package:
         filtering/dropping behavior anywhere)."""
         if not self.dim_matched:
             return "MASTER_UNMATCHED"
-        if self.items and any(not (i.hs_code or "").strip() for i in self.items):
+        # Material SKUs are explicitly exempt from Master Data cross-check.
+        # Their PL-sourced values are authoritative for this workflow.
+        normal_items = [i for i in self.items if not is_material_sku(i.product_code)]
+        if normal_items and any(not (i.hs_code or "").strip() for i in normal_items):
             return "MASTER_UNMATCHED"
         return "MASTER_MATCHED"
 
@@ -859,6 +892,15 @@ def parse_item_cells(cells: List[str], source_page: Optional[int] = None) -> Opt
             unit_idx = idx
             continue
 
+        # Material rows use business UOMs such as CARTON_50PCS /
+        # CARTON_200PCS, which are intentionally not part of VALID_UNITS for
+        # ordinary merchandise. Preserve that UOM and allow the following
+        # quantity cell to be parsed normally.
+        if prod_code and is_material_sku(prod_code) and RE_MATERIAL_UOM.fullmatch(cell.upper()):
+            unit = cell.upper()
+            unit_idx = idx
+            continue
+
         # Bare condition word in its own cell (7/8-column layout, condition
         # and quantity NOT merged).
         cond_key = strip_accents(cell)
@@ -881,6 +923,17 @@ def parse_item_cells(cells: List[str], source_page: Optional[int] = None) -> Opt
 
         name_parts.append(cell)
 
+    # Last-resort material quantity recovery: table layouts can expose a
+    # non-standard UOM that we have not seen before. For a confirmed material
+    # SKU only, the rightmost standalone positive integer after the SKU is the
+    # quantity. This never applies to normal products.
+    if prod_code and is_material_sku(prod_code) and quantity == 0:
+        for ridx in range(len(merged) - 1, max(prod_idx, -1), -1):
+            candidate_qty = str(merged[ridx] or "").strip()
+            if re.fullmatch(r'\d{1,5}', candidate_qty):
+                quantity = int(candidate_qty)
+                break
+
     if not (barcode or prod_code) or quantity == 0:
         return None
 
@@ -897,10 +950,22 @@ def parse_item_cells(cells: List[str], source_page: Optional[int] = None) -> Opt
 def parse_item_text(accumulated: str, source_page: Optional[int] = None) -> Optional[Item]:
     text = fix_unicode_artifacts(join_split_product_code(sanitize_ocr_cell(accumulated)))
 
+    # Detect the SKU before terminal parsing so material rows can use their
+    # non-standard UOM (e.g. CARTON_50PCS/CARTON_200PCS) without requiring EAN.
+    prod_code = ""
+    sku_raw = ""
+    pc_end = 0
+    for m in RE_PROD_CODE.finditer(text):
+        pc = m.group(1).rstrip('-')
+        if pc.count('-') >= 2:
+            sku_raw = m.group(1)
+            prod_code = normalize_code(pc)
+            pc_end = m.end()
+            break
+    material = is_material_sku(prod_code)
+
     # Bug #9, text-fallback path: a merged "Tinh trang So luong" fragment can
-    # also show up in the flattened text line (e.g. "... PCS Moi 12"). Try
-    # the merged terminal first; RE_TERMINAL (unit + bare qty) still covers
-    # the already-split case.
+    # also show up in the flattened text line (e.g. "... PCS Moi 12").
     m_cq_term = re.search(rf'({UNIT_PAT})\s+(M[oớ]i|C[uũ]|New|Used|Refurbished)\s+([\d,\.]+)\s*$',
                            text, re.IGNORECASE | re.UNICODE)
     condition = ""
@@ -912,11 +977,37 @@ def parse_item_text(accumulated: str, source_page: Optional[int] = None) -> Opti
         term_start = m_cq_term.start()
     else:
         m_term = RE_TERMINAL.search(text)
-        if not m_term:
+        if m_term:
+            unit = m_term.group(1).upper()
+            quantity = parse_qty(m_term.group(2))
+            term_start = m_term.start()
+        elif material:
+            # Material rows may use CARTON_50PCS/CARTON_200PCS or another
+            # packing UOM. EAN is optional; SKU + positive Qty is sufficient.
+            m_mat_cq = re.search(
+                r'([A-Z][A-Z0-9_\-]{1,40})\s+'
+                r'(M[oớ]i|C[uũ]|New|Used|Refurbished)\s+'
+                r'([\d,\.]+)\s*$',
+                text, re.IGNORECASE | re.UNICODE,
+            )
+            if m_mat_cq:
+                unit = m_mat_cq.group(1).upper()
+                cond_key = strip_accents(m_mat_cq.group(2))
+                condition = CONDITION_CANON.get(cond_key, m_mat_cq.group(2))
+                quantity = parse_qty(m_mat_cq.group(3))
+                term_start = m_mat_cq.start()
+            else:
+                m_mat = re.search(
+                    r'([A-Z][A-Z0-9_\-]{1,40})\s+([\d,\.]+)\s*$',
+                    text, re.IGNORECASE | re.UNICODE,
+                )
+                if not m_mat:
+                    return None
+                unit = m_mat.group(1).upper()
+                quantity = parse_qty(m_mat.group(2))
+                term_start = m_mat.start()
+        else:
             return None
-        unit     = m_term.group(1).upper()
-        quantity = parse_qty(m_term.group(2))
-        term_start = m_term.start()
 
     line_no = ""
     m_no = re.match(r"^\s*(\d{1,4})\s+", text)
@@ -928,22 +1019,14 @@ def parse_item_text(accumulated: str, source_page: Optional[int] = None) -> Opti
         if len(m.group(1)) in (8, 12, 13, 14):
             barcode = m.group(1)
             break
-    prod_code = ""
-    sku_raw = ""
-    pc_end = 0
-    for m in RE_PROD_CODE.finditer(text):
-        pc = m.group(1).rstrip('-')
-        if pc.count('-') >= 2:
-            sku_raw = m.group(1)
-            prod_code = normalize_code(pc)
-            pc_end = m.end()
-            break
+
     product_name = ""
     if prod_code and pc_end < term_start:
         region = text[pc_end:term_start].strip()
         region = RE_BARCODE.sub('', region).strip()
         parts = [w for w in region.split() if strip_accents(w) not in STATUS_WORDS]
         product_name = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
+
     if not (barcode or prod_code) or quantity == 0:
         return None
     line_no, product_name = split_leading_no(product_name, line_no)
@@ -1067,7 +1150,7 @@ class Parser:
         if RE_SKU_SUFFIX_ROW.match(line) and self._cur.items and not self._buf:
             self._append_sku_suffix(line)
             return
-        if RE_BARCODE.search(line):
+        if RE_BARCODE.search(line) or contains_material_sku(line):
             if self._buf:
                 item = parse_item_text(' '.join(self._buf), source_page=self._page)
                 if item:
@@ -1273,6 +1356,12 @@ class DimMapper:
         self.review_required = 0
         self._known_refs: set = set()
         self._known_pkgs: set = set()
+        # Packaging Code is the primary business identity. When a normalized
+        # package code occurs exactly once in DIM, it can match regardless of
+        # a harmless reference typo. Duplicate package codes remain guarded by
+        # the canonical reference+package composite key.
+        self._by_pkg: Dict[str, dict] = {}
+        self._ambiguous_pkgs: set = set()
         self._load(xlsx_path, sheet_name)
 
     # ── loading ──────────────────────────────────────────────────────────
@@ -1398,7 +1487,7 @@ class DimMapper:
             self.rows_scanned += 1
             raw_ref = self._cell(ws, r, col_idx["ref"], merge_map)
             raw_pkg = self._cell(ws, r, col_idx["pkg"], merge_map)
-            ref_norm = normalize(str(raw_ref)) if raw_ref not in (None, "") else ""
+            ref_norm = normalize_dim_reference(raw_ref) if raw_ref not in (None, "") else ""
             if not ref_norm or ref_norm == "NAN":
                 # forward-fill a blank reference from the nearest row above
                 # (merged "Lo hang" cell) -- never fabricate a ref that was
@@ -1467,7 +1556,7 @@ class DimMapper:
                 raw_ref = v
                 break
             if raw_ref is not None:
-                ref_norm = normalize(str(raw_ref))
+                ref_norm = normalize_dim_reference(raw_ref)
                 last_ref = ref_norm
             else:
                 ref_norm = last_ref or ""
@@ -1525,8 +1614,18 @@ class DimMapper:
                                                 expected_cbm, cbm_diff, "DUPLICATE_KEY"))
             return False
 
-        self._data[key] = {"length": length, "width": width, "height": height,
-                            "weight": weight, "cbm": cbm}
+        dim_record = {"length": length, "width": width, "height": height,
+                      "weight": weight, "cbm": cbm}
+        self._data[key] = dim_record
+
+        # Build a package-only index only for unambiguous Packaging Codes.
+        if pkg_norm not in self._ambiguous_pkgs:
+            if pkg_norm not in self._by_pkg:
+                self._by_pkg[pkg_norm] = dim_record
+            else:
+                self._by_pkg.pop(pkg_norm, None)
+                self._ambiguous_pkgs.add(pkg_norm)
+
         self.valid_rows += 1
         self.diagnostics.append(self._diag(sheet_name, excel_row, method, pkg_col,
                                             raw_ref, ref_norm, raw_pkg, pkg_norm, vals,
@@ -1585,7 +1684,15 @@ class DimMapper:
 
     # ── lookup (used by run_pipeline) ────────────────────────────────────
     def lookup(self, ref: str, pkg: str) -> Optional[dict]:
-        key = f"{normalize_dim_reference(ref)}|{normalize_packaging_code(pkg)}"
+        pkg_norm = normalize_packaging_code(pkg)
+        # Primary identity: a unique Packaging Code in DIM. This is exact,
+        # case-insensitive normalization only -- never fuzzy package matching.
+        if pkg_norm and pkg_norm in self._by_pkg and pkg_norm not in self._ambiguous_pkgs:
+            return self._by_pkg[pkg_norm]
+
+        # Safety fallback for a Packaging Code that appears more than once:
+        # require canonicalized Shipping Mark/reference + Packaging Code.
+        key = f"{normalize_dim_reference(ref)}|{pkg_norm}"
         return self._data.get(key)
 
     def diagnose_miss(self, source_file: str, raw_ref: str, raw_pkg: str) -> dict:
@@ -1776,6 +1883,8 @@ class HsCodeMapper:
         )
 
     def lookup(self, sku: str, barcode: str = "") -> str:
+        if is_material_sku(sku):
+            return ""
         sku_clean = clean_excel_key(sku)
         if sku_clean in self._data_exact:
             return self._data_exact[sku_clean]
@@ -1795,6 +1904,8 @@ class HsCodeMapper:
         Missing/ambiguous/conflicting keys return "", so the original Product
         Name parsed from the transport Packing List is preserved.
         """
+        if is_material_sku(sku):
+            return ""
         sku_key = normalize_sku_key(sku)
         barcode_key = re.sub(r"\D", "", clean_excel_key(barcode))
         if not sku_key or not barcode_key:
@@ -2922,6 +3033,17 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     for pkg in packages:
         pkg_hs_codes = []
         for item in pkg.items:
+            # Material families are source-authoritative: never cross-check or
+            # overwrite them from Master Data. Keep PL SKU/name/UOM/Qty exactly
+            # as parsed (after harmless code normalization).
+            if is_material_sku(item.product_code):
+                item.hs_code = ""
+                item.product_name_raw = item.product_name_raw or item.product_name
+                item.product_name_source = "PL_PDF_PRESERVED"
+                item.product_name_master_verified = False
+                product_names_preserved += 1
+                continue
+
             hs_total += 1
             item.hs_code = hs_mapper.lookup(item.product_code, item.barcode)
             if item.hs_code:
