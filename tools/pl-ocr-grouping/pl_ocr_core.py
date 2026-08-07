@@ -622,6 +622,11 @@ def detect_shipment_country(shipmark: str) -> str:
     return m.group(1).upper() if m else ""
 
 
+def _norm_label_cell(s: str) -> str:
+    """Normalize metadata label cells for OR/SO/Shipping Mark/GW matching."""
+    return re.sub(r"[^A-Z0-9]", "", strip_accents(str(s or "")).upper())
+
+
 def normalize_packaging_code(value: object) -> str:
     """Return a stable, case-insensitive DIM lookup key for Packaging Code.
 
