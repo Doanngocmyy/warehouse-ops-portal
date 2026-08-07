@@ -385,7 +385,7 @@ STORE_MASTER: Dict[str, Dict[str, object]] = {
     "CHINA_WORLD": {
         "port": "PEK",
         "receiver": "China World NB1026",
-        "aliases": ["China World", "China World Mall", "NB1026"],
+        "aliases": ["China World", "China World Mall", "NB1026", "CNWORLD", "CNWorld", "CN World", "ChinaWorld", "China World NB1026", "CNWorld NB1026"],
         "address": "Shop NB1026, B1 Floor, China World Mall, No. 1 Jianguomenwai Avenue, Chaoyang District, Beijing, Beijing, China 100004",
         "contact_name": "Bobo Shi",
         "contact_phone": "+86 13621647004",
