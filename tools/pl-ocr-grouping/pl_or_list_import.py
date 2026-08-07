@@ -62,7 +62,8 @@ if not log.handlers:
 #    exactly as uploaded").
 # =========================================================================
 STORE_ALIASES_RAW = ["STORE", "STORE NAME", "SHOP", "SHOP NAME",
-                      "DESTINATION STORE", "CUSTOMER STORE"]
+                      "DESTINATION STORE", "CUSTOMER STORE",
+                      "MEMO", "REMARK", "REMARKS", "DESCRIPTION", "DETAIL", "DETAILS"]
 OR_ALIASES_RAW = ["OR", "OR #", "OR NO", "OR NO.", "OR NUMBER", "OR CODE", "OUTBOUND REQUEST"]
 SO_ALIASES_RAW = ["SO", "SO #", "SO NO", "SO NO.", "SO NUMBER", "SO ORDER", "SO ORDER #",
                   "SALES ORDER", "SALES ORDER #"]
