@@ -125,8 +125,6 @@ TEXT_FORMAT = "@"  # forces text storage -- no scientific notation, no leading-z
 # =========================================================================
 # 2) Pure data model (spec section 11) -- never mutates the source package
 # =========================================================================
-@dataclass
-
 def _apply_requested_excel_view_preferences(workbook) -> None:
     from openpyxl.styles import Alignment
 
