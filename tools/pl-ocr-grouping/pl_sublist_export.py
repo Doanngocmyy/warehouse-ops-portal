@@ -69,32 +69,41 @@ SUBLIST_ITEM_CAPACITY_PER_BLOCK = 18  # real border extent, NOT the 12-item samp
 
 # Row offsets from a page's first (1-based) row -- add to page_start_row.
 # v17 (spec sections 12/13/16/17 -- supersedes the v15/v16 fixed-6-row
-# design): Carton#/Shipping Mark/Store/OR No./Ref No. are now FIXED rows
-# (Store is a genuinely new row, ALWAYS shown -- not a relabeled OR/SO
-# slot), followed by 0+ OPTIONAL business-field rows (verbatim label, only
-# the ones the OR List actually has -- spec: never invent blank SO/PO/etc
-# rows), then GW/Packing Code# (fixed, unchanged meaning), a blank
-# separator row, then the item table. Every offset below OFF_GW depends on
-# `n_optional` and is therefore computed per-call by _sublist_offsets(),
-# not as bare module constants -- the historical OFF_* names are kept as
-# the n_optional=0 case for anything that still imports them directly."""
+# design): Carton#/Shipping Mark/OR No./Ref No. are FIXED rows, followed
+# by 0+ OPTIONAL business-field rows (verbatim label, only the ones the OR
+# List actually has -- spec: never invent blank SO/PO/etc rows), then
+# GW/Packing Code# (fixed, unchanged meaning), a blank separator row, then
+# the item table. Every offset below OFF_GW depends on `n_optional` and is
+# therefore computed per-call by _sublist_offsets(), not as bare module
+# constants -- the historical OFF_* names are kept as the n_optional=0
+# case for anything that still imports them directly.
+#
+# v20 (Sublist display-only UI change): Store was removed as a Sublist row
+# entirely -- it is still resolved and required internally (Package.store/
+# store_display, CN Store matching, PL_Total, grouped Packing Lists,
+# Raw_Data, Match_Status, PL_SPLIT_CONTROL, 04_CN_BY_STORE all keep it
+# unchanged) but is intentionally never displayed on the Sublist. Removing
+# it drops the fixed-row count from 7 back to 6 (Carton#/Shipping Mark/
+# OR No./Ref No./GW/Packing Code#) and every offset from OFF_OR onward
+# shifts up by exactly 1 row -- because every offset is still derived from
+# _sublist_offsets(), this is the ONLY place that needed to change; no
+# other row/height math anywhere in this module was touched."""
 OFF_CARTON = 0
 OFF_SHIPPING_MARK = 1
-OFF_STORE = 2
-OFF_OR = 3
-OFF_REF = 4
-OFF_OPTIONAL_FIRST = 5
+OFF_OR = 2
+OFF_REF = 3
+OFF_OPTIONAL_FIRST = 4
 
 
 def _sublist_offsets(n_optional: int) -> dict:
     """-> dict of every row offset (see module comment above) for a
     Sublist block with exactly `n_optional` OPTIONAL business fields.
-    n_optional=0 reproduces this module's historical v15/v16 geometry
-    plus exactly the +1 row Store always adds (Carton#/Shipping Mark/
-    Store/OR No./Ref No./GW/Packing Code# = 7 fixed rows instead of the
-    old 6); each additional optional field adds one more row, matching
-    the exact technique already used when Shipping Mark itself was added
-    as a 6th row (module docstring)."""
+    n_optional=0 reproduces this module's historical v15/v16 geometry:
+    Carton#/Shipping Mark/OR No./Ref No./GW/Packing Code# = 6 fixed rows
+    (v20: Store's row was removed again -- see module comment); each
+    additional optional field adds one more row, matching the exact
+    technique already used when Shipping Mark itself was added as a row
+    (module docstring)."""
     off_gw = OFF_OPTIONAL_FIRST + n_optional
     off_packing_code = off_gw + 1
     # +1 blank separator row (matches the template's own blank row between
@@ -108,7 +117,7 @@ def _sublist_offsets(n_optional: int) -> dict:
     page_cycle_rows = off_total + 1 + 16
     return {
         "carton": OFF_CARTON, "shipping_mark": OFF_SHIPPING_MARK,
-        "store": OFF_STORE, "or": OFF_OR, "ref": OFF_REF,
+        "or": OFF_OR, "ref": OFF_REF,
         "optional_first": OFF_OPTIONAL_FIRST,
         "gw": off_gw, "packing_code": off_packing_code,
         "item_header": off_item_header, "item_first": off_item_first,
@@ -117,9 +126,9 @@ def _sublist_offsets(n_optional: int) -> dict:
     }
 
 
-# Backward-compat module constants -- the n_optional=0 geometry (unchanged
-# value for OFF_GW/OFF_PACKING_CODE/etc. relative to the historical v15/v16
-# ones, now +1 throughout because Store is a genuinely new row).
+# Backward-compat module constants -- the n_optional=0 geometry (v20:
+# back to the historical v15/v16 row values now that Store's row has been
+# removed again; see module comment above).
 _OFFSETS_0 = _sublist_offsets(0)
 OFF_GW = _OFFSETS_0["gw"]
 OFF_PACKING_CODE = _OFFSETS_0["packing_code"]
@@ -131,9 +140,11 @@ PAGE_CYCLE_ROWS = _OFFSETS_0["page_cycle_rows"]
 
 
 def _resolve_metadata_labels(optional_labels=None):
-    """v17: the fixed Carton#/Shipping Mark/Store/OR No./Ref No./GW/
-    Packing Code# rows (labels never vary -- spec: "Do NOT relabel Ref#
-    as SO/SO Order/Invoice") plus one row per entry in `optional_labels`
+    """v17: the fixed Carton#/Shipping Mark/OR No./Ref No./GW/Packing
+    Code# rows (labels never vary -- spec: "Do NOT relabel Ref# as SO/SO
+    Order/Invoice"; v20: Store intentionally has no row here, see module
+    comment -- it is still resolved and used elsewhere, just never
+    displayed on the Sublist) plus one row per entry in `optional_labels`
     (verbatim, spec section 13), in the offsets _sublist_offsets() computed
     for len(optional_labels). Returns a list of (offset, label) pairs,
     ready to zip against per-carton VALUES by the same offset key."""
@@ -142,7 +153,6 @@ def _resolve_metadata_labels(optional_labels=None):
     rows = [
         (off["carton"], "Carton #"),
         (off["shipping_mark"], "Shipping Mark"),
-        (off["store"], "Store"),
         (off["or"], "OR No."),
         (off["ref"], "Ref No."),
     ]
@@ -236,10 +246,16 @@ class SublistCartonModel:
     gross_weight_display: str
     gross_weight_source: str
     packing_code: str
-    # v17 (spec sections 12/13/16/17): human Store display name (fixed,
-    # always-shown business field) + the OR List's OPTIONAL columns beyond
-    # OR/Ref (label, value) pairs, verbatim, in original order -- [] when
-    # the OR List has none, or wasn't uploaded/matched at all.
+    # store_display (v17-v19: a fixed, always-shown Sublist row) is kept
+    # on this model for backward-compat / any other internal consumer, but
+    # v20 (Sublist display-only UI change) intentionally never writes it to
+    # a Sublist row anymore -- Store stays fully resolved everywhere else
+    # (Package.store/store_display, PL_Total, grouped Packing Lists,
+    # Raw_Data, Match_Status, PL_SPLIT_CONTROL, 04_CN_BY_STORE); this is a
+    # display-only omission scoped to the Sublist writers, see module
+    # comment. optional_business_fields: the OR List's OPTIONAL columns
+    # beyond OR/Ref (label, value) pairs, verbatim, in original order --
+    # [] when the OR List has none, or wasn't uploaded/matched at all.
     store_display: str = ""
     optional_business_fields: List["tuple"] = field(default_factory=list)
     items: List[SublistItemRow] = field(default_factory=list)
@@ -431,8 +447,9 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
 
     optional_business_field_labels (v17): the OR List's business columns
     beyond OR/Ref (verbatim, spec sections 13/16/17) -- [] shows exactly
-    Carton#/Shipping Mark/Store/OR No./Ref No./GW/Packing Code#, no
-    invented blank optional rows. Must be the SAME list used to build
+    Carton#/Shipping Mark/OR No./Ref No./GW/Packing Code# (v20: no Store
+    row, see module comment), no invented blank optional rows. Must be
+    the SAME list used to build
     `page_start_row` in generate_sublist_workbook() (both derive their
     row geometry from _sublist_offsets(len(...)) -- passing a different
     list here than was used for pagination would misalign this block)."""
@@ -447,7 +464,6 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
     metadata_values = {
         off["carton"]: block.block_carton_label,
         off["shipping_mark"]: carton.shipping_mark,
-        off["store"]: carton.store_display,
         off["or"]: carton.or_number,
         off["ref"]: carton.so_number,
         off["gw"]: carton.gross_weight_display,

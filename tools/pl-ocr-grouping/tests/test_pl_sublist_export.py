@@ -508,9 +508,14 @@ def t_generate_workbook_layout_matches_real_template_measurements():
     """v17 (spec sections 12/16/17): the metadata block gained a fixed
     Store row (Carton#/Shipping Mark/Store/OR No./Ref No./GW/Packing
     Code# = 7 rows, was 6) -- every row below it shifts down by exactly
-    1 versus the old v15/v16 layout; row numbers here are computed from
-    pse._sublist_offsets(0) rather than hardcoded, so this test can never
-    silently drift out of sync with the production geometry again."""
+    1 versus the old v15/v16 layout. v20 (Sublist display-only UI change):
+    Store's row was removed again -- Carton#/Shipping Mark/OR No./Ref No./
+    GW/Packing Code# = 6 rows, back to the pre-Store geometry -- Store is
+    still fully resolved on the package (store_display below) and used
+    elsewhere (PL_Total etc.), just never written to a Sublist row. Row
+    numbers here are computed from pse._sublist_offsets(0) rather than
+    hardcoded, so this test can never silently drift out of sync with the
+    production geometry again."""
     with tempfile.TemporaryDirectory() as td:
         items = [_mk_item("TP-A-1", "4894961069222", 10), _mk_item("TP-A-2", "4895227935312", 15)]
         pkg = _mk_full_pkg(1, 1, items)
@@ -519,10 +524,10 @@ def t_generate_workbook_layout_matches_real_template_measurements():
         wb = openpyxl.load_workbook(str(out))
         ws = wb["Sheet1"]
         off = pse._sublist_offsets(0)
+        assert "store" not in off, "Sublist offsets must never have a Store row (v20 display-only removal)"
         # metadata block: label col B, value col C (block 1 = A:C)
         assert ws[f"B{1 + off['carton']}"].value == "Carton #" and ws[f"C{1 + off['carton']}"].value == "1/1"
         assert ws[f"B{1 + off['shipping_mark']}"].value == "Shipping Mark" and ws[f"C{1 + off['shipping_mark']}"].value == "CN-1666-PVG-KERRY-POP"
-        assert ws[f"B{1 + off['store']}"].value == "Store" and ws[f"C{1 + off['store']}"].value == "Kerry Center flagship"
         assert ws[f"B{1 + off['or']}"].value == "OR No." and ws[f"C{1 + off['or']}"].value == "OR1016"
         assert ws[f"B{1 + off['ref']}"].value == "Ref No." and ws[f"C{1 + off['ref']}"].value == "so402064"
         assert ws[f"B{1 + off['gw']}"].value == "GW" and ws[f"C{1 + off['gw']}"].value == "35.68 KG"
@@ -536,6 +541,13 @@ def t_generate_workbook_layout_matches_real_template_measurements():
         total_row = 1 + off["total"]
         assert ws.cell(row=total_row, column=3).value == f"=SUM(C{first_row}:C{first_row + 1})"
         result.output_path.exists()  # sanity
+        # v20 regression: "Store" must never appear as a label ANYWHERE in
+        # the Sublist Excel sheet, for either block.
+        all_labels = [c.value for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
+        assert "Store" not in all_labels, f"Sublist Excel must never show a 'Store' label -- found: {all_labels}"
+        assert "Kerry Center flagship" not in all_labels, (
+            f"Store's resolved display value must never appear on the Sublist Excel: {all_labels}"
+        )
 
 
 def t_page_two_starts_at_correct_row():

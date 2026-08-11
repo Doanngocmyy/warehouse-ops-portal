@@ -197,22 +197,30 @@ VALUE_COL_MAX_WIDTH = 200
 MAX_RESERVED_WRAP_EXTRA_LINES = 2
 
 # v17 (spec sections 12/13/16/17 -- supersedes the v15/v16 fixed-6-row
-# design): Carton#/Shipping Mark/Store/OR No./Ref No. are FIXED rows
-# (labels never vary -- spec: "Do NOT relabel Ref# as SO/SO Order/
-# Invoice"; Store is a genuinely new row, always shown), followed by 0+
-# OPTIONAL business-field rows (verbatim label, only the ones the OR List
-# actually has), then GW/Packing Code# (fixed, unchanged meaning). Row
-# COUNT now varies by shipment (7 fixed + n_optional), so every pagination
-# constant that used to be a bare module-level number derived from
-# len(METADATA_ROWS) is now a FUNCTION of n_optional -- see
+# design): Carton#/Shipping Mark/OR No./Ref No. are FIXED rows (labels
+# never vary -- spec: "Do NOT relabel Ref# as SO/SO Order/Invoice"),
+# followed by 0+ OPTIONAL business-field rows (verbatim label, only the
+# ones the OR List actually has), then GW/Packing Code# (fixed, unchanged
+# meaning). Row COUNT now varies by shipment (6 fixed + n_optional), so
+# every pagination constant that used to be a bare module-level number
+# derived from len(METADATA_ROWS) is now a FUNCTION of n_optional -- see
 # _meta_block_height()/_items_per_pdf_page() below. METADATA_ROWS/META_
 # BLOCK_HEIGHT/ITEMS_PER_PDF_PAGE are kept as module constants too (the
 # n_optional=0 case) for any direct importer/test that still wants the
 # historical bare-constant convenience.
+#
+# v20 (Sublist display-only UI change): Store was removed as a Sublist
+# row entirely -- it is still resolved and required internally
+# (Package.store/store_display, CN Store matching, PL_Total, grouped
+# Packing Lists, Raw_Data, Match_Status, PL_SPLIT_CONTROL, 04_CN_BY_STORE
+# all keep it unchanged) but is intentionally never displayed on the
+# Sublist PDF. Removing it drops the fixed-row count from 7 back to 6;
+# every height/pagination constant below is still derived from
+# len(METADATA_ROWS)/n_rows, so this is the ONLY place that needed to
+# change.
 METADATA_ROWS = [
     ("carton", "Carton #"),
     ("shipping_mark", "Shipping Mark"),
-    ("store", "Store"),
     ("or", "OR No."),
     ("ref", "Ref No."),
     ("gw", "GW"),
@@ -221,15 +229,17 @@ METADATA_ROWS = [
 
 
 def _resolve_metadata_rows(optional_labels=None):
-    """-> (key, label) pairs: the fixed Carton#/Shipping Mark/Store/OR
-    No./Ref No. rows, then one row per entry in `optional_labels`
-    (verbatim, spec section 13) keyed "optional_0", "optional_1", ...,
-    then the fixed GW/Packing Code# rows. []/None optional_labels
-    reproduces METADATA_ROWS exactly (7 rows, no optional rows)."""
+    """-> (key, label) pairs: the fixed Carton#/Shipping Mark/OR No./
+    Ref No. rows (v20: no Store row, see module comment -- Store is
+    still resolved and used elsewhere, just never displayed on the
+    Sublist), then one row per entry in `optional_labels` (verbatim,
+    spec section 13) keyed "optional_0", "optional_1", ..., then the
+    fixed GW/Packing Code# rows. []/None optional_labels reproduces
+    METADATA_ROWS exactly (6 rows, no optional rows)."""
     optional_labels = [str(l) for l in (optional_labels or []) if str(l or "").strip()]
     rows = [
         ("carton", "Carton #"), ("shipping_mark", "Shipping Mark"),
-        ("store", "Store"), ("or", "OR No."), ("ref", "Ref No."),
+        ("or", "OR No."), ("ref", "Ref No."),
     ]
     for i, label in enumerate(optional_labels):
         rows.append((f"optional_{i}", label))
@@ -420,9 +430,9 @@ def _items_per_pdf_page(n_rows: int) -> int:
 
 
 # Documented here rather than silently picked: at MARGIN=28/ROW_HEIGHT_
-# ITEM=14 the 7-row (n_optional=0) case works out to the low-20s items/
-# page (down from ~26 before the wrap-safety reserve was added, and down
-# by 1 row's worth again now that Store is a genuinely new fixed row);
+# ITEM=14 the 6-row (n_optional=0) case works out to the low-to-mid-20s
+# items/page (v20: one row taller than this same n_optional=0 case used
+# to be before Store's row was removed again -- see module comment);
 # verified against a rendered sample (see tests/test_pl_sublist_pdf_
 # export.py's visual-validation step). Kept as a module constant (the
 # n_optional=0 case) for any direct importer/test that still wants the
@@ -579,16 +589,17 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None, optional_b
     #    exact formula) -- the left side of the page stays visually open,
     #    matching the approved reference layout. v17 (spec sections 12/
     #    13/16/17): row LABELS/KEYS come from _resolve_metadata_rows
-    #    (optional_business_field_labels) -- Store/OR No./Ref No. are now
-    #    FIXED (never relabeled), plus one row per actual optional OR
-    #    List field beyond OR/Ref (verbatim, never invented when absent).
+    #    (optional_business_field_labels) -- OR No./Ref No. are FIXED
+    #    (never relabeled), plus one row per actual optional OR List
+    #    field beyond OR/Ref (verbatim, never invented when absent).
+    #    v20: Store intentionally has no row here (display-only omission,
+    #    see module comment) -- it is not read into meta_values below.
     optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
     metadata_rows = _resolve_metadata_rows(optional_labels)
     opt_map = dict(getattr(carton, "optional_business_fields", None) or [])
     meta_values = {
         "carton": block.block_carton_label,
         "shipping_mark": carton.shipping_mark,
-        "store": getattr(carton, "store_display", "") or "",
         "or": carton.or_number,
         "ref": carton.so_number,
         "gw": carton.gross_weight_display,
@@ -722,15 +733,16 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
     optional_business_field_labels (v17, spec sections 12/13/16/17): the
     uploaded OR List's business columns BEYOND OR/Ref (verbatim, in
     original order -- e.g. ["SO","PO","Invoice","Fulfillment No.",
-    "Buyer"]). Store/OR No./Ref No. are now FIXED metadata rows (spec:
-    never relabeled) -- so the Packing List sheet and this PDF's metadata
-    block can never disagree. []/None (the default) shows exactly Carton
-    #/Shipping Mark/Store/OR No./Ref No./GW/Packing Code#, no invented
-    optional rows. The metadata block's height (and therefore how many
-    item rows fit per page / where pagination breaks) is recomputed from
-    the ACTUAL number of rows this call needs -- see _items_per_pdf_page()
-    -- so an extended OR List's taller metadata block can never overlap
-    or clip the item table."""
+    "Buyer"]). OR No./Ref No. are FIXED metadata rows (spec: never
+    relabeled) -- so the Packing List sheet and this PDF's metadata block
+    can never disagree. []/None (the default) shows exactly Carton #/
+    Shipping Mark/OR No./Ref No./GW/Packing Code# (v20: no Store row --
+    still resolved/required everywhere else, just never displayed here,
+    see module comment), no invented optional rows. The metadata block's
+    height (and therefore how many item rows fit per page / where
+    pagination breaks) is recomputed from the ACTUAL number of rows this
+    call needs -- see _items_per_pdf_page() -- so an extended OR List's
+    taller metadata block can never overlap or clip the item table."""
     result = SublistPdfBuildResult()
     if not enabled:
         result.status = "DISABLED"
@@ -745,10 +757,10 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
 
     try:
         optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
-        # 5 fixed head rows (Carton#/Shipping Mark/Store/OR No./Ref No.)
-        # + n optional + 2 fixed tail rows (GW/Packing Code#) -- see
-        # _resolve_metadata_rows().
-        n_meta_rows = 5 + len(optional_labels) + 2
+        # 4 fixed head rows (Carton#/Shipping Mark/OR No./Ref No. -- v20:
+        # Store's row removed, see module comment) + n optional + 2 fixed
+        # tail rows (GW/Packing Code#) -- see _resolve_metadata_rows().
+        n_meta_rows = 4 + len(optional_labels) + 2
         items_per_page = _items_per_pdf_page(n_meta_rows)
 
         output_path = Path(output_path)

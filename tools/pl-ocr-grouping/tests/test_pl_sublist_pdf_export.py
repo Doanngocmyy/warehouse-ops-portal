@@ -542,6 +542,11 @@ except ImportError:
 
 
 def t_generate_pdf_success_basic_fields():
+    """v20 (Sublist display-only UI change): store_display is still set on
+    the fixture package (Kerry Center flagship) so this stays a faithful
+    real-shape reproduction, but neither the "Store" label nor its value
+    may render on the Sublist PDF anymore -- see the explicit negative
+    assertions below."""
     items = [_item("TP-A-1", "4894961069222", 10), _item("TP-A-2", "4895227935312", 15)]
     pkg = _pkg(1, 1, items, pl_gross_weight="35.68 KG")
     with tempfile.TemporaryDirectory() as td:
@@ -557,11 +562,14 @@ def t_generate_pdf_success_basic_fields():
                 assert len(pdf.pages) == 1
                 text = pdf.pages[0].extract_text() or ""
                 for expected in ("Carton #", "1/1", "Shipping Mark", "CN-1666-PVG-KERRY-POP",
-                                  "Store", "Kerry Center flagship",
                                   "OR No.", "OR1016", "Ref No.", "so402064", "GW", "35.68 KG",
                                   "Packing Code #", "PGKECO377R7J0320001",
                                   "Item No.", "EAN", "QTY", "TP-A-1", "4894961069222", "TOTAL QTY", "25"):
                     assert expected in text, f"expected {expected!r} in rendered PDF text, got:\n{text}"
+                assert "Store" not in text, f"'Store' label must not render on the Sublist PDF:\n{text}"
+                assert "Kerry Center flagship" not in text, (
+                    f"Store's resolved display value must not render on the Sublist PDF:\n{text}"
+                )
 
 
 def t_generate_pdf_disabled_writes_nothing():

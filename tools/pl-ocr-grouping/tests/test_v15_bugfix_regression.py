@@ -641,7 +641,14 @@ def t_packing_list_headers_or_no_ref_no_for_shop_or_ref_or_list():
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
-def t_sublist_pdf_metadata_shows_or_no_ref_no():
+def t_sublist_pdf_metadata_shows_or_no_ref_no_but_never_store():
+    """v20 (Sublist display-only UI change): Store is intentionally never
+    shown on the Sublist PDF anymore -- neither its "Store" label nor its
+    resolved display value ("China World NB1026" here) may appear, even
+    though Package.store_display is still fully populated (still used by
+    PL_Total, grouped Packing Lists, Raw_Data, Match_Status,
+    PL_SPLIT_CONTROL, 04_CN_BY_STORE -- see test_pl_ocr_core.py /
+    test_pl_group_export.py for those, unchanged)."""
     try:
         import pl_sublist_pdf_export as ppe
         import pdfplumber
@@ -659,7 +666,8 @@ def t_sublist_pdf_metadata_shows_or_no_ref_no():
         assert result.status == "SUCCESS", result.error
         with pdfplumber.open(str(out)) as pdf:
             text = pdf.pages[0].extract_text() or ""
-        assert "Store" in text and "China World NB1026" in text, text
+        assert "Store" not in text, text
+        assert "China World NB1026" not in text, text
         assert "OR No." in text, text
         assert "Ref No." in text, text
         assert "SO Order #" not in text, text
@@ -669,7 +677,7 @@ def t_sublist_pdf_metadata_shows_or_no_ref_no():
 for _name, _fn in [
     ("canonicalize_business_field_label: OR#/OR No -> 'OR No.', Ref#/Ref No/Reference No -> 'Ref No.'", t_or_ref_business_field_labels_canonicalize_correctly),
     ("Packing List sheet: Shop|OR#|Ref# OR List -> headers 'OR No.'/'Ref No.' (not 'SO No.')", t_packing_list_headers_or_no_ref_no_for_shop_or_ref_or_list),
-    ("Sublist PDF metadata: shows 'OR No.'/'Ref No.', never 'SO Order #'", t_sublist_pdf_metadata_shows_or_no_ref_no),
+    ("Sublist PDF metadata: shows 'OR No.'/'Ref No.', never 'SO Order #', never a Store label/value (v20)", t_sublist_pdf_metadata_shows_or_no_ref_no_but_never_store),
 ]:
     test(_name, _fn)
 
@@ -849,6 +857,13 @@ def t_seven_field_or_list_propagates_end_to_end():
             ("SO", "SO123"), ("PO", "PO-A1"), ("Invoice", "INV-778"),
             ("Fulfillment No.", "FUL-55"), ("Buyer", "Alice"),
         ]
+        # v20 (Sublist display-only UI change): the Sublist writers never
+        # show Store at all -- same fields as expected_fields, minus the
+        # Store row, used for the Sublist Excel/PDF checks below (steps
+        # 6/7). PL_Total / grouped Packing List (steps 4/5) keep using
+        # expected_fields unchanged -- Store is still a fixed column
+        # there.
+        expected_sublist_fields = [pair for pair in expected_fields if pair[0] != "Store"]
 
         # ---- 4) Packing List (PL_Total) -- Store/OR/Ref fixed + ALL 5
         #         optional fields, real values, physically present ----
@@ -897,9 +912,9 @@ def t_seven_field_or_list_propagates_end_to_end():
         wb_s = openpyxl.load_workbook(str(sublist_xlsx_path))
         ws_s = wb_s["Sheet1"]
         off = pse._sublist_offsets(len(optional_labels))
+        assert "store" not in off, "Sublist offsets must never have a Store row (v20 display-only removal)"
         sublist_rows = [
             (off["carton"], "Carton #", "1/1"),
-            (off["store"], "Store", "Hangzhou Mixc"),
             (off["or"], "OR No.", "OR9001"),
             (off["ref"], "Ref No.", "po90001"),
             (off["optional_first"] + 0, "SO", "SO123"),
@@ -915,6 +930,12 @@ def t_seven_field_or_list_propagates_end_to_end():
             assert ws_s[f"B{r}"].value == label, (r, label, ws_s[f"B{r}"].value)
             if value is not None:
                 assert ws_s[f"C{r}"].value == value, (r, value, ws_s[f"C{r}"].value)
+        # v20 regression: "Store" must never appear as a label ANYWHERE in
+        # the Sublist Excel sheet -- not just "not at its old offset".
+        all_labels_col_b = [ws_s[f"B{r}"].value for r in range(1, ws_s.max_row + 1)]
+        assert "Store" not in all_labels_col_b, (
+            f"Sublist Excel must never show a 'Store' label -- found it in column B: {all_labels_col_b}"
+        )
         wb_s.close()
 
         # ---- 7) Sublist PDF -- Store/OR/Ref + ALL 5 optional fields
@@ -928,11 +949,20 @@ def t_seven_field_or_list_propagates_end_to_end():
                 [pkg], sublist_pdf_path, optional_business_field_labels=optional_labels)
             assert pdf_result.status == "SUCCESS", pdf_result.error
             with pdfplumber.open(str(sublist_pdf_path)) as pdf:
-                assert len(pdf.pages) == 1, "8-field metadata block must still fit a single page for a 0-item carton"
+                assert len(pdf.pages) == 1, "7-field metadata block must still fit a single page for a 0-item carton"
                 pdf_text = pdf.pages[0].extract_text() or ""
-            for label, value in expected_fields:
+            for label, value in expected_sublist_fields:
                 assert label in pdf_text, f"{label!r} missing from Sublist PDF text:\n{pdf_text}"
                 assert value in pdf_text, f"{value!r} missing from Sublist PDF text:\n{pdf_text}"
+            # v20 regression: Store's label AND its resolved display value
+            # must never appear on the Sublist PDF -- Store is display-only
+            # removed here (still fully resolved/used in PL_Total, grouped
+            # Packing Lists, Raw_Data, Match_Status, PL_SPLIT_CONTROL,
+            # 04_CN_BY_STORE -- see steps 4/5/8 above/below, all unchanged).
+            assert "Store" not in pdf_text, f"'Store' label must not appear on the Sublist PDF:\n{pdf_text}"
+            assert "Hangzhou Mixc" not in pdf_text, (
+                f"Store's resolved display value must not appear on the Sublist PDF:\n{pdf_text}"
+            )
         except ImportError as e:
             print(f"        (Sublist PDF check skipped -- {e})")
 
@@ -959,9 +989,10 @@ def t_seven_field_or_list_propagates_end_to_end():
 
 def t_minimal_or_list_never_invents_optional_columns():
     """spec section 33 point A: a minimal Shop|OR#|Ref# OR List (no
-    columns beyond OR/Ref) must show Store/OR No./Ref No. ONLY -- no
-    blank invented SO/PO/etc columns/rows anywhere (Packing List, Sublist
-    Excel, Sublist PDF)."""
+    columns beyond OR/Ref) must show Store/OR No./Ref No. ONLY on the
+    Packing List (Sublist Excel/PDF show OR No./Ref No. only -- v20:
+    Store is never a Sublist row at all, see test_seven_field_..._end_to_
+    end) -- no blank invented SO/PO/etc columns/rows anywhere."""
     import openpyxl
     out_dir = Path(tempfile.mkdtemp(prefix="pl_v15_minimal_or_list_"))
     try:
