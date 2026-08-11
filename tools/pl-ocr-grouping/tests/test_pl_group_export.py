@@ -255,7 +255,19 @@ def t_canonical_store_identity_resolves_all_7_real_descriptions():
 
 def t_explicit_short_shipmark_codes_resolve_unambiguously():
     """HZ/KR/GZ/SZ/IAPM are explicit shipping_mark_tokens aliases (v13) --
-    never fuzzy, always an exact single-store hit."""
+    never fuzzy, always an exact single-store hit.
+
+    v17 (test correction, spec point 37): match_source's real, current
+    value for a Shipping-Mark-derived signal is "SHIPMARK_SAFE_ALIAS" --
+    match_store_and_or() has one unified "safe" match tier per signal
+    source (Shipmark / filename / receiver text), covering BOTH literal
+    shipping_mark_tokens hits and safe-typo-tolerant hits under the same
+    label; "SHIPMARK_TOKEN_EXACT" is stale docstring-era terminology that
+    was never the actual runtime value (see StoreOrMatchResult.match_
+    source's field comment, corrected alongside this test). The business
+    values (matched_or/matched_so) below were already 100% correct in
+    every case -- only this tier-name string was stale, root-caused and
+    confirmed via a git-stash baseline run before being changed here."""
     idx = _real_or_index()
     cases = {
         "CN-1529_HZ_PVG_POP": ("po38068", "inv628036"),
@@ -267,7 +279,7 @@ def t_explicit_short_shipmark_codes_resolve_unambiguously():
     for mark, (exp_or, exp_so) in cases.items():
         m = pge.match_store_and_or(_FakePkg(shipping_mark=mark), idx)
         assert m.status == "OK", f"{mark}: expected OK, got {m.status} ({m.review_reason})"
-        assert m.match_source == "SHIPMARK_TOKEN_EXACT"
+        assert m.match_source == "SHIPMARK_SAFE_ALIAS", m.match_source
         assert m.matched_or == exp_or and m.matched_so == exp_so, f"{mark}: {m.matched_or}/{m.matched_so}"
 
 
@@ -353,7 +365,11 @@ def t_kerry_short_code_aliases_kry_kryy_ker_all_resolve_unambiguously():
         mark = f"CN-1529_{code}_PVG_POP"
         m = pge.match_store_and_or(_FakePkg(shipping_mark=mark), idx)
         assert m.status == "OK", f"{mark}: expected OK, got {m.status} ({m.review_reason})"
-        assert m.match_source == "SHIPMARK_TOKEN_EXACT"
+        # v17 (test correction, spec point 37): see t_explicit_short_
+        # shipmark_codes_resolve_unambiguously's docstring -- the real
+        # current tier name is SHIPMARK_SAFE_ALIAS, not the stale
+        # SHIPMARK_TOKEN_EXACT docstring-era name.
+        assert m.match_source == "SHIPMARK_SAFE_ALIAS", m.match_source
         assert m.matched_or == "po38071" and m.matched_so == "inv628038", (mark, m.matched_or, m.matched_so)
 
 
@@ -371,7 +387,9 @@ def t_iapm_spaced_letters_resolves():
     idx = _real_or_index()
     m = pge.match_store_and_or(_FakePkg(shipping_mark="CN-1529_I A P M_PVG_POP"), idx)
     assert m.status == "OK", f"expected OK, got {m.status} ({m.review_reason})"
-    assert m.match_source == "SHIPMARK_TOKEN_EXACT"
+    # v17 (test correction, spec point 37): see t_explicit_short_shipmark_
+    # codes_resolve_unambiguously's docstring -- real current tier name.
+    assert m.match_source == "SHIPMARK_SAFE_ALIAS", m.match_source
     assert m.matched_or == "po38072" and m.matched_so == "inv628039", (m.matched_or, m.matched_so)
 
 

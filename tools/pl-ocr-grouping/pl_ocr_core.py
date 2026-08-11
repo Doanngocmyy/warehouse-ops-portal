@@ -114,6 +114,21 @@ TABLE_HDR_KW = {"stt","barcode","ma vach","ma hang","ten hang",
 # These rows are valid without EAN and must be preserved from the Packing List
 # exactly as parsed; Master Data is not allowed to overwrite/filter them.
 MATERIAL_SKU_PREFIXES = ("TP-PLB-", "TP-PKG-")
+
+# v15 (bug fix -- BUG4): confirmed material SKU<->EAN pairs, centralized in
+# ONE mapping so enrichment never scatters into ad-hoc special cases.
+# Master Data is enrichment-only for these (spec): a confirmed EAN may fill
+# in a missing/non-GTIN barcode (e.g. the PDF/EAN List sometimes repeats
+# the SKU text in the barcode cell instead of a real EAN -- see
+# EAN List 6587.xlsx row 4, "TP-PLB-GRY-M-01"), but a DIFFERENT already-
+# valid parsed GTIN is never silently overwritten -- see
+# enrich_known_material_ean()'s docstring. Keys are the bare SKU, uppercased.
+KNOWN_MATERIAL_EAN: Dict[str, str] = {
+    "TP-PLB-GRY-L-01": "4895227932472",
+    "TP-PLB-GRY-M-01": "4895227933912",
+    "TP-PKG-POLYD-PE": "4894961086113",
+    "TP-PKG-POLYE-R1-PE": "4894961086120",
+}
 RE_MATERIAL_UOM = re.compile(
     r'^(?:CARTON|CTN|PACK|BOX|BAG|PCS)(?:[_\-][A-Z0-9]+)*$',
     re.IGNORECASE,
@@ -269,10 +284,77 @@ def normalize(s: str) -> str:
     s = re.sub(r'\s*[\(\[]\d+[\)\]]', '', s)
     return s.strip()
 
+def gtin13_checksum_is_valid(s: str) -> bool:
+    """Real GS1/EAN-13 modulo-10 check-digit validation (spec section 22:
+    production must not treat "any 13 numeric characters" as a valid
+    GTIN-13 -- that was a genuine production gap, not a stricter-than-
+    needed test-only rule). Standard GS1 algorithm: digits 1-12 (left to
+    right, 1-indexed) are weighted 1/3 alternating (odd position -> 1,
+    even position -> 3), summed, and the check digit (13th digit) must
+    equal (10 - sum%10) % 10. `s` must already be exactly 13 digits (see
+    is_valid_gtin13, which gates on RE_GTIN13 first) -- this function
+    assumes that precondition and does not re-validate digit count/shape
+    itself, so it is safe to unit-test directly with any 13-char digit
+    string."""
+    digits = [int(ch) for ch in s]
+    total = sum(d * (3 if (i + 1) % 2 == 0 else 1) for i, d in enumerate(digits[:12]))
+    check = (10 - (total % 10)) % 10
+    return check == digits[12]
+
+
 def is_valid_gtin13(s: str) -> bool:
-    """Strict GTIN validation per spec: exactly 13 digits, exact match only
-    -- never fuzzy-corrected (no O->0 / I->1 substitution)."""
-    return bool(RE_GTIN13.fullmatch(str(s or '').strip()))
+    """Strict GTIN validation per spec: exactly 13 digits AND a real GS1/
+    EAN-13 modulo-10 check-digit match (v17 fix -- spec section 22:
+    production previously treated ANY 13-digit numeric string as "valid",
+    which is not a real GTIN-13 validator; e.g. 1111111111111 is 13
+    digits but fails the GS1 checksum, while 4006381333931 is a genuine
+    GTIN-13). Never fuzzy-corrected (no O->0 / I->1 substitution) -- exact
+    digit match only, same as before."""
+    text = str(s or '').strip()
+    if not RE_GTIN13.fullmatch(text):
+        return False
+    return gtin13_checksum_is_valid(text)
+
+
+def enrich_known_material_ean(item) -> None:
+    """v15 (bug fix -- BUG4): enrichment-only fill of a material item's EAN
+    from KNOWN_MATERIAL_EAN. Mutates `item` in place; a no-op for anything
+    that isn't a recognized material SKU or already carries its own
+    confirmed-matching EAN.
+
+    Rules (spec):
+      - exact SKU and Qty are never touched here.
+      - a material row is never dropped -- this function only ever fills
+        item.barcode/item.gtin_valid, never removes the item.
+      - a BLANK barcode is safely enriched from the known mapping.
+      - a barcode that is SKU text (or otherwise not a valid 13-digit
+        GTIN) rather than a real EAN is safely enriched/replaced -- it was
+        never a usable GTIN in the first place.
+      - a barcode that IS already a valid 13-digit GTIN but DIFFERENT from
+        the confirmed mapping is never silently overwritten -- flagged via
+        item.remark for manual REVIEW instead (Master Data is enrichment-
+        only, never authoritative over a real parsed value)."""
+    sku_key = str(getattr(item, "product_code", "") or "").strip().upper()
+    known_ean = KNOWN_MATERIAL_EAN.get(sku_key)
+    if not known_ean:
+        return
+    current_raw = str(getattr(item, "barcode", "") or "")
+    current_digits = re.sub(r"\D", "", current_raw)
+    if current_digits == known_ean:
+        item.gtin_valid = True
+        return
+    if is_valid_gtin13(current_digits) and current_digits:
+        # A DIFFERENT already-valid parsed GTIN -- never silently changed;
+        # expose a diagnostic instead (enrichment-only, spec).
+        note = f"MATERIAL_EAN_REVIEW: parsed={current_digits} known={known_ean}"
+        item.remark = f"{item.remark}; {note}" if getattr(item, "remark", "") else note
+        return
+    # Blank, or present but not a valid GTIN (e.g. SKU text in the barcode
+    # cell) -- safe to enrich from the confirmed mapping.
+    item.barcode = known_ean
+    if not getattr(item, "gtin_raw", ""):
+        item.gtin_raw = known_ean
+    item.gtin_valid = True
 
 def parse_qty(s: str) -> int:
     return int(re.sub(r'[,\.]', '', s.strip()))
@@ -434,9 +516,36 @@ class Package:
     hs_code: str = ""
     # v8: CN store/port classification, filled in by classify_packages_for_port()
     # (same rule as pl_group_export.py's CN split — "quy luật chia port/store").
-    # Stays "" for non-CN-factory packages; fill manually if needed.
+    # v15 (bug fix): eligibility is destination-COUNTRY based (see
+    # pl_group_export.is_cn_port_eligible), never factory=="CN" alone --
+    # stays "" only for non-CN-destination packages or a genuinely
+    # unclassifiable Store; fill manually if needed.
     port: str = ""
     store: str = ""
+    # v15: diagnostics from the SAME match_store() call that produced
+    # store/port above -- additive-only, so PL_SPLIT_CONTROL.csv (and any
+    # other consumer) can report confidence/suggestion without export_
+    # grouped_pl() ever re-running its own separate match_store() call
+    # (single canonical port/store resolution per Package).
+    store_confidence: object = ""
+    store_suggestion: str = ""
+    # v17 (spec sections 8/12/16/17): human, customer-facing Store name
+    # (e.g. "Hangzhou Mixc") -- computed ONCE in classify_packages_for_
+    # port() from pge.store_display_name(pkg.store), so the Packing List/
+    # Sublist Excel/Sublist PDF all show the identical Store text without
+    # each independently re-deriving it from the canonical STORE_MASTER
+    # key (same "one canonical value per Package" principle as pkg.port).
+    store_display: str = ""
+    # v14 (spec sections 2-3): destination country/market, resolved once by
+    # detect_shipment_country() in run_pipeline() -- declared here (not just
+    # set dynamically) so every caller/test that builds a Package directly
+    # (bypassing run_pipeline) still has a safe "" default instead of an
+    # AttributeError the moment anything reads pkg.country.
+    country: str = ""
+    country_source: str = ""        # SHIPPING_MARK_PREFIX | ""
+    filename_reference: str = ""
+    shipping_mark_raw: str = ""
+    shipping_mark_confidence: float = 0.0
     # v10 audit: first page the package header was seen on, and the internal
     # dedup set used while items are being fed in (see Parser._add_item).
     first_page: Optional[int] = None
@@ -501,6 +610,17 @@ class Package:
     or_list_review_reason: str = ""
     or_list_candidate_store: str = ""
     or_list_candidate_score: float = 0.0
+    # v16 (point 3 correction): the FULL dynamic OR List business-field
+    # record for this package (display_header -> value, in upload column
+    # order) -- e.g. {"OR#": "OR1172", "Ref#": "po38533"} for a 2-field OR
+    # List, or all 5 fields for "Shop|OR#|Ref#|PO|Invoice|Fulfillment No.".
+    # or_number/so_number above remain the backward-compatible aliases for
+    # the 1st/2nd field (same relationship as pl_group_export.
+    # StoreOrMatchResult.matched_or/matched_so vs matched_business_fields);
+    # business_fields is the complete, order-preserving source of truth so
+    # NO field is ever silently dropped just because the physical Packing
+    # List / Sublist templates only have room to DISPLAY the first two.
+    business_fields: dict = field(default_factory=dict)
     _seen_item_keys: set = field(default_factory=set, repr=False, compare=False)
 
     @property
@@ -637,22 +757,89 @@ def resolve_shipping_mark_confidence(source: str) -> float:
 
 
 # v14 (spec sections 2-3): country detection from the resolved Shipmark's
-# prefix -- "^(CN|KR|JP|BE|US|TW)" per spec, anchored at the very start of
-# the string and requiring the next character (if any) to NOT be another
-# letter, so "US-1234" matches "US" but "USER-1234" or "USA-1234" do not
-# (never a guess beyond the literal 6-code list the spec names). Distinct
-# from any store token embedded elsewhere in the Shipmark (e.g. the "KR" in
+# leading prefix, anchored at the very start of the string and requiring
+# the next character (if any) to NOT be another letter, so "US-1234"
+# matches "US" but "USER-1234" or "USA-1234" do not. Distinct from any
+# store token embedded elsewhere in the Shipmark (e.g. the "KR" in
 # "CN-1529_KR_PVG_POP" is a STORE token, not a country -- this only ever
 # looks at the leading prefix).
-RE_SHIPMARK_COUNTRY_PREFIX = re.compile(r'^(CN|KR|JP|BE|US|TW)(?![A-Z])', re.IGNORECASE)
+#
+# v19 (SG-533-TEST consolidation report, requirement 1): this USED TO be a
+# finite 6-code alternation "^(CN|KR|JP|BE|US|TW)" -- any real destination
+# market outside that hardcoded list (SG, TH, PH, AU, MY, ID, ...) could
+# never be detected at all, no matter how clean its own Shipmark/filename
+# prefix was, and fell through to country="" (unresolved) even when the
+# prefix was completely unambiguous (e.g. the real "SG-553_CN.pdf" /
+# "SG-553_VN.pdf" fixture). Per the explicit instruction "do NOT maintain
+# a finite whitelist", this is now a STRUCTURAL rule only: exactly 2
+# letters at the very start of the string, immediately followed by a
+# non-letter (delimiter, digit, or end of string) -- the same "first
+# structured 2-letter destination prefix" shape the 6-code version already
+# required, just no longer restricted to a specific content list. This is
+# still never a content guess (no fuzzy country-name matching, no address
+# parsing) -- purely the same leading-token structural signal as before,
+# widened.
+RE_SHIPMARK_COUNTRY_PREFIX = re.compile(r'^([A-Z]{2})(?![A-Z])', re.IGNORECASE)
 
 
 def detect_shipment_country(shipmark: str) -> str:
-    """Returns one of CN/KR/JP/BE/US/TW, or "" if the Shipmark's prefix
-    doesn't match any known country code (never guessed)."""
+    """Returns the 2-letter leading prefix (uppercased) of `shipmark`, or ""
+    if it doesn't structurally look like one (see RE_SHIPMARK_COUNTRY_
+    PREFIX's docstring -- v19: no longer restricted to a fixed content
+    list, purely structural)."""
     text = (shipmark or "").strip()
     m = RE_SHIPMARK_COUNTRY_PREFIX.match(text)
     return m.group(1).upper() if m else ""
+
+
+def resolve_package_country(pkg) -> None:
+    """v20 (SG-533-TEST final cleanup, requirement 2): extracted verbatim
+    from run_pipeline()'s own Shipmark-resolution loop (pure refactor --
+    same logic, same order, same conditions -- so it can be exercised by
+    permanent tests against the REAL production code path, not a
+    re-implementation of it). Mutates pkg.country / pkg.country_source in
+    place; requires pkg.shipping_mark, pkg.shipping_mark_source, and
+    pkg.filename_reference to already be resolved (as run_pipeline()
+    itself guarantees before calling this).
+
+    v19 (SG-533-TEST consolidation report, requirement 1): country from
+    the resolved Shipmark's prefix. Falls back to reference_code's own
+    prefix when the resolved shipping_mark itself doesn't carry a
+    recognisable country code (e.g. it resolved from PL text/table
+    content that doesn't start with the shipment code) -- filename_
+    reference is still Shipmark-derived data, just from a lower-priority
+    source, so this fallback stays within the spec's own priority list
+    rather than inventing a new signal. Records WHICH of the two sources
+    actually produced the match (country_source), for audit. Priority
+    ("explicit PDF destination/structured Shipping Mark -> parsed
+    reference -> filename prefix when structurally valid"):
+      1) pkg.shipping_mark, but ONLY when it came from a real PDF-content
+         source (shipping_mark_source not in ("", "FILENAME_REFERENCE_
+         CODE")) -- a genuine printed Shipping Mark field is the
+         strongest signal.
+      2) pkg.filename_reference (== pkg.reference_code, this codebase's
+         one "parsed reference"/"filename prefix" signal -- there is no
+         separate third source today) -- covers both "shipping_mark
+         itself has no country prefix" AND "there was no real Shipping
+         Mark field at all and shipping_mark IS the filename reference"
+         (the real SG-533-TEST shape: no Shipping Mark field in the PDF
+         at all, e.g. "SG-553_CN.pdf" -> reference_code "SG-553_CN" ->
+         country "SG")."""
+    _shipmark_is_pdf_sourced = pkg.shipping_mark_source not in ("", "FILENAME_REFERENCE_CODE")
+    _country_from_shipmark = detect_shipment_country(pkg.shipping_mark) if _shipmark_is_pdf_sourced else ""
+    if _country_from_shipmark:
+        pkg.country = _country_from_shipmark
+        pkg.country_source = "SHIPPING_MARK_PREFIX"
+    else:
+        _country_from_filename = detect_shipment_country(pkg.filename_reference) or (
+            detect_shipment_country(pkg.shipping_mark) if not _shipmark_is_pdf_sourced else ""
+        )
+        if _country_from_filename:
+            pkg.country = _country_from_filename
+            pkg.country_source = "FILENAME_PREFIX"
+        else:
+            pkg.country = ""
+            pkg.country_source = ""
 
 
 def _norm_label_cell(s: str) -> str:
@@ -2005,17 +2192,30 @@ def compute_counting_scope_key(pkg: Package) -> Tuple[str, str]:
     except ImportError:
         store_identity_fn = lambda s: str(s or "").strip().upper()
 
-    # v14 (spec sections 3/11): non-China countries (KR/JP/BE/US/TW) are
-    # SINGLE_DESTINATION -- never apply the China multi-Store split/
-    # numbering logic to them, even if an OR List or the CN-only classifier
-    # happens to produce a store-looking match. `pkg.country` is only ever
-    # a known non-"" value once detect_shipment_country() has matched one
-    # of the 6 explicit country codes (never a guess), and "" (unknown/not
-    # yet detected -- e.g. a caller/test that never touched this v14
-    # field) intentionally falls through to the pre-v14 behavior below
-    # unchanged, so every existing caller keeps working exactly as before.
-    _NON_CN_COUNTRIES = {"KR", "JP", "BE", "US", "TW"}
-    if pkg.country in _NON_CN_COUNTRIES:
+    # v14 (spec sections 3/11): non-China countries are SINGLE_DESTINATION
+    # -- never apply the China multi-Store split/numbering logic to them,
+    # even if an OR List or the CN-only classifier happens to produce a
+    # store-looking match. "" (unknown/not yet detected -- e.g. a caller/
+    # test that never touched this v14 field) intentionally falls through
+    # to the pre-v14 behavior below unchanged, so every existing caller
+    # keeps working exactly as before.
+    #
+    # v18 (SG-533-TEST real-fixture regression report, root cause): this
+    # USED TO be a finite 5-country BLOCKLIST (`pkg.country in {"KR",
+    # "JP", "BE", "US", "TW"}`) -- backwards from the stated intent, since
+    # any country code NOT in that hardcoded set (SG, TH, PH, AU, MY, ...)
+    # fell through as if it were CN. A v18 fix widened this to a positive
+    # allowlist that still treated "" as eligible.
+    #
+    # v19 (SG-533-TEST consolidation report, requirement 2): now STRICT --
+    # eligible for the CN multi-Store path only when country is literally
+    # "CN" (see pl_group_export.is_cn_port_eligible()'s docstring for the
+    # full root-cause writeup; same fix, same reasoning, applied here for
+    # the carton-numbering scope key). Callers that construct a Package
+    # directly (bypassing detect_shipment_country()) and want CN-style
+    # per-Store scope grouping must now set pkg.country = "CN" explicitly
+    # -- relying on the "" default is no longer sufficient.
+    if pkg.country != "CN":
         store = "UNRESOLVED"
     elif pkg.or_list_match_status == "OK" and pkg.or_list_store:
         store = pkg.or_list_store
@@ -2080,35 +2280,61 @@ def assign_true_global_numbers(packages: List[Package]):
 
 
 def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recursive: bool):
-    """Fill pkg.port / pkg.store for every CN-factory package, using the exact
-    same detect_factory() + match_store() rule already used to split CN
-    shipments by store/port (pl_group_export.py) — "quy luật chia port và
-    store" the warehouse team already uses. Non-CN-factory packages (POP,
-    SBGEAR, QIFENG, JION, or unclassifiable) are left with port="" / store=""
-    (blank) — fill in manually if needed, same as OR No. / SO No. when no
-    OR List match is available."""
+    """Fill pkg.port / pkg.store / pkg.store_confidence / pkg.store_suggestion
+    -- the ONE canonical Store/Port resolution for every package, using
+    detect_factory() + match_store() (pl_group_export.py) — "quy luật chia
+    port và store" the warehouse team already uses.
+
+    v16 (bug fix -- CN-6557 PORT regression, corrected): eligibility for
+    this resolver is PURELY the package's DESTINATION COUNTRY (pge.
+    is_cn_port_eligible), never any factory value. Store/Port belong to
+    the Shipping Mark BODY (the Store) and are COMPLETELY INDEPENDENT of
+    the trailing factory/origin suffix -- CN, VN, POP, SBGEAR, QIFENG,
+    JION all resolve identically once destination country is CN (an
+    earlier draft of this fix wrongly re-gated on factory in {"CN","VN"},
+    which was just as wrong as the original "factory=='CN'" bug -- see
+    is_cn_port_eligible()'s own comment).
+
+    v19 (SG-533-TEST consolidation report): eligibility is now STRICT --
+    ONLY country == "CN" runs this resolver at all (is_cn_port_eligible()
+    returns False for "" and every other country, so the loop below
+    `continue`s immediately, never even calling match_store()). Any
+    non-CN-destination package, OR a genuinely unresolved/unknown
+    destination, is left with port="" / store="" (blank) -- fill in
+    manually if needed, same as OR No. / Ref No. when no OR List match is
+    available.
+
+    export_grouped_pl() (pl_group_export.py) MUST consume pkg.port/pkg.store
+    from here rather than re-running match_store() itself -- see
+    is_cn_port_eligible()'s docstring for why (single canonical port
+    resolution per Package, spec: "there must be ONE canonical port
+    resolution result per Package")."""
     try:
         import pl_group_export as pge
     except ImportError:
         log.warning("pl_group_export not importable — PORT column will stay blank for all packages.")
         return
     cache: Dict[str, str] = {}
-    n_cn = n_matched = 0
+    n_eligible = n_matched = 0
     for pkg in packages:
         factory = pge.detect_factory(pkg.reference_code, pkg.source_file)
-        if factory != "CN":
+        if not pge.is_cn_port_eligible(pkg, factory):
             continue
-        n_cn += 1
+        n_eligible += 1
         signal = pge._collect_cn_signal(pkg, pdf_folder, recursive, cache)
         store, confidence, suggestion = pge.match_store(signal)
+        pkg.store_confidence = confidence
+        pkg.store_suggestion = suggestion
         if store in pge.STORE_MASTER:
             pkg.store = store
             pkg.port = str(pge.STORE_MASTER[store]["port"])
+            pkg.store_display = pge.store_display_name(store)
             n_matched += 1
         else:
             pkg.store = "REVIEW"
             pkg.port = ""
-    log.info(f"CN store/port classification: {n_matched}/{n_cn} CN package(s) matched to a store+port.")
+            pkg.store_display = ""
+    log.info(f"CN store/port classification: {n_matched}/{n_eligible} CN-destination package(s) matched to a store+port.")
 
 # ── Status ─────────────────────────────────────────────────────────────────
 def overall_status(pkg: Package) -> Tuple[str, str]:
@@ -2173,6 +2399,108 @@ PL_HEADERS_EN = [
     "Weight (KG)", "CBM", "Origin Country", "Origin Country's HTSCODE",
     "Shipping Mark", "PORT", "中国标签名称",
 ]
+
+# v15 (bug fix -- BUG3, OR List "Ref#" mislabeled "SO No."): recognized
+# business-field header aliases get a canonical, customer-facing display
+# name; anything unrecognized is preserved EXACTLY as uploaded (spec: the
+# OR List's business fields stay fully dynamic -- never hardcoded to just
+# OR/Ref). Keys are the alias uppercased with every non-alphanumeric
+# character stripped (same normalization style already used by
+# pl_or_list_import.py's own header-alias matching, kept independent here
+# per this module's "no cross-import" architecture).
+_BUSINESS_FIELD_CANONICAL_LABELS = {
+    "OR": "OR No.", "ORNO": "OR No.", "ORNUMBER": "OR No.", "ORCODE": "OR No.",
+    "OUTBOUNDREQUEST": "OR No.",
+    "SO": "SO No.", "SONO": "SO No.", "SONUMBER": "SO No.", "SOORDER": "SO No.",
+    "SOORDERNO": "SO No.", "SALESORDER": "SO No.", "SALESORDERNO": "SO No.",
+    "REF": "Ref No.", "REFNO": "Ref No.", "REFERENCENO": "Ref No.",
+    "REFERENCENUMBER": "Ref No.",
+    "PO": "PO", "PONO": "PO", "PONUMBER": "PO",
+    "INVOICE": "Invoice No.", "INVOICENO": "Invoice No.", "INVOICENUMBER": "Invoice No.",
+}
+
+
+def canonicalize_business_field_label(raw_label: str) -> str:
+    """"OR#"/"OR No" -> "OR No."; "Ref#"/"Ref No"/"Reference No" -> "Ref
+    No."; ... -- recognized aliases only (see _BUSINESS_FIELD_CANONICAL_
+    LABELS above). Any other literal header text (e.g. "Fulfillment No.",
+    "Buyer", "Batch") is returned exactly as uploaded, never renamed --
+    the OR List's business-field architecture stays fully dynamic."""
+    norm = re.sub(r"[^A-Z0-9]", "", str(raw_label or "").upper())
+    canon = _BUSINESS_FIELD_CANONICAL_LABELS.get(norm)
+    if canon:
+        return canon
+    return str(raw_label or "").strip()
+
+
+def split_business_fields(business_fields):
+    """v17 (spec sections 12/13/15): Package.business_fields (the FULL,
+    order-preserving OrderedDict from the matched OR List row) -> (or_
+    value, ref_value, optional_items). Position 0 is always the OR value,
+    position 1 the Ref No. value (matches pl_group_export.match_store_
+    and_or's own matched_or/matched_so convention -- unchanged from
+    before); everything from position 2 onward is an "optional" dynamic
+    business field (spec: SO/PO/Invoice/Fulfillment No./Buyer/... -- never
+    a hardcoded finite list), returned as an (label, value) list in
+    original upload order, label preserved verbatim. Never raises on a
+    short/empty dict -- missing positions are just "" ."""
+    items = list((business_fields or {}).items())
+    or_value = str(items[0][1]) if len(items) >= 1 else ""
+    ref_value = str(items[1][1]) if len(items) >= 2 else ""
+    optional_items = [(str(k), str(v)) for k, v in items[2:]]
+    return or_value, ref_value, optional_items
+
+
+# v17 (spec sections 12/16): Store / OR No. / Ref No. are now the FIXED,
+# ALWAYS-SHOWN business backbone (never renamed by the OR List's own
+# header text -- spec: "Do NOT relabel Ref# as SO/SO Order/Invoice") --
+# resolve_pl_table_headers() no longer takes the uploaded OR List's first-
+# two labels at all (canonicalize_business_field_label/_BUSINESS_FIELD_
+# CANONICAL_LABELS above are kept for anything that still wants to
+# canonicalize a raw header string directly, e.g. existing direct tests,
+# but are no longer consulted here since the displayed labels for these 3
+# columns never vary).
+def resolve_pl_table_headers(optional_labels=None):
+    """-> (headers_en, headers_cn), each PL_HEADERS_EN/PL_HEADERS_CN's
+    original fixed prefix (Item#) + Store/OR No./Ref No. (fixed, spec
+    section 12) + `optional_labels` (verbatim, spec section 13 -- only
+    the OR List's ACTUAL extra columns beyond OR/Ref, never invented
+    blank ones -- spec section 16) + the original fixed suffix (Product
+    Name onward, completely unchanged in meaning/order). This is the ONE
+    place the Packing List's business-field columns are decided; grouped
+    Packing Lists reuse it via write_workbook, and the Sublist Excel/PDF
+    are handed the SAME resolved `optional_labels` list independently
+    (their own physical layouts, but never a disagreeing field set)."""
+    optional_labels = [str(l) for l in (optional_labels or []) if str(l or "").strip()]
+    headers_en = ([PL_HEADERS_EN[0], "Store", "OR No.", "Ref No."]
+                  + optional_labels + list(PL_HEADERS_EN[3:]))
+    headers_cn = ([PL_HEADERS_CN[0], "", "OR 编码", ""]
+                  + [""] * len(optional_labels) + list(PL_HEADERS_CN[3:]))
+    return headers_en, headers_cn
+
+
+def _pl_extra_cols(n_optional: int) -> int:
+    """Total inserted columns ahead of the original 'Product Name' column
+    -- Store (+1, brand new) plus every optional business field (+1 each,
+    spec: never truncate to a fixed count)."""
+    return 1 + n_optional
+
+
+def _pl_shift_col(oc: int, extra: int) -> int:
+    """Original (pre-v17) 1-based Packing List column number -> its new
+    number now that Store + N optional fields are inserted. oc==1 (Item#)
+    is unchanged. oc in (2, 3) were the old OR No./SO No. columns -- they
+    become the new fixed OR No./Ref No. slots, shifted by exactly +1
+    (Store alone takes the new column 2, regardless of how many optional
+    fields exist). oc>=4 (Product Name onward -- unchanged meaning) shifts
+    by the FULL `extra` (Store + every optional field), since the optional
+    fields themselves occupy the columns in between."""
+    if oc <= 1:
+        return oc
+    if oc in (2, 3):
+        return oc + 1
+    return oc + extra
+
 PL_HEADERS_CN = [
     "项目", "OR 编码", "SO 编码", "货品名称", "SKU编码",
     "条形码", "单位", "数量", "箱号", "包装条形码",
@@ -2180,7 +2508,13 @@ PL_HEADERS_CN = [
     "", "", "原产国", "原产国",
     "", "", "",
 ]
-NCOLS = 20
+NCOLS_BASE = 20  # v17: original fixed-template column count -- see
+                 # _pl_extra_cols()/_pl_shift_col() for how Store + N
+                 # optional business fields extend this per write_workbook()
+                 # call; NCOLS (the pre-v17 name) intentionally no longer
+                 # exists as a bare module constant since the real column
+                 # count now varies by shipment (Store always +1, plus
+                 # however many optional OR List fields that shipment has).
 TABLE_HDR_ROW1 = 12  # English header row (matches the real template exactly)
 TABLE_HDR_ROW2 = 13  # Chinese header row
 FIRST_ITEM_ROW = 14
@@ -2188,8 +2522,9 @@ FIRST_ITEM_ROW = 14
 # item rows of that carton (matches the real template exactly): Carton#,
 # Packaging code, L/W/H, Weight, CBM. Everything else (incl. Origin Country,
 # HTS Code, Shipping Mark, PORT) is left un-merged / repeated per row, same
-# as the template.
-_MERGE_COLS = [9, 10, 11, 12, 13, 14, 15]  # I,J,K,L,M,N,O
+# as the template. Original (pre-v17) column numbers -- shifted by `extra`
+# (see _pl_shift_col) at the point of use, since these are all oc>=4.
+_MERGE_COLS_BASE = [9, 10, 11, 12, 13, 14, 15]  # I,J,K,L,M,N,O
 
 # v8: document header block (rows 1-11) — SHIPPER / CONSIGNEE are the same
 # entity on every CN shipment (confirmed against 2 real PL samples), so they
@@ -2337,16 +2672,31 @@ def _write_pl_doc_header(ws, notify_party_text: str, is_cn: bool = True):
         ws.cell(row=r, column=12).border = _hdr_border(left=True)
 
 
-def _write_pl_table_header(ws):
-    for c, val in enumerate(PL_HEADERS_EN, start=1):
+def _write_pl_table_header(ws, optional_labels=None):
+    """optional_labels (v17, spec sections 12/13/16): the OR List's actual
+    extra business columns beyond OR/Ref (e.g. ["SO", "PO", "Invoice",
+    "Fulfillment No.", "Buyer"]), verbatim, in original order -- []/None
+    when the OR List only has Shop|OR#|Ref# (spec: never invent blank
+    optional rows). Returns the resolved `extra` (Store + len(optional_
+    labels)) so the caller (write_workbook) can reuse the SAME value for
+    the item rows / merges / column widths below it -- one computation,
+    never independently re-derived."""
+    optional_labels = list(optional_labels or [])
+    extra = _pl_extra_cols(len(optional_labels))
+    headers_en, headers_cn = resolve_pl_table_headers(optional_labels)
+    for c, val in enumerate(headers_en, start=1):
         ws.cell(row=TABLE_HDR_ROW1, column=c, value=val or None)
-    for c, val in enumerate(PL_HEADERS_CN, start=1):
+    for c, val in enumerate(headers_cn, start=1):
         ws.cell(row=TABLE_HDR_ROW2, column=c, value=val or None)
-    ws.merge_cells(start_row=TABLE_HDR_ROW1, start_column=11, end_row=TABLE_HDR_ROW1, end_column=13)
-    ws.merge_cells(start_row=TABLE_HDR_ROW2, start_column=11, end_row=TABLE_HDR_ROW2, end_column=13)
+    dim_start = _pl_shift_col(11, extra)
+    dim_end = _pl_shift_col(13, extra)
+    ws.merge_cells(start_row=TABLE_HDR_ROW1, start_column=dim_start, end_row=TABLE_HDR_ROW1, end_column=dim_end)
+    ws.merge_cells(start_row=TABLE_HDR_ROW2, start_column=dim_start, end_row=TABLE_HDR_ROW2, end_column=dim_end)
+    ncols = NCOLS_BASE + extra
     for r in (TABLE_HDR_ROW1, TABLE_HDR_ROW2):
-        for c in range(1, NCOLS + 1):
+        for c in range(1, ncols + 1):
             _style_cell(ws.cell(row=r, column=c), bold=False, align="center", wrap=True)
+    return extra
 
 
 def _auto_w(ws, cap=40):
@@ -2356,13 +2706,15 @@ def _auto_w(ws, cap=40):
         ws.column_dimensions[letter].width = min(w + 3, cap)
 
 
-def _apply_pl_merge(ws, start_row: int, end_row: int):
+def _apply_pl_merge(ws, start_row: int, end_row: int, extra: int = 0):
     """Merge the carton-level columns across all item rows of one package —
-    plain style, no fill, no bold (matches the requested no-color grid)."""
+    plain style, no fill, no bold (matches the requested no-color grid).
+    `extra` (v17): shifts _MERGE_COLS_BASE by the same Store+optional-
+    fields offset _write_pl_table_header used for this same sheet."""
     if end_row <= start_row:
         return
-    for col in _MERGE_COLS:
-        letter = get_column_letter(col)
+    for col in _MERGE_COLS_BASE:
+        letter = get_column_letter(_pl_shift_col(col, extra))
         ws.merge_cells(f"{letter}{start_row}:{letter}{end_row}")
 
 
@@ -2422,8 +2774,40 @@ def _resolve_notify_party(packages: List[Package], is_cn: bool) -> str:
 
 
 # ── Workbook writer ────────────────────────────────────────────────────────
+def _pl_col_widths(extra: int, n_optional: int) -> Dict[str, float]:
+    """v17: PL_COL_WIDTHS (a fixed A:T-letter dict) reflowed for however
+    many columns Store + optional business fields inserted -- Store/OR
+    No. reuse the original "OR No." column's width, Ref No. reuses the
+    original "SO No." column's width, each optional field gets a plain
+    14-char default (no real template to copy a width from), and every
+    original Product-Name-onward column keeps its EXACT original width,
+    just relocated to its new column letter via _pl_shift_col."""
+    orig = list(PL_COL_WIDTHS.values())  # index0..19 == original col1..20
+    widths: Dict[int, float] = {1: orig[0], 2: orig[1], 3: orig[1], 4: orig[2]}
+    for i in range(n_optional):
+        widths[5 + i] = 14
+    for i, w in enumerate(orig[3:], start=4):
+        widths[_pl_shift_col(i, extra)] = w
+    return {get_column_letter(c): w for c, w in widths.items()}
+
+
 def write_workbook(output_path: Path, packages: List[Package], run_meta: Optional[dict] = None,
-    carton_display_field: str = "global_carton_num"):
+    carton_display_field: str = "global_carton_num",
+    optional_business_field_labels: Optional[List[str]] = None):
+    """optional_business_field_labels (v17, spec sections 12/13/16):
+    the uploaded OR List's own business columns BEYOND OR/Ref (e.g. a
+    "Shop|OR#|Ref#|SO|PO|Invoice|Fulfillment No.|Buyer" OR List's
+    ["SO","PO","Invoice","Fulfillment No.","Buyer"]), verbatim, in
+    original order. None/[] (the default) means the OR List had no
+    business columns beyond OR/Ref (or none was uploaded at all) -- the
+    Packing List then shows exactly Item#/Store/OR No./Ref No. + the
+    unchanged product/carton columns, never invented blank optional rows.
+    Store/OR No./Ref No. themselves are now FIXED, always-shown columns
+    (spec section 12) -- their values come from pkg.store_display /
+    pkg.or_number / pkg.so_number, same canonical per-Package fields
+    every other consumer (Match_Status, Raw_Data, grouped Packing Lists)
+    already reads, never independently re-derived here."""
+    optional_labels = list(optional_business_field_labels or [])
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -2432,7 +2816,8 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
     is_cn = _is_all_cn_factory(packages)
     notify_party_text = _resolve_notify_party(packages, is_cn)
     _write_pl_doc_header(ws1, notify_party_text, is_cn)
-    _write_pl_table_header(ws1)
+    extra = _write_pl_table_header(ws1, optional_labels)
+    n_optional = len(optional_labels)
 
     row_idx = FIRST_ITEM_ROW
     item_no = 0
@@ -2440,16 +2825,21 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         origin    = pkg.origin
         pkg_start = row_idx
 
-        # v13 (FIX6): OR No. / SO No. -- filled from a successful OR List
-        # match when available, left "" otherwise (never a guess; matches
-        # the same "manual" fallback the sheet has always had for anything
-        # this tool can't determine on its own).
+        # v13 (FIX6)/v17: Store / OR No. / Ref No. -- filled from the SAME
+        # canonical per-Package fields every other output already uses
+        # (pkg.store_display / pkg.or_number / pkg.so_number), "" when
+        # unresolved (never a guess -- same "manual" fallback as always).
+        pkg_store = pkg.store_display or ""
         pkg_or = pkg.or_number or ""
-        pkg_so = pkg.so_number or ""
+        pkg_ref = pkg.so_number or ""
+        _, _, opt_items = split_business_fields(getattr(pkg, "business_fields", None))
+        opt_map = dict(opt_items)
+        pkg_optional_values = [opt_map.get(label, "") for label in optional_labels]
         if not pkg.items:
             item_no += 1
             ws1.append([
-                item_no, pkg_or, pkg_so,                # Item# / OR No. / SO No.
+                item_no, pkg_store, pkg_or, pkg_ref,     # Item# / Store / OR No. / Ref No.
+            ] + pkg_optional_values + [
                 "", "", "", "", "",                     # Product/SKU/Barcode/UOM/Qty (no items)
                 getattr(pkg, carton_display_field), pkg.package_code,
                 pkg.length, pkg.width, pkg.height,
@@ -2462,7 +2852,8 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
             for item in pkg.items:
                 item_no += 1
                 ws1.append([
-                    item_no, pkg_or, pkg_so,                          # Item# / OR No. / SO No.
+                    item_no, pkg_store, pkg_or, pkg_ref,          # Item# / Store / OR No. / Ref No.
+                ] + pkg_optional_values + [
                     item.product_name, item.product_code, item.barcode,
                     item.unit, item.quantity,
                     getattr(pkg, carton_display_field), pkg.package_code,
@@ -2474,40 +2865,48 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                 row_idx += 1
 
         end_row = row_idx - 1
+        product_name_col = _pl_shift_col(4, extra)
+        ncols = NCOLS_BASE + extra
         for r in range(pkg_start, end_row + 1):
-            align_by_col = {4: "left"}  # Product Name left-aligned, rest centered
-            for c in range(1, NCOLS + 1):
+            align_by_col = {product_name_col: "left"}  # Product Name left-aligned, rest centered
+            for c in range(1, ncols + 1):
                 _style_cell(ws1.cell(row=r, column=c), bold=False,
                             align=align_by_col.get(c, "center"), wrap=True)
-        _apply_pl_merge(ws1, pkg_start, end_row)
+        _apply_pl_merge(ws1, pkg_start, end_row, extra)
 
     # ── TOTAL row ────────────────────────────────────────────────────────────
+    ncols = NCOLS_BASE + extra
     total_qty = sum(p.calc_qty for p in packages)
     total_cartons = len(packages)
     total_weight = sum(p.weight for p in packages if p.weight is not None)
     total_cbm = sum(p.cbm for p in packages if p.cbm is not None)
     total_row = row_idx
+    uom_col = _pl_shift_col(7, extra)
+    qty_col = _pl_shift_col(8, extra)
+    carton_col = _pl_shift_col(9, extra)
+    weight_col = _pl_shift_col(14, extra)
+    cbm_col = _pl_shift_col(15, extra)
     ws1.cell(row=total_row, column=1, value="TOTAL")
-    ws1.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=7)
-    ws1.cell(row=total_row, column=8, value=total_qty)
-    ws1.cell(row=total_row, column=9, value=f"{total_cartons} Cartons")
-    ws1.cell(row=total_row, column=14, value=round(total_weight, 3) if total_weight else 0)
-    ws1.cell(row=total_row, column=15, value=round(total_cbm, 6) if total_cbm else 0)
-    for c in range(1, NCOLS + 1):
+    ws1.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=uom_col)
+    ws1.cell(row=total_row, column=qty_col, value=total_qty)
+    ws1.cell(row=total_row, column=carton_col, value=f"{total_cartons} Cartons")
+    ws1.cell(row=total_row, column=weight_col, value=round(total_weight, 3) if total_weight else 0)
+    ws1.cell(row=total_row, column=cbm_col, value=round(total_cbm, 6) if total_cbm else 0)
+    for c in range(1, ncols + 1):
         _style_cell(ws1.cell(row=total_row, column=c), bold=False, align="center", wrap=True)
 
     # Rows 8-11 (Package/Quantity/Weight/CBM totals, above the table) — live
     # formulas referencing the TOTAL row, same as the real template.
-    ws1.cell(row=8, column=2, value=f"={get_column_letter(9)}{total_row}")
-    ws1.cell(row=9, column=2, value=f"={get_column_letter(8)}{total_row}")
-    ws1.cell(row=10, column=2, value=f"={get_column_letter(14)}{total_row}")
-    ws1.cell(row=11, column=2, value=f"={get_column_letter(15)}{total_row}")
+    ws1.cell(row=8, column=2, value=f"={get_column_letter(carton_col)}{total_row}")
+    ws1.cell(row=9, column=2, value=f"={get_column_letter(qty_col)}{total_row}")
+    ws1.cell(row=10, column=2, value=f"={get_column_letter(weight_col)}{total_row}")
+    ws1.cell(row=11, column=2, value=f"={get_column_letter(cbm_col)}{total_row}")
     for r in (8, 9, 10, 11):
         _style_text(ws1.cell(row=r, column=2), bold=False, align="left", wrap=False)
 
     for r in range(FIRST_ITEM_ROW, total_row + 1):
         ws1.row_dimensions[r].height = ws1.row_dimensions[r].height or 18
-    for letter, width in PL_COL_WIDTHS.items():
+    for letter, width in _pl_col_widths(extra, n_optional).items():
         ws1.column_dimensions[letter].width = width
     ws1.freeze_panes = None
 
@@ -2565,6 +2964,20 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         "shipping_mark", "shipping_mark_source", "shipping_mark_confidence",
         "filename_reference", "or_list_match_status", "or_list_store",
         "counting_scope_key", "store_carton_display", "global_carton_display",
+        # v15 (bug fix -- cross-output consistency): the SAME canonical
+        # port/store pl_group_export.export_grouped_pl() now consumes
+        # (never re-detects) for 03_CN_BY_PORT / PL_SPLIT_CONTROL / PL_
+        # SPLIT_VALIDATION -- exposed here too so Raw_Data can never
+        # silently disagree with PL_Total's own PORT column.
+        "port", "store",
+        # v16 (point 3 correction): the FULL dynamic OR List business-field
+        # record (Package.business_fields) as "Label: value" pairs, so a
+        # 3+-field OR List's extra fields (beyond what the fixed-width
+        # Packing List/Sublist templates have room to DISPLAY, e.g. PO/
+        # Invoice/Fulfillment No./Buyer) are still fully auditable here --
+        # never silently lost, just not physically shown on those two
+        # fixed-column documents.
+        "business_fields",
     ]
     ws3.append(raw_headers)
     for cell in ws3[1]:
@@ -2580,12 +2993,20 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                 pkg.shipping_mark, pkg.shipping_mark_source, pkg.shipping_mark_confidence,
                 pkg.filename_reference, pkg.or_list_match_status, pkg.or_list_store,
                 pkg.counting_scope_key, pkg.carton_display, pkg.global_carton_display,
+                pkg.port, pkg.store,
+                "; ".join(f"{k}: {v}" for k, v in (pkg.business_fields or {}).items()),
             ]
             if item is None:
                 ws3.append([
                     pkg.source_file, pkg.first_page, pkg.reference_code, normalize(pkg.reference_code),
                     pkg.package_code, normalize_code(pkg.package_code), pkg.pdf_package_seq,
-                    "", "", "", "", "", "", "", "", pkg.declared_total_qty, pkg.calc_qty,
+                    # gtin, gtin_valid_13digit, sku_raw, sku_normalized, description,
+                    # description_raw, description_source, description_master_verified
+                    "", "", "", "", "", "", "", "",
+                    # uom, condition, quantity (no item -> nothing to report; must still
+                    # occupy their column so every later column stays aligned with header)
+                    "", "", "",
+                    pkg.declared_total_qty, pkg.calc_qty,
                     pstatus, dim_status, pkg.dim_source_method,
                     pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
                     "ZERO_ITEMS_IN_PACKAGE",
@@ -2901,16 +3322,12 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
                 pkg.shipping_mark_confidence = 0.20
         pkg.shipping_mark_raw = pkg.shipping_mark
         pkg.shipping_mark_confidence = resolve_shipping_mark_confidence(pkg.shipping_mark_source)
-        # v14 (spec sections 2-3): country from the resolved Shipmark's
-        # prefix. Falls back to reference_code's own prefix when the
-        # resolved shipping_mark itself doesn't carry a recognisable
-        # country code (e.g. it resolved from PL text/table content that
-        # doesn't start with the shipment code) -- filename_reference is
-        # still Shipmark-derived data, just from a lower-priority source,
-        # so this fallback stays within the spec's own priority list
-        # rather than inventing a new signal.
-        pkg.country = detect_shipment_country(pkg.shipping_mark) or detect_shipment_country(pkg.filename_reference)
-        pkg.country_source = "SHIPPING_MARK_PREFIX" if pkg.country else ""
+        # v20 (SG-533-TEST final cleanup, requirement 2): extracted into
+        # resolve_package_country() (pure refactor, identical logic) so
+        # this exact code path is independently unit-testable without a
+        # full PDF pipeline run -- see its docstring for the full
+        # priority-order writeup.
+        resolve_package_country(pkg)
     log.info(f"  OR# found (from PL text): {sum(1 for p in packages if p.or_number)}/{len(packages)}")
     log.info(f"  SO# found (from PL text): {sum(1 for p in packages if p.so_number)}/{len(packages)}")
     log.info(f"  Shipping Mark from PL text (not filename fallback): "
@@ -2970,6 +3387,13 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
             pkg.or_list_candidate_store = m.candidate_store
             pkg.or_list_candidate_score = m.candidate_score
             if m.status == "OK":
+                # v16 (point 3 correction): capture the FULL dynamic
+                # business-field record, not just the first two -- see
+                # Package.business_fields' docstring. Independent of the
+                # or_number/so_number "PL text wins" priority rule below
+                # (business_fields is entirely OR-List-sourced, always
+                # reflects what the OR List actually said once matched).
+                pkg.business_fields = dict(m.matched_business_fields or {})
                 # PL-text-parsed OR/SO (captured earlier by the Parser)
                 # always takes priority when present -- OR List only fills
                 # in what the PL text itself didn't already give us.
@@ -3041,6 +3465,10 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
                 item.product_name_raw = item.product_name_raw or item.product_name
                 item.product_name_source = "PL_PDF_PRESERVED"
                 item.product_name_master_verified = False
+                # v15 (BUG4): confirmed material SKU/EAN pairs -- enrichment
+                # only, never overwrites a different already-valid parsed
+                # GTIN (see enrich_known_material_ean()'s docstring).
+                enrich_known_material_ean(item)
                 product_names_preserved += 1
                 continue
 
@@ -3096,8 +3524,19 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     }
     global LAST_RUN_META
     LAST_RUN_META = run_meta
+    # v17 (spec sections 12/13/16): thread the uploaded OR List's OPTIONAL
+    # business-field labels (everything beyond the fixed Store/OR No./Ref
+    # No. backbone) through to the Packing List sheet -- [] when the OR
+    # List has no columns beyond OR/Ref, or wasn't uploaded/matched at
+    # all, so write_workbook() shows exactly Store/OR No./Ref No. with no
+    # invented optional columns.
+    _optional_business_field_labels = (
+        list(LAST_OR_LIST_RESULT.business_field_labels[2:])
+        if LAST_OR_LIST_RESULT and LAST_OR_LIST_RESULT.business_field_labels else []
+    )
     write_workbook(output_path, packages, run_meta=run_meta,
-        carton_display_field="global_carton_display")
+        carton_display_field="global_carton_display",
+        optional_business_field_labels=_optional_business_field_labels)
     return packages
 
 # ── Entry point ────────────────────────────────────────────────────────────
@@ -3169,6 +3608,19 @@ if not packages:
 
 SPLIT_OUTPUT_DIR = PL_FOLDER / 'PL_SPLIT_OUTPUT'
 
+# v17 (spec sections 12/13/16): the SAME OPTIONAL OR List business-field
+# labels (everything beyond the fixed Store/OR No./Ref No. backbone) used
+# for PL_Total's Packing List sheet (resolve_pl_table_headers, earlier in
+# this script) -- computed ONCE here and reused for every grouped
+# workbook (via export_grouped_pl, below), the Sublist Excel, AND the
+# Sublist PDF metadata block, so none of the four can ever disagree. []
+# when no OR List was uploaded/matched, or it had no columns beyond
+# OR/Ref (never invented blank optional columns/rows).
+RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS = (
+    list(LAST_OR_LIST_RESULT.business_field_labels[2:])
+    if LAST_OR_LIST_RESULT and LAST_OR_LIST_RESULT.business_field_labels else []
+)
+
 try:
     control_file = export_grouped_pl(
         packages=packages,
@@ -3177,6 +3629,7 @@ try:
         total_workbook=OUTPUT_XLSX,
         pdf_folder=PL_FOLDER,
         recursive=RECURSIVE,
+        optional_business_field_labels=RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS,
     )
 except RuntimeError as e:
     print("XXXX SPLIT FAILED — reconciliation mismatch, nothing was silently swallowed XXXX")
@@ -3222,7 +3675,11 @@ if GENERATE_SUBLIST:
         # passing it straight through is what keeps Sublist order identical
         # to PL_TOTAL (spec requirement).
         log.info("Generating Sublist (Excel, optional secondary output)...")
-        sublist_result = pl_sublist_export.generate_sublist_workbook(packages, sublist_path)
+        # v17: same optional OR List labels as PL_Total / grouped Packing
+        # Lists / Sublist PDF -- see RESOLVED_OPTIONAL_BUSINESS_FIELD_
+        # LABELS, computed once above.
+        sublist_result = pl_sublist_export.generate_sublist_workbook(
+            packages, sublist_path, optional_business_field_labels=RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS)
         sublist_ok, sublist_report = pl_sublist_export.validate_sublist(packages, sublist_result)
         print("\n" + "=" * 70)
         print("SUBLIST (XLSX) VALIDATION REPORT")
@@ -3261,7 +3718,14 @@ if GENERATE_SUBLIST_PDF:
         pdf_dir = SPLIT_OUTPUT_DIR / '05_SUBLIST'
         pdf_path = pdf_dir / 'SUBLIST_TOTAL.pdf'
         log.info("Generating A5 carton Sublist PDF...")
-        pdf_result = pl_sublist_pdf_export.generate_sublist_pdf(packages, pdf_path)
+        # v17: same RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS as PL_Total /
+        # every grouped Packing List / the Sublist Excel above -- computed
+        # exactly once, so none of the four outputs can ever disagree
+        # (spec: "Packing List and Sublist PDF values must agree"). []
+        # when no OR List was uploaded/matched, so the PDF shows exactly
+        # Store/OR No./Ref No. with no invented optional metadata rows.
+        pdf_result = pl_sublist_pdf_export.generate_sublist_pdf(
+            packages, pdf_path, optional_business_field_labels=RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS)
         pdf_problems = pl_sublist_pdf_export.validate_sublist_pdf(packages, pdf_result)
         print("\n" + "=" * 70)
         print("SUBLIST (PDF) VALIDATION REPORT")

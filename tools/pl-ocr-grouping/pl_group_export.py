@@ -418,7 +418,63 @@ def _dynamic_store_filename(label: str) -> str:
     return f"PL_CN_STORE_{safe}.xlsx"
 
 
-_NON_CN_COUNTRIES = {"KR", "JP", "BE", "US", "TW"}
+# v18: _NON_CN_COUNTRIES (a finite 5-country blocklist) was removed here
+# -- both is_cn_port_eligible() and _resolved_store_for_split() below now
+# use a positive allowlist (country in ("", "CN")) instead, see their own
+# docstrings for the root-cause writeup (SG-533-TEST regression report).
+
+# v16 (correction -- an earlier v15 draft of this fix wrongly restricted
+# PORT/Store eligibility to factory in {"CN", "VN"}, which is JUST AS WRONG
+# as the original bug: Store/Port belong to the Shipping Mark BODY and are
+# COMPLETELY INDEPENDENT of the trailing factory/origin suffix. CN-1529_
+# HZ_PVG_POP / _SBGEAR / _QIFENG / _JION / _VN / _CN must ALL resolve to
+# the identical HANGZHOU/PVG -- only the factory/origin dimension differs.
+# This already matches 04_CN_BY_STORE's existing behavior (which combines
+# a Store's POP+SBGEAR/QIFENG/JION+VN+CN cartons into ONE file -- see
+# t_export_grouped_pl_store_split_combines_pop_vn_cn_and_keeps_scope_
+# numbering in tests/test_pl_ocr_core.py); 03_CN_BY_PORT/PL_Total's PORT
+# must not disagree with that by using a narrower, factory-based gate.
+# The ONLY thing that determines eligibility is destination COUNTRY.
+def is_cn_port_eligible(pkg, factory: str = None) -> bool:
+    """True when `pkg` should go through the CN Store/Port resolver
+    (classify_packages_for_port() in pl_ocr_core.py) at all -- i.e. its
+    destination country is CN (or not yet/never determined -- "" is
+    treated as "don't know, don't exclude", matching every other v14
+    country gate in this codebase, e.g. _resolved_store_for_split()
+    below). Store/Port are resolved from the Shipping Mark BODY and are
+    NEVER gated on the trailing factory/origin suffix -- `factory` is
+    accepted only for call-signature stability (some callers already have
+    it computed for the unrelated 02_BY_FACTORY grouping) and is not
+    consulted here.
+
+    This is the ONE structural gate BOTH classify_packages_for_port()
+    (fills pkg.port/pkg.store -- the canonical PL_Total PORT source) and
+    export_grouped_pl()'s 03_CN_BY_PORT split / PL_SPLIT_VALIDATION use --
+    it decides ELIGIBILITY only, never the resolved Store/Port VALUE
+    itself (that always comes from pkg.port/pkg.store, set exactly once by
+    classify_packages_for_port() -- exporters must never re-run
+    match_store() independently, see export_grouped_pl()'s classify loop).
+
+    v18 (SG-533-TEST real-fixture regression report, root cause): this
+    USED TO be `country not in _NON_CN_COUNTRIES` -- a finite 5-country
+    BLOCKLIST (KR/JP/BE/US/TW). That is backwards from the documented
+    intent above ("destination country is CN, or unknown"): any country
+    code NOT in that small hardcoded set -- e.g. SG, TH, PH, AU, MY, or
+    any future/typo'd code -- fell through as ELIGIBLE, the exact opposite
+    of "only CN". A v18 fix widened this to a positive allowlist that
+    still treated "" (unresolved) as eligible.
+
+    v19 (SG-533-TEST consolidation report, requirement 2): now that
+    detect_shipment_country() (see pl_ocr_core.py) is a generic structural
+    rule instead of a fixed 6-code list, a genuinely non-CN Shipmark/
+    filename prefix is detected correctly far more often, so a residual
+    "" no longer means "probably CN, just undetected" as often as before
+    -- it means "no usable country signal at all". Per explicit
+    instruction ("blank/unresolved country must NOT be treated as China-
+    eligible... do not attempt CN resolution and hope it fails"), this is
+    now STRICT: eligible only when country is literally "CN". "" and
+    every other country, known or not, are excluded, no exceptions."""
+    return getattr(pkg, "country", "") == "CN"
 
 
 def _resolved_store_for_split(pkg) -> str:
@@ -427,18 +483,46 @@ def _resolved_store_for_split(pkg) -> str:
     ONE file, sharing the ONE denominator already computed by pl_ocr_core.py's
     counting_scope_key/assign_global_numbers()). Priority mirrors
     compute_counting_scope_key() exactly, INCLUDING its section 3/11 country
-    gate: non-China countries (KR/JP/BE/US/TW) are SINGLE_DESTINATION and
+    gate: non-China countries (any code other than "CN"/"") are SINGLE_DESTINATION and
     never get a China Store split, even if an OR List/CN classifier would
     otherwise resolve one. Then: an OK OR List match first, else the
     CN-only classify_packages_for_port() result, else "" (excluded on
     purpose -- never silently guessed)."""
-    if getattr(pkg, "country", "") in _NON_CN_COUNTRIES:
+    # v19: see is_cn_port_eligible()'s docstring -- same root cause,
+    # now STRICT: only country == "CN" is eligible, "" included in the
+    # exclusion (was previously also treated as eligible).
+    if getattr(pkg, "country", "") != "CN":
         return ""
     if getattr(pkg, "or_list_match_status", "") == "OK" and getattr(pkg, "or_list_store", ""):
         return store_identity(pkg.or_list_store)
     if getattr(pkg, "store", "") and pkg.store != "REVIEW":
         return store_identity(pkg.store)
     return ""
+
+
+def store_display_name(store_key: str) -> str:
+    """Human, customer-facing Store name for a resolved STORE_MASTER key
+    (spec sections 8/12/16/17: "Store" is now a fixed, always-shown
+    business-backbone field on the Packing List and Sublist, alongside OR
+    No./Ref No.). Derived from STORE_MASTER's own `receiver` field with
+    the "Topologie CN - " / "CN - " boilerplate prefix stripped, rather
+    than a second parallel alias/display table -- e.g. "Topologie CN -
+    Hangzhou Mixc" -> "Hangzhou Mixc", "China World NB1026" (no prefix at
+    all) -> unchanged. Falls back to the raw `store_key` (e.g. "REVIEW",
+    or any non-STORE_MASTER value) when there's no STORE_MASTER entry to
+    look up -- never invents a display name. Blank in, blank out."""
+    if not store_key:
+        return ""
+    info = STORE_MASTER.get(store_key)
+    if not info:
+        return store_key
+    receiver = str(info.get("receiver", "") or "").strip()
+    if not receiver:
+        return store_key
+    for prefix in ("Topologie CN - ", "CN - "):
+        if receiver.startswith(prefix):
+            return receiver[len(prefix):]
+    return receiver
 
 
 def _store_display_label(pkg, store_key: str) -> str:
@@ -578,7 +662,16 @@ class StoreOrMatchResult:
     # them generically that way) -- matched_business_fields is the
     # complete, order-preserving source of truth for every field.
     matched_business_fields: "OrderedDict" = _dc_field(default_factory=OrderedDict)
-    match_source: str = ""   # SHIPMARK_TOKEN_EXACT | FILENAME_TOKEN_EXACT | RECEIVER_TEXT_EXACT | FUZZY | ""
+    # v17 (doc correction): the ACTUAL runtime values are SHIPMARK_SAFE_
+    # ALIAS | FILENAME_SAFE_ALIAS | RECEIVER_SAFE_ALIAS | "" (one unified
+    # "safe" tier per signal source -- covers both literal shipping_mark_
+    # tokens hits and safe-typo-tolerant hits under the same label; see
+    # match_store_and_or()). The previous SHIPMARK_TOKEN_EXACT/FUZZY names
+    # in this comment were stale leftover docstring-era terminology that
+    # never matched what the code actually returned -- corrected here
+    # rather than perpetuated, per root-cause audit of test_pl_group_
+    # export.py's 3 stale match_source assertions.
+    match_source: str = ""   # SHIPMARK_SAFE_ALIAS | FILENAME_SAFE_ALIAS | RECEIVER_SAFE_ALIAS | ""
     candidate_store: str = ""
     candidate_score: float = 0.0
     status: str = "REVIEW"   # OK | REVIEW | NO_OR_LIST
@@ -827,7 +920,18 @@ _KEC_STORE_ALIASES = {
     ),
     "IAPM": ("IAPM", "IAPM SHANGHAI"),
     "KERRY": (
-        "KR", "KERRY", "KERY",
+        # v17 (real production bug fix, spec sections 9/32): KRY/KRYY/KER
+        # were MISSING here even though STORE_MASTER["KERRY"]["shipping_
+        # mark_tokens"] already listed all 4 (KR/KRY/KRYY/KER) -- this
+        # table (_KEC_STORE_ALIASES) is a SEPARATE alias index consulted
+        # by match_store_and_or()/_kec_resolve_store_identity(), which had
+        # silently drifted out of sync with STORE_MASTER's own config, so
+        # a real "CN-xxxx_KRY_PVG_POP"-style Shipping Mark would fall
+        # through to REVIEW instead of resolving to Kerry. Root-caused via
+        # test_pl_group_export.py's Kerry regression test; fixed here by
+        # bringing this table back in sync rather than adding a second
+        # parallel fix elsewhere.
+        "KR", "KRY", "KRYY", "KER", "KERY",
         "KERRY CENTER", "KERRY CENTRE",
         "KERRY CENTER FLAGSHIP", "KERRY CENTRE FLAGSHIP",
     ),
@@ -848,7 +952,11 @@ _KEC_STORE_ALIASES = {
     ),
 }
 
-_KEC_SHORT_ALIASES = {"GZ", "HZ", "KR", "SZ"}
+# v17: KRY/KRYY/KER added alongside KR (spec section 10: short aliases must
+# be explicit/exact-token matches, never fuzzy-substring/typo-tolerant --
+# these are short enough that the generic substring-containment scoring
+# path a few lines down would be looser than intended for them).
+_KEC_SHORT_ALIASES = {"GZ", "HZ", "KR", "SZ", "KRY", "KRYY", "KER"}
 _KEC_PORTS = {"PEK", "PVG", "SZX", "TFU"}
 _KEC_GENERIC_TOKENS = {
     "CN", "TOPOLOGIE", "SHOP", "MALL", "REPLEN", "MATERIAL",
@@ -1021,6 +1129,60 @@ def _kec_or_row_kind(row) -> int:
 
 
 
+def _match_store_and_or_flat_no_store(all_rows) -> Optional["StoreOrMatchResult"]:
+    """v18 (SG-533-TEST fix): fallback used ONLY from match_store_and_or()
+    when identity_to_rows is globally empty (see the call site's long
+    comment for the full rationale). Restricted to rows whose
+    detection_source is POSITIONAL_FALLBACK -- the one OR-List header tier
+    where "store_raw" is structurally ambiguous (spec section 5: "only
+    assumption -- first column = Store", which is routinely NOT a real
+    Store name at all, e.g. a bare "OR | SO" sheet). A LITERAL_HEADER or
+    SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER sheet has an intentionally-
+    identified Store column -- if ITS values don't resolve to a known CN
+    Store alias, that is a genuine "no match" and must stay REVIEW exactly
+    as before, never be reinterpreted as an OR value here.
+
+    Returns None when this fallback does not apply at all (caller keeps
+    its existing REVIEW result), or a fully-populated StoreOrMatchResult
+    (status OK with matched_store="" -- deliberately never a China Store,
+    so this can never grant CN Port/Store eligibility -- or status REVIEW
+    with an explanatory reason) when it does."""
+    candidate_rows = [r for r in all_rows if getattr(r, "detection_source", "") == "POSITIONAL_FALLBACK"]
+    if not candidate_rows:
+        return None
+
+    def _flat_record(row) -> "OrderedDict[str, str]":
+        rec: "OrderedDict[str, str]" = OrderedDict()
+        label = getattr(row, "store_header", "") or "OR"
+        rec[label] = str(getattr(row, "store_raw", "") or "").strip()
+        for k, v in (getattr(row, "business_fields", {}) or {}).items():
+            rec[k] = str(v or "").strip()
+        return rec
+
+    records = [_flat_record(r) for r in candidate_rows]
+    fingerprints = {tuple(_norm_text(v) for v in rec.values()) for rec in records}
+
+    result = StoreOrMatchResult()
+    if len(fingerprints) > 1:
+        result.status = "REVIEW"
+        result.review_reason = (
+            "OR List has no Store/Shop column (bare positional shape) and its rows "
+            f"resolve to {len(fingerprints)} different records -- cannot pick one "
+            "without a Store or routing dimension to disambiguate."
+        )
+        return result
+
+    matched_fields = records[0]
+    result.matched_store = ""
+    result.match_source = "NO_STORE_DIMENSION_FLAT_MATCH"
+    result.matched_business_fields = matched_fields
+    vals = list(matched_fields.values())
+    result.matched_or = vals[0] if len(vals) >= 1 else ""
+    result.matched_so = vals[1] if len(vals) >= 2 else ""
+    result.status = "OK"
+    return result
+
+
 def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") -> StoreOrMatchResult:
     result = StoreOrMatchResult()
     if not or_index:
@@ -1053,6 +1215,50 @@ def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") 
             break
 
     if not store_identity:
+        # v18 (SG-533-TEST real-fixture fix -- spec sections 3/5/6/7 of the
+        # non-CN regression report): identity_to_rows is built ONLY from
+        # rows whose store_raw resolves to a KNOWN CN Store alias (China
+        # World / Guangzhou / Hangzhou / IAPM / Kerry / Hongqiao / Taikooli
+        # / Shenzhen / ...). A real production OR List can legitimately
+        # have NO Store dimension at all -- e.g. a bare two-column "OR |
+        # SO" sheet for a single non-CN shipment (confirmed against the
+        # real SG-533-TEST/OR.xlsx: header ["OR","SO"], both data rows
+        # identical). pl_or_list_import.py's positional fallback still
+        # (by design, spec section 5: "first column = Store") stores that
+        # OR value under store_raw/store_header -- it is NEVER a real CN
+        # Store name, so it will never resolve via _kec_resolve_store_
+        # identity() above, and identity_to_rows stays empty for the WHOLE
+        # OR List (not just this one package).
+        #
+        # This is fundamentally different from "no match for THIS
+        # package" (a normal CN OR List where this package's Shipmark/
+        # filename/receiver just doesn't hit any of the real Store rows
+        # present) -- that case must keep returning REVIEW exactly as
+        # before. The distinguishing signal is identity_to_rows being
+        # GLOBALLY empty: not one single row anywhere in the uploaded OR
+        # List resolved to a real CN Store, so there is structurally no
+        # Store dimension to match THIS or ANY OTHER package against.
+        #
+        # In that situation, per spec section 5 ("non-CN does NOT need a
+        # fake China Store... but if OR List matches the destination/
+        # routing key, the output still needs OR No./Ref No.") and section
+        # 6 ("the matcher must support this without invoking China Store
+        # matching"), fall back to a flat, Store-less match: pool every
+        # row in the OR List, recover each row's true OR value (store_raw,
+        # labelled with its own store_header -- e.g. "OR" -- so it is
+        # never lost), and if the WHOLE pool reduces to exactly one
+        # distinct business-field record, apply it to every package
+        # regardless of destination Store/country (Store/Port stay
+        # whatever classify_packages_for_port() already decided --
+        # matched_store is deliberately left "" here, never a China Store,
+        # so this can never grant CN Port/Store eligibility). If the pool
+        # has more than one distinct record, there is no way to safely
+        # pick one without a Store/routing dimension -- REVIEW, never a
+        # guess.
+        if not identity_to_rows:
+            flat_result = _match_store_and_or_flat_no_store(all_rows)
+            if flat_result is not None:
+                return flat_result
         result.status = "REVIEW"
         result.review_reason = "No unique safe Store match from Shipping Mark / filename / receiver."
         return result
@@ -1233,10 +1439,15 @@ def _safe_write(path: Path, write_fn: Callable[[Path], None]):
         ) from e
 
 
-def _write_group(path: Path, pkgs: List, write_workbook: Callable, renumber: bool):
+def _write_group(path: Path, pkgs: List, write_workbook: Callable, renumber: bool,
+                  optional_business_field_labels=None):
     """Write one grouped workbook, optionally renumbering `global_carton_num`
     to be local to the group (1/N .. N/N), then ALWAYS restoring the original
-    values afterwards — success or failure — so later groups are unaffected."""
+    values afterwards — success or failure — so later groups are unaffected.
+
+    optional_business_field_labels (v16): forwarded to write_workbook() so a
+    grouped file's B/C headers match PL_Total's -- see export_grouped_pl()'s
+    docstring for why this was previously silently dropped."""
     if not pkgs:
         return None
     saved = [p.global_carton_num for p in pkgs]
@@ -1249,7 +1460,7 @@ def _write_group(path: Path, pkgs: List, write_workbook: Callable, renumber: boo
             n = len(ordered)
             for i, p in enumerate(ordered, start=1):
                 p.global_carton_num = f"{i}/{n}"
-        _safe_write(path, lambda tmp: write_workbook(tmp, pkgs))
+        _safe_write(path, lambda tmp: write_workbook(tmp, pkgs, optional_business_field_labels=optional_business_field_labels))
         log.info(f"  wrote {path.name}  ({len(pkgs)} cartons)")
     finally:
         for p, orig in zip(pkgs, saved):
@@ -1257,12 +1468,13 @@ def _write_group(path: Path, pkgs: List, write_workbook: Callable, renumber: boo
     return path
 
 
-def _write_total(dir_total: Path, packages: List, write_workbook: Callable, total_workbook: Optional[Path]) -> Path:
+def _write_total(dir_total: Path, packages: List, write_workbook: Callable,
+                  total_workbook: Optional[Path], optional_business_field_labels=None) -> Path:
     target = dir_total / "PL_TOTAL.xlsx"
     if total_workbook and Path(total_workbook).exists():
         _safe_write(target, lambda tmp: shutil.copyfile(str(total_workbook), str(tmp)))
     else:
-        _safe_write(target, lambda tmp: write_workbook(tmp, packages))
+        _safe_write(target, lambda tmp: write_workbook(tmp, packages, optional_business_field_labels=optional_business_field_labels))
     log.info(f"  wrote {target.name}  ({len(packages)} cartons)")
     return target
 
@@ -1340,18 +1552,42 @@ def _validate(packages, classified, factory_groups, cn_by_port, by_store,
         for p in review_factory:
             lines.append(f"    REVIEW-FACTORY  source_file={p.source_file}  reference_code={p.reference_code}  package_code={p.package_code}")
 
-    # -- CN port totals (factory-leg-scoped, unchanged) --
-    cn_pkgs = factory_groups.get("CN", [])
-    cn_cartons = len(cn_pkgs)
-    cn_review = [c for c in classified if c["factory"] == "CN" and (not c["store"] or c["store"] == "REVIEW")]
+    # -- CN port totals (v16 bug fix, corrected: basis is every DESTINATION-
+    # CN carton, regardless of factory/origin suffix -- see
+    # is_cn_port_eligible() -- never "factory=='CN'" alone, and never
+    # restricted to just the CN/VN pair either (an earlier draft did that
+    # and was still wrong: POP/SBGEAR/QIFENG/JION cartons resolve Store/
+    # Port from the Shipping Mark BODY exactly like CN/VN do). The old
+    # basis (factory_groups.get("CN")) silently excluded every VN-suffix
+    # carton from its own expected count, so a VN carton losing its PORT
+    # never tripped this check -- see PHASE-1 audit / CN-6557 real-file
+    # reconciliation for the concrete regression this fixes: PEK/PVG/SZX
+    # previously validated against 5/25/9 CN-suffix-only cartons instead
+    # of the true 6/31/11 totals.) --
+    cn_port_eligible = [c for c in classified if c["cn_port_eligible"]]
+    cn_cartons = len(cn_port_eligible)
+    cn_review = [c for c in cn_port_eligible if not c["store"] or c["store"] == "REVIEW"]
     expected_cn_classified = cn_cartons - len(cn_review)
 
     port_cartons = sum(len(v) for v in cn_by_port.values())
 
-    if cn_pkgs:
-        check("SUM(CN port groups) cartons == CN factory cartons minus REVIEW",
+    if cn_port_eligible:
+        check("SUM(CN port groups) cartons == all destination-CN-eligible cartons minus REVIEW",
               port_cartons == expected_cn_classified,
-              f"port_sum={port_cartons} expected={expected_cn_classified} (CN_total={cn_cartons}, review={len(cn_review)})")
+              f"port_sum={port_cartons} expected={expected_cn_classified} (CN_eligible_total={cn_cartons}, review={len(cn_review)})")
+
+    # -- cross-output consistency (spec: "a package cannot be PORT blank in
+    # PL_Total while simultaneously present in a PEK/PVG/SZX grouped
+    # output" and the reverse -- a resolved Store must never leave PORT
+    # blank) -- both pkg.port and c["port"] here are the SAME canonical
+    # value PL_Total's Packing List sheet already wrote, so this also
+    # guards PL_Total/Raw_Data/PL_SPLIT_CONTROL/03_CN_BY_PORT from ever
+    # silently disagreeing with each other again. --
+    resolved_store_blank_port = [c for c in cn_port_eligible
+                                  if c["store"] and c["store"] != "REVIEW" and not c["port"]]
+    check("No destination-CN package has a resolved Store but a blank PORT",
+          not resolved_store_blank_port,
+          f"packages={[c['pkg'].package_code for c in resolved_store_blank_port]}" if resolved_store_blank_port else "")
 
     # -- BY STORE totals (v14: cross-factory -- a store's POP/VN/CN cartons
     # all count here, so this is NOT compared against the CN-only port sum
@@ -1414,9 +1650,30 @@ def export_grouped_pl(
     recursive: bool = False,
     store_threshold: float = 0.55,
     store_margin: float = 0.08,
+    optional_business_field_labels=None,
 ) -> Path:
     """Split `packages` (as produced by run_pipeline) into the grouped
     PL_SPLIT_OUTPUT folder tree and return the path to PL_SPLIT_CONTROL.csv.
+
+    v15: store_threshold/store_margin are kept for call-signature backward
+    compatibility only -- they are no longer consulted here. Store/Port are
+    now read from pkg.store/pkg.port, resolved exactly once by
+    pl_ocr_core.classify_packages_for_port() (which is where store_threshold/
+    store_margin's real match_store() call now lives) -- see
+    is_cn_port_eligible()'s docstring for why a second, independent
+    match_store() call here was the root cause of the PORT/03_CN_BY_PORT/
+    PL_SPLIT_VALIDATION inconsistency this version fixes.
+
+    optional_business_field_labels (v16, point-3 correction): the SAME canonicalized
+    OR List business-field labels (e.g. ["OR No.", "Ref No."]) PL_Total's
+    Packing List sheet used -- threaded through to every grouped workbook
+    this function writes (02_BY_FACTORY, 03_CN_BY_PORT, 04_CN_BY_STORE,
+    01_PL_TOTAL) so a grouped Packing List's B/C headers can never disagree
+    with PL_Total's. Before this fix, export_grouped_pl() called
+    write_workbook(tmp, pkgs) with no optional_business_field_labels argument at
+    all, so every grouped file silently fell back to the "OR No."/"SO No."
+    default regardless of what the OR List actually said -- caught during
+    review of the point-3 dynamic-business-field test.
 
     Raises RuntimeError if reconciliation fails after writing everything —
     never just prints "Completed" while data is actually missing/duplicated.
@@ -1436,37 +1693,47 @@ def export_grouped_pl(
         d.mkdir(parents=True, exist_ok=True)
 
     # ---- classify every package exactly once ----
+    # v15 (bug fix -- CN-6557 PORT regression): Store/Port are CONSUMED from
+    # pkg.store/pkg.port -- the ONE canonical resolution already computed by
+    # pl_ocr_core.classify_packages_for_port() (the same call that fills
+    # PL_Total's PORT column) -- NEVER re-detected here with a separate
+    # match_store() call. Two independent classifications is exactly what
+    # produced the original bug (PL_Total PORT blank for VN-suffix cartons
+    # while 03_CN_BY_PORT/PL_SPLIT_VALIDATION used a different, factory==CN-
+    # only definition) -- see is_cn_port_eligible()'s docstring. `factory`
+    # itself is still detected locally (a different, legitimate concern --
+    # 02_BY_FACTORY grouping and carton ordering -- untouched by this fix).
     receiver_cache: Dict[str, str] = {}
     classified: List[dict] = []
     control_rows: List[dict] = []
 
     for pkg in packages:
         factory = detect_factory(pkg.reference_code, pkg.source_file)
-        store = port = ""
-        confidence: object = ""
-        suggestion = ""
-        if factory == "CN":
-            signal = _collect_cn_signal(pkg, pdf_folder, recursive, receiver_cache)
-            store, confidence, suggestion = match_store(signal, store_threshold, store_margin)
-            port = STORE_MASTER[store]["port"] if store in STORE_MASTER else "REVIEW"
+        eligible = is_cn_port_eligible(pkg, factory)
+        store = getattr(pkg, "store", "") or ""
+        port = getattr(pkg, "port", "") or ""
+        confidence = getattr(pkg, "store_confidence", "") if eligible else ""
+        suggestion = getattr(pkg, "store_suggestion", "") if eligible else ""
 
-        classified.append({"pkg": pkg, "factory": factory, "store": store,
-                            "port": port, "confidence": confidence, "suggestion": suggestion})
+        classified.append({"pkg": pkg, "factory": factory, "cn_port_eligible": eligible,
+                            "store": store, "port": port, "confidence": confidence,
+                            "suggestion": suggestion})
         control_rows.append({
             "source_file": pkg.source_file,
             "reference_code": pkg.reference_code,
             "package_code": pkg.package_code,
             "factory": factory,
+            "cn_port_eligible": eligible,
             "port": port,
             "store": store,
             "store_confidence": confidence,
             "suggested_store_if_review": suggestion,
             # v14 diagnostics (spec section 14): the ACTUAL cross-factory
             # Store identity used for 04_CN_BY_STORE grouping (OR List
-            # match first, else this same CN-only `store` above) -- shown
+            # match first, else this same canonical `store` above) -- shown
             # separately from `store` because the two can legitimately
-            # differ (e.g. a POP/VN package has no CN-only `store` at all,
-            # but resolves here via the OR List).
+            # differ (e.g. a POP-factory package has no CN-port-eligible
+            # `store` at all, but resolves here via the OR List).
             "resolved_store_split": _resolved_store_for_split(pkg),
             "carton_display": getattr(pkg, "carton_display", "") or getattr(pkg, "global_carton_num", ""),
             "global_carton_display": getattr(pkg, "global_carton_display", ""),
@@ -1476,7 +1743,8 @@ def export_grouped_pl(
 
     # ---- 1) TOTAL ----
     log.info("Writing 01_PL_TOTAL ...")
-    total_path = _write_total(dir_total, packages, write_workbook, total_workbook)
+    total_path = _write_total(dir_total, packages, write_workbook, total_workbook,
+                               optional_business_field_labels=optional_business_field_labels)
     written_paths[total_path] = len(packages)
 
     # ---- 2) BY FACTORY ----
@@ -1491,17 +1759,20 @@ def export_grouped_pl(
             if factory == "REVIEW":
                 log.warning(f"  {len(pkgs)} package(s) left unclassified (factory=REVIEW) — see control CSV")
             continue
-        p = _write_group(dir_factory / fname, pkgs, write_workbook, renumber=True)
+        p = _write_group(dir_factory / fname, pkgs, write_workbook, renumber=True,
+                          optional_business_field_labels=optional_business_field_labels)
         if p:
             written_paths[p] = len(pkgs)
 
-    # ---- 3) CN BY PORT (unchanged: CN-factory-leg-only, physical departure
-    # port classification -- a different concern from Store, not touched by
-    # the v14 dual-numbering rework below) ----
+    # ---- 3) CN BY PORT (v16 bug fix, corrected: destination-CN-eligible --
+    # ALL destination-CN cartons regardless of factory/origin suffix, see
+    # is_cn_port_eligible(); membership + PORT value both come straight
+    # off `classified`, which itself only ever reads the single canonical
+    # pkg.port/pkg.store -- never re-detected here) ----
     log.info("Writing 03_CN_BY_PORT ...")
     cn_by_port: Dict[str, List] = defaultdict(list)
     for c in classified:
-        if c["factory"] != "CN":
+        if not c["cn_port_eligible"]:
             continue
         if not c["store"] or c["store"] == "REVIEW":
             continue  # excluded on purpose — never silently guess
@@ -1510,7 +1781,8 @@ def export_grouped_pl(
     for port, pkgs in cn_by_port.items():
         fname = PORT_FILE_MAP.get(port)
         if fname and pkgs:
-            p = _write_group(dir_cn_port / fname, pkgs, write_workbook, renumber=True)
+            p = _write_group(dir_cn_port / fname, pkgs, write_workbook, renumber=True,
+                              optional_business_field_labels=optional_business_field_labels)
             if p:
                 written_paths[p] = len(pkgs)
 
@@ -1540,7 +1812,8 @@ def export_grouped_pl(
         file_key = _store_file_key(pkgs[0], store_key)
         fname = STORE_FILE_MAP.get(file_key) or _dynamic_store_filename(store_display_name.get(store_key, store_key))
         if pkgs:
-            p = _write_group(dir_cn_store / fname, pkgs, write_workbook, renumber=False)
+            p = _write_group(dir_cn_store / fname, pkgs, write_workbook, renumber=False,
+                          optional_business_field_labels=optional_business_field_labels)
             if p:
                 written_paths[p] = len(pkgs)
 

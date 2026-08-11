@@ -193,6 +193,18 @@ def t_description_newline_join_via_code():
 
 
 def t_gtin13_valid():
+    """NOTE (SG-533-TEST consolidation report, requirement 6): this test's
+    OWN display label used to read "GTIN validated as exactly 13 digits"
+    -- stale/misleading now that is_valid_gtin13() does real GS1/EAN-13
+    modulo-10 checksum validation (see gtin13_checksum_is_valid()), not
+    just a digit-count check. The checksum behavior itself is exercised
+    separately and thoroughly in test_v15_bugfix_regression.py (4
+    confirmed material EANs + the 4006381333931 valid / 1111111111111
+    invalid fixture pair + the "different valid GTIN never silently
+    overwritten" REVIEW case) -- this function only ever tested shape
+    (digit count), so its label is corrected below to say so accurately,
+    rather than implying it covers checksum behavior it doesn't actually
+    assert."""
     is_valid = C["is_valid_gtin13"]
     assert is_valid("4894961082009") is True
     assert is_valid("123") is False
@@ -390,7 +402,7 @@ test("SKU '-BOX' suffix joined (newline inside cell)", t_sku_box_suffix_newline_
 test("SKU '-BOX' suffix joined (suffix on its own next row)", t_sku_box_suffix_next_row)
 test("U+FFFE / U+FFFF normalized to '-'", t_unicode_dash_artifact_normalized)
 test("SKU split across newline joined via normalize_code", t_description_newline_join_via_code)
-test("GTIN validated as exactly 13 digits", t_gtin13_valid)
+test("GTIN shape validation (digit count/type) -- checksum behavior covered separately in test_v15_bugfix_regression.py", t_gtin13_valid)
 test("SKU == GTIN does not crash the parser", t_gtin_equals_sku_no_crash)
 test("header/footer noise (about:blank, date, repeated header) not parsed as item", t_header_footer_row_not_parsed_as_item)
 test("repeated table header row detected", t_repeated_table_header_not_item)
@@ -620,6 +632,25 @@ def t_dim_duplicate_key_flagged_first_wins():
 
 
 def t_dim_no_fuzzy_auto_match():
+    """v17 (test correction, spec point 37): root-caused against
+    DimMapper.lookup()'s real, intentional 2-tier design (see its own
+    docstring/comment: "Primary identity: a unique Packaging Code in
+    DIM... Safety fallback for a Packaging Code that appears more than
+    once: require canonicalized Shipping Mark/reference + Packaging
+    Code") -- this is exactly spec section 25's own rule ("DIM matching
+    uses actual Packaging Code, not filename similarity"): a Packaging
+    Code that is GLOBALLY UNIQUE in the DIM file is trusted on its own
+    (Packaging Code IS the authoritative physical identifier -- more
+    reliable than a PDF-OCR'd reference/filename, which is exactly the
+    kind of "filename similarity" text spec 25 says NOT to key on); only
+    an AMBIGUOUS Packaging Code (appears 2+ times under different DIM
+    rows) falls back to requiring the exact ref+pkg combination, which is
+    where "no fuzzy auto-match" genuinely applies. The previous version
+    of this test asserted the opposite for the unique-code case (that a
+    mismatched reference should defeat an otherwise-unique, correct
+    Packaging Code hit) -- that was a stale/incorrect expectation, not a
+    production bug; confirmed via git-stash baseline (behavior identical
+    before and after this fix pass, so nothing here regressed anything)."""
     path, tmp = _dim_wb(
         headers=["h1", "h2", "h3", "h4", "h5", "h6", "h7"],
         rows=[["REF-K", "PGKECKKK0000001", 10, 20, 30, 1.0, 0.006]],
@@ -627,13 +658,40 @@ def t_dim_no_fuzzy_auto_match():
     try:
         DimMapper = C["DimMapper"]
         dim = DimMapper(path)
-        # a near-miss (one character different / off-by-one) must NOT match.
+        # a near-miss PACKAGE CODE that doesn't exist in DIM at all -> never
+        # fuzzy-matched to the nearest one.
         assert dim.lookup("REF-K", "PGKECKKK0000002") is None
-        assert dim.lookup("REF-K-TYPO", "PGKECKKK0000001") is None
-        diag = dim.diagnose_miss("test.pdf", "REF-K-TYPO", "PGKECKKK0000001")
-        assert diag["mismatch_reason"] in ("NO_REFERENCE_IN_DIM", "KEY_COMBINATION_NOT_FOUND")
-        # nearest candidates are informational only -- still not auto-applied.
-        assert dim.lookup("REF-K-TYPO", "PGKECKKK0000001") is None
+        # a GLOBALLY UNIQUE Packaging Code is the authoritative identity --
+        # a mismatched/typo'd reference does NOT defeat it (spec section 25:
+        # Packaging Code, not filename/reference similarity, is what DIM
+        # matching keys on).
+        d = dim.lookup("REF-K-TYPO", "PGKECKKK0000001")
+        assert d is not None and d["length"] == 10.0, d
+        # diagnose_miss() is a read-only, informational-only helper for a
+        # package that found NO match at all -- verified independently
+        # against a package code that genuinely isn't in DIM (not the
+        # unique-code case above, which DOES match by design).
+        diag = dim.diagnose_miss("test.pdf", "REF-K-TYPO", "PGKECKKK0000002")
+        assert diag["mismatch_reason"] in ("NO_REFERENCE_IN_DIM", "KEY_COMBINATION_NOT_FOUND", "NO_PACKAGE_CODE_IN_DIM")
+
+        # The REAL "no fuzzy auto-match" guarantee: once a Packaging Code is
+        # AMBIGUOUS (2+ DIM rows share it under different references), the
+        # exact ref+pkg combination IS required -- a mismatched reference
+        # against an ambiguous code correctly returns None.
+        path2, tmp2 = _dim_wb(
+            headers=["h1", "h2", "h3", "h4", "h5", "h6", "h7"],
+            rows=[
+                ["REF-A", "PGKECAMBIG0001", 10, 20, 30, 1.0, 0.006],
+                ["REF-B", "PGKECAMBIG0001", 11, 21, 31, 1.1, 0.007],
+            ],
+        )
+        try:
+            dim2 = DimMapper(path2)
+            assert dim2.lookup("REF-A", "PGKECAMBIG0001") is not None
+            assert dim2.lookup("REF-B", "PGKECAMBIG0001") is not None
+            assert dim2.lookup("REF-TYPO", "PGKECAMBIG0001") is None
+        finally:
+            shutil.rmtree(tmp2)
     finally:
         shutil.rmtree(tmp)
 
@@ -743,13 +801,24 @@ assign_global_numbers = D9["assign_global_numbers"]
 compute_counting_scope_key = D9["compute_counting_scope_key"]
 
 
-def _pkg9(ref, or_status="", or_num="", or_store="", store="", seq=1):
+def _pkg9(ref, or_status="", or_num="", or_store="", store="", seq=1, country="CN"):
+    # v19 (SG-533-TEST consolidation report, requirement 2): compute_
+    # counting_scope_key()'s per-Store grouping is CN-specific
+    # functionality (Kerry/Hangzhou/Shenzhen/Guangzhou below are all real
+    # China stores) -- now that the CN-eligibility gate is STRICT
+    # (country == "CN" only, "" no longer implicitly eligible), every
+    # caller of this helper needs an explicit country to keep exercising
+    # that Store-based grouping at all. Defaults to "CN" since that is
+    # what every existing call site in this file already represents;
+    # override with country="" only for a test that deliberately wants
+    # the "no usable country signal" fallback path.
     p = Package9(package_code=f"PGKEC{ref}", source_file=f"{ref}.pdf",
                  reference_code=ref, pdf_package_seq=seq)
     p.or_list_match_status = or_status
     p.or_number = or_num
     p.or_list_store = or_store
     p.store = store
+    p.country = country
     return p
 
 
@@ -896,6 +965,15 @@ def t_real_shipment_cross_factory_store_scope_combines_pop_vn_cn():
     for i, mk in enumerate(real_marks):
         p = Package9(package_code=f"PKG{i}", source_file=f"{mk}.pdf", reference_code=mk, pdf_package_seq=0)
         p.shipping_mark = mk
+        # v19 (SG-533-TEST consolidation report, requirement 2): the CN
+        # multi-Store eligibility gate is now STRICT (country == "CN"
+        # only) -- every one of these real Shipmarks ("CN-1529_..." with a
+        # genuine "CN" Shipmark prefix) is a real CN shipment, so this now
+        # needs an explicit country to keep exercising classify_packages_
+        # for_port()/compute_counting_scope_key()'s Store-based grouping,
+        # matching what detect_shipment_country() would itself resolve
+        # from this exact "CN-1529_..." prefix in the real pipeline.
+        p.country = "CN"
         pkgs.append(p)
 
     pkgs = D9["business_sort_packages"](pkgs)
@@ -999,6 +1077,15 @@ def t_export_grouped_pl_store_split_combines_pop_vn_cn_and_keeps_scope_numbering
     for i, mk in enumerate(real_marks):
         p = Package9(package_code=f"PKG{i}", source_file=f"{mk}.pdf", reference_code=mk, pdf_package_seq=0)
         p.shipping_mark = mk
+        # v19 (SG-533-TEST consolidation report, requirement 2): the CN
+        # multi-Store eligibility gate is now STRICT (country == "CN"
+        # only) -- every one of these real Shipmarks ("CN-1529_..." with a
+        # genuine "CN" Shipmark prefix) is a real CN shipment, so this now
+        # needs an explicit country to keep exercising classify_packages_
+        # for_port()/compute_counting_scope_key()'s Store-based grouping,
+        # matching what detect_shipment_country() would itself resolve
+        # from this exact "CN-1529_..." prefix in the real pipeline.
+        p.country = "CN"
         pkgs.append(p)
 
     pkgs = D9["business_sort_packages"](pkgs)
@@ -1073,6 +1160,10 @@ test("export_grouped_pl(): 04_CN_BY_STORE combines POP+VN+CN per Store and keeps
 # =========================================================================
 detect_shipment_country = D9["detect_shipment_country"]
 resolve_shipping_mark_confidence = D9["resolve_shipping_mark_confidence"]
+# v20 (SG-533-TEST final cleanup, requirement 2): bind the REAL production
+# country-resolution function (extracted from run_pipeline() as a pure
+# refactor -- same logic, now independently testable) directly.
+resolve_package_country = D9["resolve_package_country"]
 
 
 def t_detect_shipment_country_known_prefixes():
@@ -1086,12 +1177,42 @@ def t_detect_shipment_country_known_prefixes():
 
 
 def t_detect_shipment_country_never_guesses_beyond_the_six_codes():
-    assert detect_shipment_country("VN-1234_HANOI") == ""
-    assert detect_shipment_country("XYZ-0001") == ""
+    """v19 (SG-533-TEST consolidation report, requirement 1): renamed in
+    spirit but kept as-is where its assertions are STILL true -- this
+    function now documents the STRUCTURAL guards that remain regardless
+    of which 2-letter code appears (never a 3+-letter word, never a
+    fuzzy/content guess), not "only 6 codes are recognised" (that
+    restriction was deliberately removed, see
+    t_detect_shipment_country_generic_non_whitelisted_markets below).
+    "VN-1234_HANOI" is INTENTIONALLY no longer asserted here -- VN is now
+    a structurally valid 2-letter prefix like any other (this is a
+    genuine, deliberate behavior change, not a regression: VN already had
+    a completely different, unrelated meaning elsewhere in this codebase
+    as a FACTORY/origin suffix -- e.g. "CN-6557-...-VN" -- but that has
+    always been resolved from a DIFFERENT field (get_origin(), the
+    trailing suffix) than this function (the LEADING prefix), so the two
+    never collide; a shipment whose Shipmark genuinely starts "VN-" is
+    structurally identical in shape to "CN-"/"KR-"/... and deserves the
+    same treatment)."""
+    assert detect_shipment_country("XYZ-0001") == ""  # 3-letter word, not a 2-letter code
     assert detect_shipment_country("") == ""
     # must not match a longer word that merely STARTS with a known code
     assert detect_shipment_country("USER-1234") == ""
     assert detect_shipment_country("USA-1234") == ""
+
+
+def t_detect_shipment_country_generic_non_whitelisted_markets():
+    """v19 (SG-533-TEST consolidation report, requirement 1): the whole
+    point of the fix -- a real, named, non-CN market that was NEVER in the
+    old hardcoded 6-code list must now resolve correctly from a
+    structurally valid 2-letter prefix, with no code changes needed to
+    "add" it. Covers every market this report explicitly named."""
+    for code in ("SG", "TH", "PH", "AU", "MY", "EU", "ID"):
+        assert detect_shipment_country(f"{code}-9001_TEST") == code, code
+        assert detect_shipment_country(f"{code}_9001_TEST") == code, code
+    # real SG-533-TEST shape: no delimiter needed before the digits, just
+    # not another LETTER immediately after the 2-letter code.
+    assert detect_shipment_country("SG-553_CN") == "SG"
 
 
 def t_shipping_mark_confidence_ordinal_by_source():
@@ -1103,30 +1224,114 @@ def t_shipping_mark_confidence_ordinal_by_source():
 
 
 def t_run_pipeline_sets_country_and_filename_reference_diagnostics_fields():
+    """v20 (SG-533-TEST final cleanup, requirement 2): now calls the REAL
+    production resolve_package_country() (extracted from run_pipeline()
+    as a pure refactor) instead of hand-copying its logic inline -- the
+    hand-copied version had already silently drifted out of sync with
+    production once country_source tracking was added (v19), which is
+    exactly the kind of divergence this refactor eliminates."""
     p = Package9(package_code="PKG1", source_file="CN-1529_HZ_PVG_POP.pdf",
                  reference_code="CN-1529_HZ_PVG_POP", pdf_package_seq=0)
     assert p.shipping_mark == "" and p.country == "" and p.filename_reference == ""
     # simulate exactly what run_pipeline's Shipmark-resolution loop does
+    # BEFORE calling resolve_package_country()
     p.filename_reference = p.reference_code
     if not p.shipping_mark:
         p.shipping_mark = p.reference_code
         p.shipping_mark_source = "FILENAME_REFERENCE_CODE"
     p.shipping_mark_raw = p.shipping_mark
     p.shipping_mark_confidence = resolve_shipping_mark_confidence(p.shipping_mark_source)
-    p.country = detect_shipment_country(p.shipping_mark) or detect_shipment_country(p.filename_reference)
+    resolve_package_country(p)
     assert p.filename_reference == "CN-1529_HZ_PVG_POP"
     assert p.shipping_mark_confidence == 0.5  # filename fallback -- weakest signal
     assert p.country == "CN"
+    assert p.country_source == "FILENAME_PREFIX", p.country_source
+
+
+def _pkg_at_shipmark_resolution_stage(reference_code, source_file=None, *,
+                                       shipping_mark=None, shipping_mark_source="FILENAME_REFERENCE_CODE"):
+    """Builds a Package in exactly the state run_pipeline() has it in
+    right before calling resolve_package_country() -- reference_code/
+    filename_reference/shipping_mark/shipping_mark_source all resolved,
+    country/country_source still untouched. Defaults reproduce the real
+    SG-533-TEST archive's own confirmed shape: no real PDF Shipping Mark
+    field at all, so shipping_mark falls back to the filename reference
+    with source FILENAME_REFERENCE_CODE."""
+    p = Package9(package_code="PKGR", source_file=source_file or f"{reference_code}.pdf",
+                 reference_code=reference_code, pdf_package_seq=0)
+    p.filename_reference = p.reference_code
+    p.shipping_mark = shipping_mark if shipping_mark is not None else p.reference_code
+    p.shipping_mark_source = shipping_mark_source
+    return p
+
+
+def t_resolve_package_country_real_sg533_test_archive_shape():
+    """spec (SG-533-TEST final cleanup) requirement 2: proves the REAL
+    production resolver against the REAL SG-533-TEST archive's own
+    confirmed field values (reference_code/shipping_mark/shipping_mark_
+    source exactly as run_pipeline() left them for this real fixture,
+    reconfirmed by direct archive reconciliation) -- both source files,
+    both factory suffixes, same destination."""
+    p_cn = _pkg_at_shipmark_resolution_stage("SG-553_CN", "SG-553_CN.pdf")
+    resolve_package_country(p_cn)
+    assert p_cn.country == "SG", p_cn.country
+    assert p_cn.country_source == "FILENAME_PREFIX", p_cn.country_source
+
+    p_vn = _pkg_at_shipmark_resolution_stage("SG-553_VN", "SG-553_VN.pdf")
+    resolve_package_country(p_vn)
+    assert p_vn.country == "SG", p_vn.country
+    assert p_vn.country_source == "FILENAME_PREFIX", p_vn.country_source
+
+    # the trailing factory/origin suffix (_CN vs _VN) must never change
+    # the resolved destination -- both are SG.
+    assert p_cn.country == p_vn.country == "SG"
+
+
+def t_resolve_package_country_generic_markets_via_real_function():
+    """Same generic-market proof as detect_shipment_country()'s own test
+    (t_detect_shipment_country_generic_non_whitelisted_markets), but
+    through the FULL production priority chain (resolve_package_country),
+    not the leaf helper alone -- proves the whole real code path is
+    generic, not just one function inside it. Covers every market the
+    report named, plus one it never named (ID) as an explicit "unseen
+    code" proof."""
+    for code in ("JP", "TW", "KR", "US", "EU", "BE", "PH", "TH", "AU", "MY", "ID"):
+        p = _pkg_at_shipmark_resolution_stage(f"{code}-9001_TEST", f"{code}-9001_TEST.pdf")
+        resolve_package_country(p)
+        assert p.country == code, (code, p.country)
+        assert p.country_source == "FILENAME_PREFIX", (code, p.country_source)
+
+
+def t_resolve_package_country_prefers_real_shipping_mark_over_filename():
+    """The OTHER priority branch: when shipping_mark DID come from real
+    PDF content (not a filename fallback), that source wins and
+    country_source records SHIPPING_MARK_PREFIX, not FILENAME_PREFIX --
+    even if the filename/reference_code disagrees."""
+    p = _pkg_at_shipmark_resolution_stage(
+        "some-internal-doc-id-004", "some-internal-doc-id-004.pdf",
+        shipping_mark="CN-1529_HZ_PVG_POP", shipping_mark_source="PL_STRUCTURED_FIELD",
+    )
+    resolve_package_country(p)
+    assert p.country == "CN", p.country
+    assert p.country_source == "SHIPPING_MARK_PREFIX", p.country_source
 
 
 test("detect_shipment_country(): all 6 spec-listed country codes recognised from the Shipmark prefix",
      t_detect_shipment_country_known_prefixes)
-test("detect_shipment_country(): never guesses beyond the 6 explicit codes (VN/unknown/longer-word-prefix -> \"\")",
+test("detect_shipment_country(): structural guards still hold (3+-letter word / unknown / longer-word-prefix -> \"\")",
      t_detect_shipment_country_never_guesses_beyond_the_six_codes)
+test("detect_shipment_country(): generic non-whitelisted markets (SG/TH/PH/AU/MY/EU/ID) resolve with zero code changes",
+     t_detect_shipment_country_generic_non_whitelisted_markets)
 test("resolve_shipping_mark_confidence(): PL_STRUCTURED_FIELD > PL_TEXT > FILENAME_REFERENCE_CODE > unknown",
      t_shipping_mark_confidence_ordinal_by_source)
-test("run_pipeline's Shipmark-resolution loop populates filename_reference/shipping_mark_confidence/country (v14 diagnostics)",
+test("run_pipeline's Shipmark-resolution loop populates filename_reference/shipping_mark_confidence/country (v14 diagnostics, now via the real resolve_package_country())",
      t_run_pipeline_sets_country_and_filename_reference_diagnostics_fields)
+test("resolve_package_country() [REAL production function]: real SG-533-TEST archive shape (SG-553_CN/SG-553_VN) -> country=SG, country_source=FILENAME_PREFIX, suffix never changes destination",
+     t_resolve_package_country_real_sg533_test_archive_shape)
+test("resolve_package_country() [REAL production function]: generic non-whitelisted markets (JP/TW/KR/US/EU/BE/PH/TH/AU/MY + unseen ID) all resolve",
+     t_resolve_package_country_generic_markets_via_real_function)
+test("resolve_package_country() [REAL production function]: a real PDF-sourced Shipping Mark wins over a disagreeing filename/reference_code",
+     t_resolve_package_country_prefers_real_shipping_mark_over_filename)
 
 
 def t_non_cn_country_forces_single_flat_scope_even_with_or_list_store_match():
@@ -1297,20 +1502,28 @@ test("Raw_Data sheet exposes the full v14 diagnostics set per package (additive 
 
 
 # =========================================================================
-# v13 (FIX6): Packing List sheet's B/C columns -- real production template
-# labels these "OR No." / "SO No." (confirmed against a real uploaded
-# PL_Total.xlsx), not "PO No." / "Invoice No." as previously hardcoded.
-# Header text AND data-cell fill are both covered here.
+# v17 (spec sections 12/13/16 -- supersedes the old v13/v14 "B/C columns"
+# design): the Packing List's business backbone is now Item#/Store/OR
+# No./Ref No. -- FOUR fixed columns (2, 3, 4 for Store/OR No./Ref No.),
+# ALWAYS shown with these exact labels regardless of what the OR List's
+# own header text said (spec: "Do NOT relabel Ref# as SO/SO Order/
+# Invoice") -- there is no more a historical "OR No."/"SO No." default
+# vs. a dynamic-label override; it's simply always Store/OR No./Ref No.
+# Anything the OR List has BEYOND OR/Ref is a dynamic OPTIONAL column,
+# inserted after Ref No. (column 5 onward), verbatim, never truncated and
+# never invented when absent -- see t_packing_list_optional_business_
+# fields_only_shown_when_present below.
 # =========================================================================
-def t_packing_list_headers_are_or_no_so_no_not_po_invoice():
+def t_packing_list_headers_are_store_or_no_ref_no_always():
     import openpyxl
     out_dir = Path(tempfile.mkdtemp(prefix="pl_headers_"))
     try:
         p1 = Package9(package_code="PKGA", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
         p1.or_number, p1.so_number = "po38068", "inv628036"
+        p1.store_display = "Hangzhou Mixc"
         p1.global_carton_num = "1/1"
         p2 = Package9(package_code="PKGB", source_file="b.pdf", reference_code="b", pdf_package_seq=0)
-        # no OR List match at all -- must stay blank, never a guess.
+        # no OR List match / no Store resolved at all -- must stay blank, never a guess.
         p2.global_carton_num = "1/1"
 
         out_path = out_dir / "PL_Total.xlsx"
@@ -1319,74 +1532,86 @@ def t_packing_list_headers_are_or_no_so_no_not_po_invoice():
         wb = openpyxl.load_workbook(str(out_path))
         ws = wb["Packing List"]
         header_row = D9["TABLE_HDR_ROW1"]
-        assert ws.cell(row=header_row, column=2).value == "OR No.", ws.cell(row=header_row, column=2).value
-        assert ws.cell(row=header_row, column=3).value == "SO No.", ws.cell(row=header_row, column=3).value
+        assert ws.cell(row=header_row, column=2).value == "Store", ws.cell(row=header_row, column=2).value
+        assert ws.cell(row=header_row, column=3).value == "OR No.", ws.cell(row=header_row, column=3).value
+        assert ws.cell(row=header_row, column=4).value == "Ref No.", ws.cell(row=header_row, column=4).value
 
         first_item_row = D9["FIRST_ITEM_ROW"]
-        assert ws.cell(row=first_item_row, column=2).value == "po38068"
-        assert ws.cell(row=first_item_row, column=3).value == "inv628036"
-        # package with no OR List match: OR No./SO No. cells stay blank.
+        assert ws.cell(row=first_item_row, column=2).value == "Hangzhou Mixc"
+        assert ws.cell(row=first_item_row, column=3).value == "po38068"
+        assert ws.cell(row=first_item_row, column=4).value == "inv628036"
+        # package with no Store/OR List match: cells stay blank.
         assert ws.cell(row=first_item_row + 1, column=2).value in (None, "")
         assert ws.cell(row=first_item_row + 1, column=3).value in (None, "")
+        assert ws.cell(row=first_item_row + 1, column=4).value in (None, "")
+        # Product Name (originally column 4) is now column 5.
+        assert ws.cell(row=header_row, column=5).value == "Product Name\nin English"
     finally:
         shutil.rmtree(out_dir)
 
 
-test("Packing List sheet: B/C headers are 'OR No.'/'SO No.' (matches real template), filled from matched OR/SO, blank when unmatched",
-     t_packing_list_headers_are_or_no_so_no_not_po_invoice)
+test("Packing List sheet: Store/OR No./Ref No. are fixed columns 2/3/4, always shown, filled from canonical Package fields, blank when unmatched",
+     t_packing_list_headers_are_store_or_no_ref_no_always)
 
 
-def t_packing_list_headers_use_or_lists_own_dynamic_labels():
-    """v14 (spec section 7): when the uploaded OR List uses different
-    business-field labels (e.g. PO/Invoice No. instead of OR No./SO No.),
-    the Packing List sheet's B/C headers must reflect THOSE labels, not
-    the hardcoded default."""
+def t_packing_list_optional_business_fields_only_shown_when_present():
+    """spec sections 13/16: OR List columns beyond OR/Ref (e.g. SO/PO/
+    Invoice/Fulfillment No./Buyer) become dynamic optional columns
+    inserted after Ref No. (column 5 onward), verbatim label + value, in
+    original order -- and are NEVER invented when the OR List doesn't
+    have them (minimal Shop|OR#|Ref# OR List -> Product Name stays at
+    column 5, no blank SO/PO columns in between)."""
     import openpyxl
-    out_dir = Path(tempfile.mkdtemp(prefix="pl_dynamic_headers_"))
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_optional_fields_"))
     try:
+        from collections import OrderedDict
         p1 = Package9(package_code="PKGA", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
-        p1.or_number, p1.so_number = "PO38068", "INV628036"
+        p1.or_number, p1.so_number = "OR9001", "po90001"
+        p1.store_display = "Hangzhou Mixc"
+        p1.business_fields = OrderedDict([
+            ("OR#", "OR9001"), ("Ref#", "po90001"), ("SO", "SO123"),
+            ("PO", "PO-A1"), ("Invoice", "INV-778"),
+        ])
         p1.global_carton_num = "1/1"
 
         out_path = out_dir / "PL_Total.xlsx"
-        D9["write_workbook"](out_path, [p1], business_field_labels=["PO", "Invoice No."])
+        D9["write_workbook"](out_path, [p1], optional_business_field_labels=["SO", "PO", "Invoice"])
 
         wb = openpyxl.load_workbook(str(out_path))
         ws = wb["Packing List"]
         header_row = D9["TABLE_HDR_ROW1"]
-        assert ws.cell(row=header_row, column=2).value == "PO", ws.cell(row=header_row, column=2).value
-        assert ws.cell(row=header_row, column=3).value == "Invoice No.", ws.cell(row=header_row, column=3).value
         first_item_row = D9["FIRST_ITEM_ROW"]
-        assert ws.cell(row=first_item_row, column=2).value == "PO38068"
-        assert ws.cell(row=first_item_row, column=3).value == "INV628036"
+        assert ws.cell(row=header_row, column=5).value == "SO"
+        assert ws.cell(row=header_row, column=6).value == "PO"
+        assert ws.cell(row=header_row, column=7).value == "Invoice"
+        assert ws.cell(row=first_item_row, column=5).value == "SO123"
+        assert ws.cell(row=first_item_row, column=6).value == "PO-A1"
+        assert ws.cell(row=first_item_row, column=7).value == "INV-778"
+        # Product Name (originally column 4, now shifted past Store/OR/Ref
+        # + 3 optional fields) is column 8.
+        assert ws.cell(row=header_row, column=8).value == "Product Name\nin English"
+
+        # -- minimal case: no optional fields at all -- Product Name stays
+        #    at column 5 (Store/OR No./Ref No. only), never a blank gap.
+        out_dir2 = Path(tempfile.mkdtemp(prefix="pl_no_optional_fields_"))
+        p2 = Package9(package_code="PKGB", source_file="b.pdf", reference_code="b", pdf_package_seq=0)
+        p2.or_number, p2.so_number = "OR1172", "po38533"
+        p2.store_display = "China World NB1026"
+        p2.global_carton_num = "1/1"
+        out_path2 = out_dir2 / "PL_Total.xlsx"
+        D9["write_workbook"](out_path2, [p2])
+        wb2 = openpyxl.load_workbook(str(out_path2))
+        ws2 = wb2["Packing List"]
+        assert ws2.cell(row=header_row, column=5).value == "Product Name\nin English"
+        shutil.rmtree(out_dir2)
     finally:
         shutil.rmtree(out_dir)
 
 
-def t_packing_list_headers_default_when_no_labels_given():
-    """No OR List uploaded (business_field_labels=None) -- must fall back
-    to this codebase's own historical default "OR No."/"SO No.", never a
-    blank or crash."""
-    import openpyxl
-    out_dir = Path(tempfile.mkdtemp(prefix="pl_default_headers_"))
-    try:
-        p1 = Package9(package_code="PKGA", source_file="a.pdf", reference_code="a", pdf_package_seq=0)
-        p1.global_carton_num = "1/1"
-        out_path = out_dir / "PL_Total.xlsx"
-        D9["write_workbook"](out_path, [p1])
-        wb = openpyxl.load_workbook(str(out_path))
-        ws = wb["Packing List"]
-        header_row = D9["TABLE_HDR_ROW1"]
-        assert ws.cell(row=header_row, column=2).value == "OR No."
-        assert ws.cell(row=header_row, column=3).value == "SO No."
-    finally:
-        shutil.rmtree(out_dir)
+test("Packing List sheet: optional OR List business fields (SO/PO/Invoice/...) appear dynamically after Ref No., never invented when absent",
+     t_packing_list_optional_business_fields_only_shown_when_present)
 
 
-test("Packing List sheet: B/C headers use the OR List's OWN dynamic labels (PO/Invoice No. example)",
-     t_packing_list_headers_use_or_lists_own_dynamic_labels)
-test("Packing List sheet: B/C headers default to OR No./SO No. when no OR List labels are given",
-     t_packing_list_headers_default_when_no_labels_given)
 
 
 

@@ -68,33 +68,89 @@ BLOCK_WIDTH_COLS = 3
 SUBLIST_ITEM_CAPACITY_PER_BLOCK = 18  # real border extent, NOT the 12-item sample count
 
 # Row offsets from a page's first (1-based) row -- add to page_start_row.
+# v17 (spec sections 12/13/16/17 -- supersedes the v15/v16 fixed-6-row
+# design): Carton#/Shipping Mark/Store/OR No./Ref No. are now FIXED rows
+# (Store is a genuinely new row, ALWAYS shown -- not a relabeled OR/SO
+# slot), followed by 0+ OPTIONAL business-field rows (verbatim label, only
+# the ones the OR List actually has -- spec: never invent blank SO/PO/etc
+# rows), then GW/Packing Code# (fixed, unchanged meaning), a blank
+# separator row, then the item table. Every offset below OFF_GW depends on
+# `n_optional` and is therefore computed per-call by _sublist_offsets(),
+# not as bare module constants -- the historical OFF_* names are kept as
+# the n_optional=0 case for anything that still imports them directly."""
 OFF_CARTON = 0
 OFF_SHIPPING_MARK = 1
-OFF_OR = 2
-OFF_SO = 3
-OFF_GW = 4
-OFF_PACKING_CODE = 5
-# offset 6 = blank separator row (matches the template's own blank row
-# between the metadata block and the item header)
-OFF_ITEM_HEADER = 7
-OFF_ITEM_FIRST = 8
-OFF_ITEM_LAST = OFF_ITEM_FIRST + SUBLIST_ITEM_CAPACITY_PER_BLOCK - 1   # 25
-OFF_TOTAL = OFF_ITEM_LAST + 1                                          # 26
-# Original template: content offsets 0-25 (26 rows), then a 16-row blank
-# gap (offsets 26-41) before the next page at offset 42 -- cycle=42. This
-# build's content is one row taller (offsets 0-26, 27 rows) because of the
-# added Shipping Mark row; the same 16-row blank gap is preserved, so the
-# cycle grows by exactly 1 row.
-PAGE_CYCLE_ROWS = OFF_TOTAL + 1 + 16   # 27 + 16 = 43
+OFF_STORE = 2
+OFF_OR = 3
+OFF_REF = 4
+OFF_OPTIONAL_FIRST = 5
 
-METADATA_LABELS = [
-    (OFF_CARTON, "Carton #"),
-    (OFF_SHIPPING_MARK, "Shipping Mark"),
-    (OFF_OR, "OR #"),
-    (OFF_SO, "SO Order #"),
-    (OFF_GW, "GW"),
-    (OFF_PACKING_CODE, "Packing Code #"),
-]
+
+def _sublist_offsets(n_optional: int) -> dict:
+    """-> dict of every row offset (see module comment above) for a
+    Sublist block with exactly `n_optional` OPTIONAL business fields.
+    n_optional=0 reproduces this module's historical v15/v16 geometry
+    plus exactly the +1 row Store always adds (Carton#/Shipping Mark/
+    Store/OR No./Ref No./GW/Packing Code# = 7 fixed rows instead of the
+    old 6); each additional optional field adds one more row, matching
+    the exact technique already used when Shipping Mark itself was added
+    as a 6th row (module docstring)."""
+    off_gw = OFF_OPTIONAL_FIRST + n_optional
+    off_packing_code = off_gw + 1
+    # +1 blank separator row (matches the template's own blank row between
+    # the metadata block and the item header), then the item header row.
+    off_item_header = off_packing_code + 2
+    off_item_first = off_item_header + 1
+    off_item_last = off_item_first + SUBLIST_ITEM_CAPACITY_PER_BLOCK - 1
+    off_total = off_item_last + 1
+    # 16-row blank gap after the content block, preserved unchanged from
+    # the original template regardless of content height (module docstring).
+    page_cycle_rows = off_total + 1 + 16
+    return {
+        "carton": OFF_CARTON, "shipping_mark": OFF_SHIPPING_MARK,
+        "store": OFF_STORE, "or": OFF_OR, "ref": OFF_REF,
+        "optional_first": OFF_OPTIONAL_FIRST,
+        "gw": off_gw, "packing_code": off_packing_code,
+        "item_header": off_item_header, "item_first": off_item_first,
+        "item_last": off_item_last, "total": off_total,
+        "page_cycle_rows": page_cycle_rows,
+    }
+
+
+# Backward-compat module constants -- the n_optional=0 geometry (unchanged
+# value for OFF_GW/OFF_PACKING_CODE/etc. relative to the historical v15/v16
+# ones, now +1 throughout because Store is a genuinely new row).
+_OFFSETS_0 = _sublist_offsets(0)
+OFF_GW = _OFFSETS_0["gw"]
+OFF_PACKING_CODE = _OFFSETS_0["packing_code"]
+OFF_ITEM_HEADER = _OFFSETS_0["item_header"]
+OFF_ITEM_FIRST = _OFFSETS_0["item_first"]
+OFF_ITEM_LAST = _OFFSETS_0["item_last"]
+OFF_TOTAL = _OFFSETS_0["total"]
+PAGE_CYCLE_ROWS = _OFFSETS_0["page_cycle_rows"]
+
+
+def _resolve_metadata_labels(optional_labels=None):
+    """v17: the fixed Carton#/Shipping Mark/Store/OR No./Ref No./GW/
+    Packing Code# rows (labels never vary -- spec: "Do NOT relabel Ref#
+    as SO/SO Order/Invoice") plus one row per entry in `optional_labels`
+    (verbatim, spec section 13), in the offsets _sublist_offsets() computed
+    for len(optional_labels). Returns a list of (offset, label) pairs,
+    ready to zip against per-carton VALUES by the same offset key."""
+    optional_labels = [str(l) for l in (optional_labels or []) if str(l or "").strip()]
+    off = _sublist_offsets(len(optional_labels))
+    rows = [
+        (off["carton"], "Carton #"),
+        (off["shipping_mark"], "Shipping Mark"),
+        (off["store"], "Store"),
+        (off["or"], "OR No."),
+        (off["ref"], "Ref No."),
+    ]
+    for i, label in enumerate(optional_labels):
+        rows.append((off["optional_first"] + i, label))
+    rows.append((off["gw"], "GW"))
+    rows.append((off["packing_code"], "Packing Code #"))
+    return rows
 ITEM_HEADERS = ["Item No.", "EAN", "QTY"]
 
 # Normalized (see docstring) column widths, applied identically to all 4 blocks.
@@ -180,6 +236,12 @@ class SublistCartonModel:
     gross_weight_display: str
     gross_weight_source: str
     packing_code: str
+    # v17 (spec sections 12/13/16/17): human Store display name (fixed,
+    # always-shown business field) + the OR List's OPTIONAL columns beyond
+    # OR/Ref (label, value) pairs, verbatim, in original order -- [] when
+    # the OR List has none, or wasn't uploaded/matched at all.
+    store_display: str = ""
+    optional_business_fields: List["tuple"] = field(default_factory=list)
     items: List[SublistItemRow] = field(default_factory=list)
     total_qty: int = 0
     source_file: str = ""
@@ -229,9 +291,18 @@ def resolve_sublist_metadata(package) -> dict:
     shipping_mark = getattr(package, "shipping_mark", "") or getattr(package, "reference_code", "") or ""
     shipping_mark_source = getattr(package, "shipping_mark_source", "") or (
         "FILENAME_REFERENCE_CODE" if shipping_mark == getattr(package, "reference_code", "") else "")
+    # v17 (spec sections 12/13/16/17): optional business fields beyond
+    # OR/Ref, taken straight from Package.business_fields[2:] (verbatim
+    # label/value, original order) -- same source split_business_fields()
+    # uses in pl_ocr_core.py, reimplemented here inline since this module
+    # deliberately never imports pl_ocr_core (its own "no cross-import"
+    # architecture, see module docstring).
+    business_fields = getattr(package, "business_fields", None) or {}
+    optional_business_fields = [(str(k), str(v)) for k, v in list(business_fields.items())[2:]]
     return {
         "shipping_mark": shipping_mark,
         "shipping_mark_source": shipping_mark_source,
+        "store_display": getattr(package, "store_display", "") or "",
         "or_number": getattr(package, "or_number", "") or "",
         "or_source": getattr(package, "or_source", "") or "",
         "so_number": getattr(package, "so_number", "") or "",
@@ -240,6 +311,7 @@ def resolve_sublist_metadata(package) -> dict:
         "gross_weight_display": gw_display,
         "gross_weight_source": gw_source,
         "packing_code": getattr(package, "package_code", "") or "",
+        "optional_business_fields": optional_business_fields,
     }
 
 
@@ -280,6 +352,8 @@ def build_sublist_carton_model(package, *, carton_display_mode: str = "current_t
         gross_weight_display=meta["gross_weight_display"],
         gross_weight_source=meta["gross_weight_source"],
         packing_code=meta["packing_code"],
+        store_display=meta["store_display"],
+        optional_business_fields=meta["optional_business_fields"],
         items=items,
         total_qty=sum(r.qty for r in items),
         source_file=getattr(package, "source_file", ""),
@@ -350,36 +424,51 @@ def _apply_col_widths(ws, block_start_col: int):
     ws.column_dimensions[get_column_letter(block_start_col + 2)].width = COL_WIDTH_QTY
 
 
-def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start_col: int):
+def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start_col: int,
+                        optional_business_field_labels=None):
     """Writes one carton block (metadata + item grid + total) into `ws` at
-    the given page/column position. Never mutates `block`/`block.carton`."""
+    the given page/column position. Never mutates `block`/`block.carton`.
+
+    optional_business_field_labels (v17): the OR List's business columns
+    beyond OR/Ref (verbatim, spec sections 13/16/17) -- [] shows exactly
+    Carton#/Shipping Mark/Store/OR No./Ref No./GW/Packing Code#, no
+    invented blank optional rows. Must be the SAME list used to build
+    `page_start_row` in generate_sublist_workbook() (both derive their
+    row geometry from _sublist_offsets(len(...)) -- passing a different
+    list here than was used for pagination would misalign this block)."""
+    optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
+    off = _sublist_offsets(len(optional_labels))
     label_col = block_start_col + 1
     value_col = block_start_col + 2
     _apply_col_widths(ws, block_start_col)
 
     carton = block.carton
+    opt_map = dict(getattr(carton, "optional_business_fields", None) or [])
     metadata_values = {
-        OFF_CARTON: block.block_carton_label,
-        OFF_SHIPPING_MARK: carton.shipping_mark,
-        OFF_OR: carton.or_number,
-        OFF_SO: carton.so_number,
-        OFF_GW: carton.gross_weight_display,
-        OFF_PACKING_CODE: carton.packing_code,
+        off["carton"]: block.block_carton_label,
+        off["shipping_mark"]: carton.shipping_mark,
+        off["store"]: carton.store_display,
+        off["or"]: carton.or_number,
+        off["ref"]: carton.so_number,
+        off["gw"]: carton.gross_weight_display,
+        off["packing_code"]: carton.packing_code,
     }
-    for off, label in METADATA_LABELS:
-        r = page_start_row + off
+    for i, label in enumerate(optional_labels):
+        metadata_values[off["optional_first"] + i] = opt_map.get(label, "")
+    for offset, label in _resolve_metadata_labels(optional_labels):
+        r = page_start_row + offset
         ws.row_dimensions[r].height = ROW_HEIGHT_METADATA
         lbl_cell = ws.cell(row=r, column=label_col, value=label)
         lbl_cell.font = FONT_LABEL
         lbl_cell.alignment = ALIGN_LABEL
-        val_cell = _set_text_cell(ws, r, value_col, metadata_values[off])
-        val_cell.font = FONT_CONTINUED if (off == OFF_CARTON and block.block_index > 0) else FONT_VALUE
+        val_cell = _set_text_cell(ws, r, value_col, metadata_values.get(offset, ""))
+        val_cell.font = FONT_CONTINUED if (offset == off["carton"] and block.block_index > 0) else FONT_VALUE
         val_cell.alignment = ALIGN_VALUE
 
-    spacer_row = page_start_row + OFF_ITEM_HEADER - 1
+    spacer_row = page_start_row + off["item_header"] - 1
     ws.row_dimensions[spacer_row].height = ROW_HEIGHT_SPACER
 
-    header_row = page_start_row + OFF_ITEM_HEADER
+    header_row = page_start_row + off["item_header"]
     ws.row_dimensions[header_row].height = ROW_HEIGHT_ITEM
     for i, htext in enumerate(ITEM_HEADERS):
         c = ws.cell(row=header_row, column=block_start_col + i, value=htext)
@@ -387,8 +476,8 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
         c.alignment = ALIGN_ITEM
         c.border = BOX_BORDER
 
-    first_row = page_start_row + OFF_ITEM_FIRST
-    last_row = page_start_row + OFF_ITEM_LAST
+    first_row = page_start_row + off["item_first"]
+    last_row = page_start_row + off["item_last"]
     for offset in range(SUBLIST_ITEM_CAPACITY_PER_BLOCK):
         r = first_row + offset
         ws.row_dimensions[r].height = ROW_HEIGHT_ITEM
@@ -402,7 +491,7 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
             c.border = BOX_BORDER
 
     n_written = min(len(block.items), SUBLIST_ITEM_CAPACITY_PER_BLOCK)
-    total_row = page_start_row + OFF_TOTAL
+    total_row = page_start_row + off["total"]
     qty_col_letter = get_column_letter(block_start_col + 2)
     if n_written > 0:
         formula = f"=SUM({qty_col_letter}{first_row}:{qty_col_letter}{first_row + n_written - 1})"
@@ -432,6 +521,7 @@ def generate_sublist_workbook(
     *,
     template_path=None,
     carton_display_mode: str = "current_total",
+    optional_business_field_labels=None,
 ) -> "SublistBuildResult":
     """Build the Sublist workbook for `packages`, in the EXACT SAME ORDER
     they were passed in (caller is responsible for passing them in PL_TOTAL
@@ -441,7 +531,17 @@ def generate_sublist_workbook(
     constants (see module docstring) rather than opening/mutating the
     original binary file, the same architecture pl_ocr_core.write_workbook()
     already uses for the Packing List sheet.
+
+    optional_business_field_labels (v17, spec sections 12/13/16/17): the
+    OR List's business columns beyond OR/Ref, verbatim, in original order
+    -- threaded to every block via write_carton_block(); the page cycle
+    height (page_start_row spacing) is derived from the SAME
+    len(optional_business_field_labels) via _sublist_offsets(), so the
+    metadata block and the page geometry can never disagree about how
+    many optional rows exist on this run.
     """
+    optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
+    page_cycle_rows = _sublist_offsets(len(optional_labels))["page_cycle_rows"]
     cartons = [build_sublist_carton_model(p, carton_display_mode=carton_display_mode) for p in packages]
     blocks = paginate_carton_blocks(cartons)
 
@@ -454,9 +554,10 @@ def generate_sublist_workbook(
     for i, block in enumerate(blocks):
         page_idx = i // BLOCKS_PER_PAGE
         slot = i % BLOCKS_PER_PAGE
-        page_start_row = 1 + page_idx * PAGE_CYCLE_ROWS
+        page_start_row = 1 + page_idx * page_cycle_rows
         block_start_col = 1 + BLOCK_WIDTH_COLS * slot
-        write_carton_block(ws, block, page_start_row, block_start_col)
+        write_carton_block(ws, block, page_start_row, block_start_col,
+                            optional_business_field_labels=optional_labels)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

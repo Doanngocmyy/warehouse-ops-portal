@@ -128,6 +128,18 @@ class OrListRow:
     business_fields: "OrderedDict[str, str]" = field(default_factory=OrderedDict)
     detection_source: str = "LITERAL_HEADER"
     source_sheet: str = ""
+    # v18 (SG-533-TEST real-fixture fix): the STORE column's own literal
+    # header text (e.g. "OR" for a bare "OR | SO" sheet under
+    # POSITIONAL_FALLBACK). Never used to relabel Store/OR No./Ref No. on
+    # any CN-Store-matched output -- this exists ONLY so
+    # match_store_and_or()'s no-Store-dimension fallback (see below) can
+    # correctly recover an OR List that has NO real Store column at all
+    # (every row's "store" position actually holds an OR value, e.g. this
+    # real production shape: header row literally reads "OR"/"SO", no
+    # Store/Shop column anywhere) without silently discarding that
+    # column's own value. Defaults to "" so every existing call site /
+    # test that constructs OrListRow without it is unaffected.
+    store_header: str = ""
 
     # ---- Backward-compatible convenience accessors -------------------
     # A lot of existing matching/output code (and this session's own
@@ -339,6 +351,9 @@ def load_or_list(path, sheet_name: Optional[str] = None) -> OrListImportResult:
 
         header_cells = raw.iloc[header_row_idx].tolist()
         field_labels = [_clean_header_label(header_cells[pos]) for pos in business_positions]
+        # v18 (SG-533-TEST fix): preserve the STORE column's own literal
+        # header text too -- see OrListRow.store_header's docstring.
+        store_header = _clean_header_label(header_cells[store_pos]) if store_pos < len(header_cells) else ""
 
         rows: List[OrListRow] = []
         for i in range(header_row_idx + 1, len(raw)):
@@ -361,6 +376,7 @@ def load_or_list(path, sheet_name: Optional[str] = None) -> OrListImportResult:
                 store_raw=store_raw, store_norm=_norm_header(store_raw),
                 business_fields=business_fields,
                 detection_source=detection_source, source_sheet=sheet,
+                store_header=store_header,
             ))
 
         if detection_source == "SEMANTIC_FALLBACK_DUPLICATE_OR_HEADER":

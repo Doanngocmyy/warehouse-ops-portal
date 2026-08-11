@@ -51,7 +51,8 @@ def _item(no, ean, qty):
 def _pkg(seq, total, items, shipping_mark="CN-1666-PVG-KERRY-POP",
          or_number="OR1016", so_number="so402064", weight=35.68,
          pl_gross_weight="", package_code="PGKECO377R7J0320001",
-         reference_code="Kerry_POP"):
+         reference_code="Kerry_POP", store_display="Kerry Center flagship",
+         business_fields=None):
     return SimpleNamespace(
         carton_sequence=seq, carton_total=total, carton_display=f"{seq}/{total}",
         global_carton_num=f"{seq}/{total}",
@@ -59,6 +60,7 @@ def _pkg(seq, total, items, shipping_mark="CN-1666-PVG-KERRY-POP",
         or_number=or_number, or_source="PL_TEXT", so_number=so_number, so_source="OR_LIST",
         weight=weight, pl_gross_weight=pl_gross_weight, package_code=package_code, items=items,
         source_file=reference_code + ".pdf", reference_code=reference_code, pdf_package_seq=str(seq),
+        store_display=store_display, business_fields=business_fields or {},
     )
 
 
@@ -555,7 +557,8 @@ def t_generate_pdf_success_basic_fields():
                 assert len(pdf.pages) == 1
                 text = pdf.pages[0].extract_text() or ""
                 for expected in ("Carton #", "1/1", "Shipping Mark", "CN-1666-PVG-KERRY-POP",
-                                  "OR #", "OR1016", "SO Order #", "so402064", "GW", "35.68 KG",
+                                  "Store", "Kerry Center flagship",
+                                  "OR No.", "OR1016", "Ref No.", "so402064", "GW", "35.68 KG",
                                   "Packing Code #", "PGKECO377R7J0320001",
                                   "Item No.", "EAN", "QTY", "TP-A-1", "4894961069222", "TOTAL QTY", "25"):
                     assert expected in text, f"expected {expected!r} in rendered PDF text, got:\n{text}"

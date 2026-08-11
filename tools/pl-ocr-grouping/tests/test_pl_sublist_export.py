@@ -373,7 +373,8 @@ def _mk_item(sku, ean, qty):
 def _mk_full_pkg(seq, total, items, shipping_mark="CN-1666-PVG-KERRY-POP",
                   or_number="OR1016", so_number="so402064", weight=35.68,
                   package_code="PGKECO377R7J0320001", reference_code="Kerry_POP",
-                  counting_scope_key=""):
+                  counting_scope_key="", store_display="Kerry Center flagship",
+                  business_fields=None):
     return SimpleNamespace(
         carton_sequence=seq, carton_total=total, carton_display=f"{seq}/{total}",
         global_carton_num=f"{seq}/{total}",
@@ -381,7 +382,8 @@ def _mk_full_pkg(seq, total, items, shipping_mark="CN-1666-PVG-KERRY-POP",
         or_number=or_number, or_source="PL_TEXT", so_number=so_number, so_source="PL_TEXT",
         weight=weight, package_code=package_code, items=items,
         source_file=reference_code + ".pdf", reference_code=reference_code, pdf_package_seq="1",
-        counting_scope_key=counting_scope_key,
+        counting_scope_key=counting_scope_key, store_display=store_display,
+        business_fields=business_fields or {},
     )
 
 
@@ -503,6 +505,12 @@ import openpyxl
 
 
 def t_generate_workbook_layout_matches_real_template_measurements():
+    """v17 (spec sections 12/16/17): the metadata block gained a fixed
+    Store row (Carton#/Shipping Mark/Store/OR No./Ref No./GW/Packing
+    Code# = 7 rows, was 6) -- every row below it shifts down by exactly
+    1 versus the old v15/v16 layout; row numbers here are computed from
+    pse._sublist_offsets(0) rather than hardcoded, so this test can never
+    silently drift out of sync with the production geometry again."""
     with tempfile.TemporaryDirectory() as td:
         items = [_mk_item("TP-A-1", "4894961069222", 10), _mk_item("TP-A-2", "4895227935312", 15)]
         pkg = _mk_full_pkg(1, 1, items)
@@ -510,19 +518,23 @@ def t_generate_workbook_layout_matches_real_template_measurements():
         result = pse.generate_sublist_workbook([pkg], out)
         wb = openpyxl.load_workbook(str(out))
         ws = wb["Sheet1"]
+        off = pse._sublist_offsets(0)
         # metadata block: label col B, value col C (block 1 = A:C)
-        assert ws["B1"].value == "Carton #" and ws["C1"].value == "1/1"
-        assert ws["B2"].value == "Shipping Mark" and ws["C2"].value == "CN-1666-PVG-KERRY-POP"
-        assert ws["B3"].value == "OR #" and ws["C3"].value == "OR1016"
-        assert ws["B4"].value == "SO Order #" and ws["C4"].value == "so402064"
-        assert ws["B5"].value == "GW" and ws["C5"].value == "35.68 KG"
-        assert ws["B6"].value == "Packing Code #" and ws["C6"].value == "PGKECO377R7J0320001"
-        # item header at row 8 (page_start(1) + OFF_ITEM_HEADER = 1+7=8)
-        assert [ws.cell(row=8, column=c).value for c in (1, 2, 3)] == ["Item No.", "EAN", "QTY"]
-        # first item row 9
-        assert ws["A9"].value == "TP-A-1" and ws["B9"].value == "4894961069222" and ws["C9"].value == 10
-        # total row = 1+26 = 27
-        assert ws["C27"].value == "=SUM(C9:C10)"
+        assert ws[f"B{1 + off['carton']}"].value == "Carton #" and ws[f"C{1 + off['carton']}"].value == "1/1"
+        assert ws[f"B{1 + off['shipping_mark']}"].value == "Shipping Mark" and ws[f"C{1 + off['shipping_mark']}"].value == "CN-1666-PVG-KERRY-POP"
+        assert ws[f"B{1 + off['store']}"].value == "Store" and ws[f"C{1 + off['store']}"].value == "Kerry Center flagship"
+        assert ws[f"B{1 + off['or']}"].value == "OR No." and ws[f"C{1 + off['or']}"].value == "OR1016"
+        assert ws[f"B{1 + off['ref']}"].value == "Ref No." and ws[f"C{1 + off['ref']}"].value == "so402064"
+        assert ws[f"B{1 + off['gw']}"].value == "GW" and ws[f"C{1 + off['gw']}"].value == "35.68 KG"
+        assert ws[f"B{1 + off['packing_code']}"].value == "Packing Code #" and ws[f"C{1 + off['packing_code']}"].value == "PGKECO377R7J0320001"
+        header_row = 1 + off["item_header"]
+        assert [ws.cell(row=header_row, column=c).value for c in (1, 2, 3)] == ["Item No.", "EAN", "QTY"]
+        first_row = 1 + off["item_first"]
+        assert ws.cell(row=first_row, column=1).value == "TP-A-1"
+        assert ws.cell(row=first_row, column=2).value == "4894961069222"
+        assert ws.cell(row=first_row, column=3).value == 10
+        total_row = 1 + off["total"]
+        assert ws.cell(row=total_row, column=3).value == f"=SUM(C{first_row}:C{first_row + 1})"
         result.output_path.exists()  # sanity
 
 
@@ -547,10 +559,12 @@ def t_ean_and_metadata_are_stored_as_text_not_number():
         pse.generate_sublist_workbook([pkg], out)
         wb = openpyxl.load_workbook(str(out))
         ws = wb["Sheet1"]
-        assert ws["B9"].data_type == "s" and ws["B9"].value == "4894961069222", \
+        off = pse._sublist_offsets(0)
+        first_row = 1 + off["item_first"]
+        assert ws[f"B{first_row}"].data_type == "s" and ws[f"B{first_row}"].value == "4894961069222", \
             "EAN must be stored as text, never converted to a number"
-        assert ws["C3"].value == "000123", "leading zeros in OR# must survive (text, not number)"
-        assert ws["C4"].value == "000456", "leading zeros in SO# must survive (text, not number)"
+        assert ws[f"C{1 + off['or']}"].value == "000123", "leading zeros in OR# must survive (text, not number)"
+        assert ws[f"C{1 + off['ref']}"].value == "000456", "leading zeros in Ref# must survive (text, not number)"
         assert ws["C1"].number_format == "@"
 
 

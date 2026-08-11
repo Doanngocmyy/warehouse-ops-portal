@@ -196,16 +196,63 @@ VALUE_COL_MAX_WIDTH = 200
 # documented rather than silently picked.
 MAX_RESERVED_WRAP_EXTRA_LINES = 2
 
+# v17 (spec sections 12/13/16/17 -- supersedes the v15/v16 fixed-6-row
+# design): Carton#/Shipping Mark/Store/OR No./Ref No. are FIXED rows
+# (labels never vary -- spec: "Do NOT relabel Ref# as SO/SO Order/
+# Invoice"; Store is a genuinely new row, always shown), followed by 0+
+# OPTIONAL business-field rows (verbatim label, only the ones the OR List
+# actually has), then GW/Packing Code# (fixed, unchanged meaning). Row
+# COUNT now varies by shipment (7 fixed + n_optional), so every pagination
+# constant that used to be a bare module-level number derived from
+# len(METADATA_ROWS) is now a FUNCTION of n_optional -- see
+# _meta_block_height()/_items_per_pdf_page() below. METADATA_ROWS/META_
+# BLOCK_HEIGHT/ITEMS_PER_PDF_PAGE are kept as module constants too (the
+# n_optional=0 case) for any direct importer/test that still wants the
+# historical bare-constant convenience.
 METADATA_ROWS = [
     ("carton", "Carton #"),
     ("shipping_mark", "Shipping Mark"),
-    ("or", "OR #"),
-    ("so", "SO Order #"),
+    ("store", "Store"),
+    ("or", "OR No."),
+    ("ref", "Ref No."),
     ("gw", "GW"),
     ("packing_code", "Packing Code #"),
 ]
-META_BLOCK_HEIGHT = len(METADATA_ROWS) * ROW_HEIGHT_META  # single-line ("no wrap") reference height
-META_BLOCK_HEIGHT_RESERVED = (len(METADATA_ROWS) + MAX_RESERVED_WRAP_EXTRA_LINES) * ROW_HEIGHT_META
+
+
+def _resolve_metadata_rows(optional_labels=None):
+    """-> (key, label) pairs: the fixed Carton#/Shipping Mark/Store/OR
+    No./Ref No. rows, then one row per entry in `optional_labels`
+    (verbatim, spec section 13) keyed "optional_0", "optional_1", ...,
+    then the fixed GW/Packing Code# rows. []/None optional_labels
+    reproduces METADATA_ROWS exactly (7 rows, no optional rows)."""
+    optional_labels = [str(l) for l in (optional_labels or []) if str(l or "").strip()]
+    rows = [
+        ("carton", "Carton #"), ("shipping_mark", "Shipping Mark"),
+        ("store", "Store"), ("or", "OR No."), ("ref", "Ref No."),
+    ]
+    for i, label in enumerate(optional_labels):
+        rows.append((f"optional_{i}", label))
+    rows.append(("gw", "GW"))
+    rows.append(("packing_code", "Packing Code #"))
+    return rows
+
+
+def _meta_block_height(n_rows: int) -> float:
+    """Single-line ("no wrap") reference height for a metadata block with
+    `n_rows` total rows (see _resolve_metadata_rows -- 7 fixed + however
+    many optional fields this run has)."""
+    return n_rows * ROW_HEIGHT_META
+
+
+def _meta_block_height_reserved(n_rows: int) -> float:
+    """Worst-case (wrapped) reserved height for the same block -- see
+    MAX_RESERVED_WRAP_EXTRA_LINES's own docstring below."""
+    return (n_rows + MAX_RESERVED_WRAP_EXTRA_LINES) * ROW_HEIGHT_META
+
+
+META_BLOCK_HEIGHT = _meta_block_height(len(METADATA_ROWS))
+META_BLOCK_HEIGHT_RESERVED = _meta_block_height_reserved(len(METADATA_ROWS))
 
 GAP_AFTER_METADATA = 14
 
@@ -336,28 +383,51 @@ ROW_HEIGHT_CONTINUED_NOTE = 12
 # below. The ACTUAL per-page value used while drawing is dynamic (see
 # _draw_page(), which tracks the real `y` after however many metadata
 # lines that page's Shipping Mark/Packing Code actually wrapped to).
-ITEM_TABLE_START_Y = METADATA_TOP_Y - META_BLOCK_HEIGHT - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
+def _item_table_start_y(n_rows: int) -> float:
+    """y-position of the FIRST item row (immediately below the header),
+    single-line reference case, for a metadata block with `n_rows` total
+    rows. The ACTUAL per-page value used while drawing is dynamic (see
+    _draw_page(), which tracks the real `y` after however many metadata
+    lines that page's Shipping Mark/Packing Code/optional-field values
+    actually wrapped to, AND however many total metadata rows this run
+    has)."""
+    return METADATA_TOP_Y - _meta_block_height(n_rows) - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
+
+
+ITEM_TABLE_START_Y = _item_table_start_y(len(METADATA_ROWS))
 
 # Fixed vertical budget that must be reserved BELOW the item rows for the
 # total row + a possible "Continued" note, even though the total row's
 # actual draw position is now dynamic (see _compute_total_y()) -- this is
-# what still caps ITEMS_PER_PDF_PAGE so a full page's dynamic total can
-# never be pushed below the bottom margin.
+# what still caps items-per-page so a full page's dynamic total can never
+# be pushed below the bottom margin.
 _RESERVED_BELOW_ITEMS = GAP_AFTER_ITEMS + TOTAL_TEXT_PADDING + GAP_BEFORE_CONTINUED_NOTE + ROW_HEIGHT_CONTINUED_NOTE
-# Capacity is computed against the WORST-CASE (wrapped) metadata block
-# height, not the single-line one -- so a page whose Shipping Mark/
-# Packing Code actually wraps still can't overflow past the bottom
-# margin. This makes ITEMS_PER_PDF_PAGE slightly conservative on the
-# (common) single-line case, which is the safe direction to be wrong in.
-_ITEM_TABLE_START_Y_RESERVED = METADATA_TOP_Y - META_BLOCK_HEIGHT_RESERVED - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
-_AVAILABLE_FOR_ITEMS = (_ITEM_TABLE_START_Y_RESERVED - MARGIN) - _RESERVED_BELOW_ITEMS
-# Item capacity per A5 page, derived from actual page geometry above (not
-# copied from the Excel template's 18 -- see module docstring). Documented
-# here rather than silently picked: at MARGIN=28/ROW_HEIGHT_ITEM=14 this
-# works out to the low-20s items/page (down from ~26 before the wrap-
-# safety reserve was added); verified against a rendered sample (see
-# tests/test_pl_sublist_pdf_export.py's visual-validation step).
-ITEMS_PER_PDF_PAGE = max(1, int(_AVAILABLE_FOR_ITEMS // ROW_HEIGHT_ITEM))
+
+
+def _items_per_pdf_page(n_rows: int) -> int:
+    """Item capacity per A5 page for a metadata block with `n_rows` total
+    rows (v17: n_rows now varies by shipment -- 7 fixed + however many
+    optional business fields this run has -- so this is a function, not a
+    bare module constant; see module docstring for why it's derived from
+    real page geometry rather than copied from the Excel template's 18).
+    Capacity is computed against the WORST-CASE (wrapped) metadata block
+    height, not the single-line one -- so a page whose Shipping Mark/
+    Packing Code/optional field actually wraps still can't overflow past
+    the bottom margin. Never returns less than 1."""
+    item_table_start_y_reserved = METADATA_TOP_Y - _meta_block_height_reserved(n_rows) - GAP_AFTER_METADATA - ROW_HEIGHT_ITEM_HEADER
+    available_for_items = (item_table_start_y_reserved - MARGIN) - _RESERVED_BELOW_ITEMS
+    return max(1, int(available_for_items // ROW_HEIGHT_ITEM))
+
+
+# Documented here rather than silently picked: at MARGIN=28/ROW_HEIGHT_
+# ITEM=14 the 7-row (n_optional=0) case works out to the low-20s items/
+# page (down from ~26 before the wrap-safety reserve was added, and down
+# by 1 row's worth again now that Store is a genuinely new fixed row);
+# verified against a rendered sample (see tests/test_pl_sublist_pdf_
+# export.py's visual-validation step). Kept as a module constant (the
+# n_optional=0 case) for any direct importer/test that still wants the
+# historical bare-constant convenience.
+ITEMS_PER_PDF_PAGE = _items_per_pdf_page(len(METADATA_ROWS))
 
 
 def _compute_total_y(item_table_start_y: float, rendered_item_count: int) -> "tuple[float, float]":
@@ -394,13 +464,17 @@ class PdfPageBlock:
     block_total_qty: int  # subtotal for non-last blocks, GRAND TOTAL on the last block
 
 
-def _paginate_for_pdf(cartons: list) -> List[PdfPageBlock]:
+def _paginate_for_pdf(cartons: list, items_per_page: int = None) -> List[PdfPageBlock]:
     """One package == one carton, ALWAYS. A carton with more items than
-    ITEMS_PER_PDF_PAGE fits is split across multiple pages ("Continued 1",
+    `items_per_page` fits is split across multiple pages ("Continued 1",
     "Continued 2", ...) -- zero items ever lost, subtotal shown on every
-    non-last page, grand total only on the carton's last page."""
+    non-last page, grand total only on the carton's last page.
+    items_per_page (v17): defaults to the module's ITEMS_PER_PDF_PAGE
+    (the n_optional=0 case) when not given -- generate_sublist_pdf()
+    always passes the ACTUAL value for however many optional business
+    fields this run has, via _items_per_pdf_page()."""
     blocks: List[PdfPageBlock] = []
-    cap = ITEMS_PER_PDF_PAGE
+    cap = items_per_page if items_per_page else ITEMS_PER_PDF_PAGE
     for carton in cartons:
         n = len(carton.items)
         chunks = [carton.items[i:i + cap] for i in range(0, n, cap)] or [[]]
@@ -491,31 +565,41 @@ def _draw_continuation_page_marker(c: canvas.Canvas, block: PdfPageBlock):
                  f"{block.block_index + 1}/{block.block_count}")
 
 
-def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None):
+def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None, optional_business_field_labels=None):
     carton = block.carton
     y = METADATA_TOP_Y
 
     _draw_logo(c, logo_path if logo_path is not None else DEFAULT_LOGO_PATH)
     _draw_continuation_page_marker(c, block)
 
-    # -- Metadata block (Carton# / Shipping Mark / OR# / SO Order# / GW /
-    #    Packing Code#) -- label right-aligned, value left-aligned, TIGHTLY
-    #    adjacent, positioned in the page's UPPER-RIGHT (see
-    #    _compute_metadata_x() docstring for the exact formula) -- the
-    #    left side of the page stays visually open, matching the approved
-    #    reference layout.
+    # -- Metadata block (Carton# / Shipping Mark / Store / OR No. / Ref
+    #    No. / [optional fields] / GW / Packing Code#) -- label right-
+    #    aligned, value left-aligned, TIGHTLY adjacent, positioned in the
+    #    page's UPPER-RIGHT (see _compute_metadata_x() docstring for the
+    #    exact formula) -- the left side of the page stays visually open,
+    #    matching the approved reference layout. v17 (spec sections 12/
+    #    13/16/17): row LABELS/KEYS come from _resolve_metadata_rows
+    #    (optional_business_field_labels) -- Store/OR No./Ref No. are now
+    #    FIXED (never relabeled), plus one row per actual optional OR
+    #    List field beyond OR/Ref (verbatim, never invented when absent).
+    optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
+    metadata_rows = _resolve_metadata_rows(optional_labels)
+    opt_map = dict(getattr(carton, "optional_business_fields", None) or [])
     meta_values = {
         "carton": block.block_carton_label,
         "shipping_mark": carton.shipping_mark,
+        "store": getattr(carton, "store_display", "") or "",
         "or": carton.or_number,
-        "so": carton.so_number,
+        "ref": carton.so_number,
         "gw": carton.gross_weight_display,
         "packing_code": carton.packing_code,
     }
-    value_texts = [meta_values.get(key, "") for key, _label in METADATA_ROWS]
+    for i, label in enumerate(optional_labels):
+        meta_values[f"optional_{i}"] = opt_map.get(label, "")
+    value_texts = [meta_values.get(key, "") for key, _label in metadata_rows]
     wrapped_values = _wrap_metadata_values(value_texts)
     metadata_value_x, metadata_label_right_x = _compute_metadata_x(value_texts)
-    for (key, label), lines in zip(METADATA_ROWS, wrapped_values):
+    for (key, label), lines in zip(metadata_rows, wrapped_values):
         y -= ROW_HEIGHT_META
         y = _draw_metadata_row(c, y, label, lines, metadata_value_x, metadata_label_right_x)
 
@@ -620,7 +704,8 @@ class SublistPdfBuildResult:
 def generate_sublist_pdf(packages: list, output_path: Path, *,
                           carton_display_mode: str = "current_total",
                           enabled: bool = True,
-                          logo_path=None) -> SublistPdfBuildResult:
+                          logo_path=None,
+                          optional_business_field_labels=None) -> SublistPdfBuildResult:
     """packages -> A5 PDF at `output_path`, one page per carton block.
     NEVER raises -- any failure is captured into the returned result's
     status="FAILED" (spec: Sublist PDF is optional, its failure must never
@@ -632,7 +717,20 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
     owner's request). Defaults to None, which means "use the bundled
     DEFAULT_LOGO_PATH if it exists" (see _draw_page/_draw_logo) -- pass an
     explicit falsy sentinel like False to suppress the logo entirely if
-    ever needed (kept flexible, not hardcoded to always-on)."""
+    ever needed (kept flexible, not hardcoded to always-on).
+
+    optional_business_field_labels (v17, spec sections 12/13/16/17): the
+    uploaded OR List's business columns BEYOND OR/Ref (verbatim, in
+    original order -- e.g. ["SO","PO","Invoice","Fulfillment No.",
+    "Buyer"]). Store/OR No./Ref No. are now FIXED metadata rows (spec:
+    never relabeled) -- so the Packing List sheet and this PDF's metadata
+    block can never disagree. []/None (the default) shows exactly Carton
+    #/Shipping Mark/Store/OR No./Ref No./GW/Packing Code#, no invented
+    optional rows. The metadata block's height (and therefore how many
+    item rows fit per page / where pagination breaks) is recomputed from
+    the ACTUAL number of rows this call needs -- see _items_per_pdf_page()
+    -- so an extended OR List's taller metadata block can never overlap
+    or clip the item table."""
     result = SublistPdfBuildResult()
     if not enabled:
         result.status = "DISABLED"
@@ -646,10 +744,17 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
         return result
 
     try:
+        optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
+        # 5 fixed head rows (Carton#/Shipping Mark/Store/OR No./Ref No.)
+        # + n optional + 2 fixed tail rows (GW/Packing Code#) -- see
+        # _resolve_metadata_rows().
+        n_meta_rows = 5 + len(optional_labels) + 2
+        items_per_page = _items_per_pdf_page(n_meta_rows)
+
         output_path = Path(output_path)
         cartons = [pse.build_sublist_carton_model(pkg, carton_display_mode=carton_display_mode)
                    for pkg in packages]
-        blocks = _paginate_for_pdf(cartons)
+        blocks = _paginate_for_pdf(cartons, items_per_page=items_per_page)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
@@ -662,7 +767,7 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
         c.setCreator("")
 
         for block in blocks:
-            _draw_page(c, block, logo_path=logo_path)
+            _draw_page(c, block, logo_path=logo_path, optional_business_field_labels=optional_labels)
             c.showPage()
         c.save()
 
