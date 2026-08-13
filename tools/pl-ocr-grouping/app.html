@@ -19,20 +19,22 @@
   .adv-box .field-row { margin-bottom:10px; }
   .adv-box input[type=text] { width:100%; padding:6px 8px; border:1px solid #e2e8f0; border-radius:6px; font-size:12.5px; }
   .file-list-mini { font-size:11.5px; color:#64748b; margin-top:4px; max-height:70px; overflow-y:auto; }
-  .checkline { font-size:12.5px; color:#475569; margin-top:8px; }
-  .checkline input { margin-right:6px; }
-  /* V21 hotfix v3: Sublist option 5's two checkboxes were both plain
-     inline <label class="checkline"> elements -- labels default to
-     inline display, so two adjacent ones can flow onto the same visual
-     line (second checkbox landing at the far right of the first
-     option's wrapped text) instead of always starting a new row. This
-     is presentation-only: same two checkbox ids/logic, just given their
-     own explicit one-per-row layout via flexbox (no absolute
-     positioning, no nesting one checkbox inside the other's label). */
-  .sublist-options { display:flex; flex-direction:column; gap:12px; margin-top:8px; }
-  .sublist-option { display:flex; align-items:flex-start; gap:10px; font-size:12.5px; color:#475569; cursor:pointer; }
-  .sublist-option input[type=checkbox] { margin:2px 0 0 0; flex:0 0 auto; }
-  .sublist-option span { flex:1 1 auto; }
+  /* V21 hotfix: checkbox groups (Section 1 "PDF Packing List" and
+     Section 5 "Sublist Display Options") were plain inline
+     <label class="checkline"> elements -- labels default to inline
+     display, so adjacent ones can flow onto the same visual line
+     (a checkbox landing at the far right of the previous option's
+     wrapped text) instead of always starting a new row. Shared,
+     reusable vertical-option pattern used by BOTH sections so the
+     layout language stays consistent site-wide. Presentation-only:
+     same checkbox ids/logic, just given explicit one-option-per-row
+     layout via flexbox (no absolute positioning, no nesting one
+     checkbox inside another's label). */
+  .checkbox-options { display:flex; flex-direction:column; gap:12px; margin-top:8px; }
+  .checkbox-option { display:flex; align-items:flex-start; gap:10px; font-size:12.5px; color:#475569; cursor:pointer; }
+  .checkbox-option input[type=checkbox] { margin:2px 0 0 0; flex:0 0 auto; }
+  .checkbox-option span { flex:1 1 auto; }
+  .checkbox-option code { font-size:11px; color:#64748b; }
   .stage-badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; margin-left:8px; vertical-align:middle; }
   .stage-badge.idle { background:#f1f5f9; color:#64748b; }
   .stage-badge.busy { background:#fef3c7; color:#92400e; }
@@ -78,9 +80,20 @@
         <label class="small">Upload 1 file .zip chứa các PDF</label><br>
         <input type="file" id="pdfZipInput" accept=".zip">
         <div class="file-list-mini" id="pdfFileList"></div>
-        <label class="checkline"><input type="checkbox" id="recursiveCheck"> Quét cả thư mục con (subfolder)</label>
-        <label class="checkline"><input type="checkbox" id="generateSublistCheck" checked> Tạo Sublist Excel theo carton (05_SUBLIST/SUBLIST_TOTAL.xlsx, tuỳ chọn)</label>
-        <label class="checkline"><input type="checkbox" id="generateSublistPdfCheck" checked> Tạo Sublist PDF khổ A5 theo carton (05_SUBLIST/SUBLIST_TOTAL.pdf)</label>
+        <div class="checkbox-options">
+          <label class="checkbox-option">
+            <input type="checkbox" id="recursiveCheck">
+            <span>Quét cả thư mục con (subfolder)</span>
+          </label>
+          <label class="checkbox-option">
+            <input type="checkbox" id="generateSublistCheck" checked>
+            <span>Tạo Sublist Excel theo carton (tuỳ chọn)<br><code>05_SUBLIST/SUBLIST_TOTAL.xlsx</code></span>
+          </label>
+          <label class="checkbox-option">
+            <input type="checkbox" id="generateSublistPdfCheck" checked>
+            <span>Tạo Sublist PDF khổ A5 theo carton<br><code>05_SUBLIST/SUBLIST_TOTAL.pdf</code></span>
+          </label>
+        </div>
       </div>
       <div class="panel">
         <h4>2. File DIM / khối lượng &amp; Master Data</h4>
@@ -152,13 +165,13 @@
 
     <div class="panel manual-panel">
       <h4>5. (Tuỳ chọn) Hiển thị Sublist</h4>
-      <div class="sublist-options">
-        <label class="sublist-option">
+      <div class="checkbox-options">
+        <label class="checkbox-option">
           <input type="checkbox" id="convertToPcsCheck">
           <span>Convert CARTON UOM to PCS (chuyển đổi CARTON_10PCS/CARTON_40PCS... thành PCS trên Sublist
             — mặc định TẮT, giữ nguyên UOM/QTY gốc)</span>
         </label>
-        <label class="sublist-option">
+        <label class="checkbox-option">
           <input type="checkbox" id="showUomInSublistCheck">
           <span>Show UOM in Sublist (thêm cột UOM giữa EAN và QTY trên Sublist — mặc định TẮT)</span>
         </label>
