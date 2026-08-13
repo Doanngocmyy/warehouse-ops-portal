@@ -35,6 +35,7 @@
   .checkbox-option input[type=checkbox] { margin:2px 0 0 0; flex:0 0 auto; }
   .checkbox-option span { flex:1 1 auto; }
   .checkbox-option code { font-size:11px; color:#64748b; }
+  .or-template-note { font-size:11.5px; color:#475569; margin-top:8px; padding:8px 10px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; line-height:1.5; }
   .stage-badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; margin-left:8px; vertical-align:middle; }
   .stage-badge.idle { background:#f1f5f9; color:#64748b; }
   .stage-badge.busy { background:#fef3c7; color:#92400e; }
@@ -103,8 +104,16 @@
         <label class="small">Master Data — SKU + HS Code (.xlsx)</label><br>
         <input type="file" id="masterInput" accept=".xlsx,.xls">
         <br><br>
-        <label class="small">OR List — STORE / OR / SO (.xlsx) — <b>tuỳ chọn</b>, không có vẫn chạy bình thường</label><br>
+        <label class="small">OR List / Routing Template (.xlsx) — <b>tuỳ chọn</b>, không có vẫn chạy bình thường</label><br>
         <input type="file" id="orListInput" accept=".xlsx,.xls">
+        <div style="margin-top:6px;">
+          <a href="assets/OR_List_Template.xlsx" download class="adv-toggle" style="text-decoration:none;">⬇ Download OR List Template</a>
+        </div>
+        <div class="or-template-note">
+          <b>Required:</b> Country Code &nbsp;|&nbsp; <b>Can be blank:</b> Port, Store, OR No., Ref No.<br>
+          <b>Store:</b> nếu điền, phải dùng đúng Store keyword/name như trên SHIPPING MARK và Store tương ứng trong FOMS / AMI OR.<br>
+          <b>Thiếu OR No. / Ref No.:</b> chỉ là cảnh báo (warning) — quy trình vẫn chạy tiếp bình thường.
+        </div>
 
         <button type="button" class="adv-toggle" id="advToggle">Tuỳ chọn nâng cao (chỉ định sheet) ▾</button>
         <div class="adv-box" id="advBox">
@@ -138,33 +147,9 @@
       </div>
     </div>
 
-    <div class="panel manual-panel">
-      <h4>4. (Tuỳ chọn) Routing Rules — Country | Port | Store</h4>
-      <p class="desc" style="margin:4px 0 10px;">
-        Bảng này thay thế hoàn toàn logic Store/Port cứng (hardcode) cũ — bạn khai báo trước các tuyến hàng hợp lệ,
-        OCR chỉ đọc tín hiệu (Country/Port/Store) trên Shipping Mark rồi khớp với đúng 1 dòng trong bảng này.
-        <b>Country Code</b> bắt buộc, đúng 2 chữ cái (VD: CN, SG, JP — không giới hạn danh sách cố định).
-        <b>Port</b> và <b>Store</b> đều tuỳ chọn — để trống Port là hợp lệ (VD: <code>CN | (để trống) | Tmall</code>
-        nghĩa là điểm đến CN, Store Tmall, không cần Port). Không có dòng nào thì tool giữ nguyên hành vi cũ
-        (STORE_MASTER có sẵn) như trước — bảng này KHÔNG bắt buộc phải điền.
-      </p>
-      <table id="routingRulesTable" style="width:100%; border-collapse:collapse; font-size:12.5px;">
-        <thead>
-          <tr>
-            <th style="text-align:left; padding:4px 6px; width:30%;">Country Code</th>
-            <th style="text-align:left; padding:4px 6px; width:30%;">Port</th>
-            <th style="text-align:left; padding:4px 6px; width:30%;">Store</th>
-            <th style="width:10%;"></th>
-          </tr>
-        </thead>
-        <tbody id="routingRulesBody"></tbody>
-      </table>
-      <button type="button" class="adv-toggle" id="addRoutingRuleBtn" style="margin-top:8px;">+ Thêm dòng routing rule</button>
-      <div class="status" id="routingRulesStatus" style="margin-top:6px; font-size:11.5px; color:#64748b;"></div>
-    </div>
 
     <div class="panel manual-panel">
-      <h4>5. (Tuỳ chọn) Hiển thị Sublist</h4>
+      <h4>4. (Tuỳ chọn) Hiển thị Sublist</h4>
       <div class="checkbox-options">
         <label class="checkbox-option">
           <input type="checkbox" id="convertToPcsCheck">
@@ -216,6 +201,11 @@
       trường hợp không chắc sẽ đánh dấu REVIEW thay vì tự đoán). OR #/SO # đọc được trực tiếp từ PL vẫn được ưu
       tiên hơn OR List. <b>Không upload OR List thì tool vẫn chạy đầy đủ bình thường</b>, không báo lỗi, không khoá
       nút chạy.<br>
+      <b>OR List / Routing Template (tuỳ chọn)</b> — nếu file upload ở mục 2 có cột <b>Country Code</b>, tool
+      dùng NGAY file đó làm nguồn routing (Country/Port/Store) + OR No./Ref No. cho toàn bộ lô hàng (không cần
+      khai routing thủ công nữa). Country Code bắt buộc đúng 2 chữ cái; Port/Store/OR No./Ref No. đều có thể để
+      trống — thiếu OR No./Ref No. chỉ là cảnh báo, không chặn xuất file. File OR List kiểu cũ (không có cột
+      Country Code) vẫn dùng đúng cơ chế STORE/OR/SO như trước.<br>
       Parser core đã được audit lại và sửa nhiều lỗi table/text parsing + DIM matching so với bản notebook gốc, kèm
       bộ regression test trong repo (<code>tools/pl-ocr-grouping/tests/</code>). Số version thật của bản đang chạy
       trên trình duyệt của bạn hiện ngay trong ô tóm tắt phía trên sau khi bấm chạy — so số đó với lịch sử commit
@@ -240,9 +230,6 @@ const generateSublistCheck = document.getElementById('generateSublistCheck');
 const generateSublistPdfCheck = document.getElementById('generateSublistPdfCheck');
 const manualConsigneeInput = document.getElementById('manualConsigneeInput');
 const manualNotifyInput    = document.getElementById('manualNotifyInput');
-const routingRulesBody = document.getElementById('routingRulesBody');
-const addRoutingRuleBtn = document.getElementById('addRoutingRuleBtn');
-const routingRulesStatus = document.getElementById('routingRulesStatus');
 const convertToPcsCheck = document.getElementById('convertToPcsCheck');
 const showUomInSublistCheck = document.getElementById('showUomInSublistCheck');
 const advToggle        = document.getElementById('advToggle');
@@ -258,65 +245,7 @@ let selectedPdfEntries = null; // [{path, file}], path = relative path under the
 let runSummary_lastLogText = '';
 let runSummary_lastJson = null;
 
-// ── V21 routing-rule table (spec sections 2/45) ─────────────────────────
-function addRoutingRuleRow(country, port, store) {
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td style="padding:2px 6px;"><input type="text" class="rr-country" maxlength="2" style="width:100%; padding:4px 6px; border:1px solid #e2e8f0; border-radius:6px; text-transform:uppercase;" placeholder="CN"></td>
-    <td style="padding:2px 6px;"><input type="text" class="rr-port" style="width:100%; padding:4px 6px; border:1px solid #e2e8f0; border-radius:6px; text-transform:uppercase;" placeholder="(để trống)"></td>
-    <td style="padding:2px 6px;"><input type="text" class="rr-store" style="width:100%; padding:4px 6px; border:1px solid #e2e8f0; border-radius:6px;" placeholder="(để trống)"></td>
-    <td style="padding:2px 6px; text-align:center;"><button type="button" class="adv-toggle rr-remove">✕</button></td>
-  `;
-  tr.querySelector('.rr-country').value = country || '';
-  tr.querySelector('.rr-port').value = port || '';
-  tr.querySelector('.rr-store').value = store || '';
-  tr.querySelector('.rr-remove').addEventListener('click', () => {
-    tr.remove();
-    validateRoutingRules();
-  });
-  tr.querySelectorAll('input').forEach(inp => inp.addEventListener('input', validateRoutingRules));
-  routingRulesBody.appendChild(tr);
-}
 
-function readRoutingRules() {
-  const rows = [...routingRulesBody.querySelectorAll('tr')];
-  return rows.map(tr => ({
-    country: tr.querySelector('.rr-country').value.trim().toUpperCase(),
-    port: tr.querySelector('.rr-port').value.trim().toUpperCase(),
-    store: tr.querySelector('.rr-store').value.trim(),
-  })).filter(r => r.country || r.port || r.store);
-}
-
-// Client-side mirror of pl_routing_rules.validate_routing_rules() (spec
-// sections 3/6) -- purely a fast UI hint before Run; the Python source of
-// truth still validates again server-... err, browser-side, inside
-// pl_routing_rules.py itself once the run actually executes.
-function validateRoutingRules() {
-  const rules = readRoutingRules();
-  const errors = [];
-  const seen = new Set();
-  for (const r of rules) {
-    if (!/^[A-Z]{2}$/.test(r.country)) {
-      errors.push(`Country Code "${r.country}" phải đúng 2 chữ cái (VD: CN, SG, JP).`);
-      continue;
-    }
-    const key = `${r.country}|${r.port}|${r.store.toLowerCase().replace(/[\s\-_]+/g, '')}`;
-    if (seen.has(key)) {
-      errors.push(`Dòng trùng lặp: ${r.country} | ${r.port || '(trống)'} | ${r.store || '(trống)'}.`);
-      continue;
-    }
-    seen.add(key);
-  }
-  routingRulesStatus.textContent = errors.length
-    ? `⚠ ${errors.length} lỗi: ${errors.join(' ')}`
-    : (rules.length ? `${rules.length} routing rule hợp lệ.` : 'Không có routing rule nào -- tool sẽ dùng logic Store/Port cũ.');
-  routingRulesStatus.style.color = errors.length ? '#b91c1c' : '#64748b';
-  return errors.length === 0;
-}
-
-addRoutingRuleBtn.addEventListener('click', () => addRoutingRuleRow('', '', ''));
-// Start with one empty row so the table is never confusingly blank.
-addRoutingRuleRow('', '', '');
 
 function downloadText(filename, text) {
   const blob = new Blob([text], { type: 'text/plain' });
@@ -494,13 +423,6 @@ async function writeIntoVirtualFs(pyodide, path, bytes) {
 }
 
 async function runPipeline() {
-  // v21 (spec section 6): validate the routing-rule table BEFORE running
-  // OCR -- an invalid/duplicate row is caught here rather than silently
-  // producing REVIEW packages after a full run.
-  if (!validateRoutingRules()) {
-    mainStatus.textContent = 'Routing rules có lỗi -- sửa lại bảng ở mục 4 trước khi chạy.';
-    return;
-  }
   runBtn.disabled = true;
   resultFiles.innerHTML = '';
   logBox.textContent = '';
@@ -554,9 +476,15 @@ async function runPipeline() {
     // v21: pl_routing_rules.py (Country|Port|Store routing engine) + pl_uom_
     // resolver.py (CARTON_<N>PCS / PCS resolver) -- leaf modules pl_ocr_core.py,
     // pl_group_export.py, pl_sublist_export.py and pl_sublist_pdf_export.py
-    // all import.
+    // all import. v21.1: pl_or_routing_template.py (OR List / Routing
+    // Template parser) -- pl_ocr_core.py imports this too, to turn an
+    // uploaded Country Code | Port | Store | OR No. | Ref No. file into
+    // both the routing rules AND the OR/Ref business references for the
+    // whole run (the manual routing-rule table UI no longer exists).
     const routingRulesSrc = await (await fetch('pl_routing_rules.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     pyodide.FS.writeFile('/pl_routing_rules.py', routingRulesSrc);
+    const orRoutingTemplateSrc = await (await fetch('pl_or_routing_template.py?v=' + _cacheBust, { cache: 'no-store' })).text();
+    pyodide.FS.writeFile('/pl_or_routing_template.py', orRoutingTemplateSrc);
     const uomResolverSrc = await (await fetch('pl_uom_resolver.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     pyodide.FS.writeFile('/pl_uom_resolver.py', uomResolverSrc);
 
@@ -590,7 +518,6 @@ async function runPipeline() {
       .replace('__GENERATE_SUBLIST__', generateSublistCheck.checked ? 'True' : 'False')
       .replace('__GENERATE_SUBLIST_PDF__', generateSublistPdfCheck.checked ? 'True' : 'False')
       .replace('__OR_LIST_FILE__', orListFileLiteral)
-      .replace('__ROUTING_RULES_JSON__', JSON.stringify(readRoutingRules()))
       .replace('__CONVERT_TO_PCS__', convertToPcsCheck.checked ? 'True' : 'False')
       .replace('__SHOW_UOM_IN_SUBLIST__', showUomInSublistCheck.checked ? 'True' : 'False')
       // No build step serves this page (plain static file on GitHub Pages), so
@@ -648,6 +575,37 @@ async function runPipeline() {
       // uploaded and failed to parse must say so explicitly and distinctly
       // from "no file" -- these previously looked identical to the user
       // (or_index just came back empty either way, no visible difference).
+      // v21.1: distinct rendering path for OR-Template mode (spec section 12
+      // browser-smoke requirement -- "Tmall resolves from OR Template; OR/Ref
+      // populate" must be visually confirmable on the page, not just present
+      // inside the downloaded PL_Total.xlsx). Mutually exclusive with
+      // orListStatusLine below: at most one of or_template_active /
+      // or_list_status ever applies to a given run.
+      const orTemplateStatusLine = (rs) => {
+        if (!rs || !rs.or_template_active) return '';
+        const rows = rs.or_template_route_breakdown || [];
+        const fmt = (v) => (v === null || v === undefined || v === '') ? '(blank)' : v;
+        const warnTxt = (w) => {
+          if (w === 'WARNING_MISSING_OR') return ' <span style="color:#92400e;">— thiếu OR No. (warning)</span>';
+          if (w === 'WARNING_MISSING_REF') return ' <span style="color:#92400e;">— thiếu Ref No. (warning)</span>';
+          if (w === 'WARNING_MISSING_OR_REF') return ' <span style="color:#92400e;">— thiếu OR No. & Ref No. (warning)</span>';
+          return '';
+        };
+        const breakdownHtml = rows.length
+          ? `<ul style="margin:6px 0 0 0;padding-left:18px;">` +
+            rows.map(r => `<li><code>${fmt(r.country)} | ${fmt(r.port)} | ${fmt(r.store)}</code> — ` +
+                           `${r.package_count} gói — OR: <code>${fmt(r.or_number)}</code>, Ref: <code>${fmt(r.ref_number)}</code>` +
+                           `${warnTxt(r.warning)}</li>`).join('') +
+            `</ul>`
+          : '';
+        const reviewTxt = rs.or_template_route_review > 0
+          ? `<div style="margin-top:4px;color:#92400e;">${rs.or_template_route_review} gói KHÔNG khớp route (REVIEW) -- không gán OR/Ref, cần kiểm tra thủ công.</div>`
+          : '';
+        return `<div style="margin-top:8px;padding:8px;border-radius:6px;background:#ecfdf5;color:#065f46;">` +
+               `<b>✓ OR-Template routing ACTIVE</b> — đã dùng ${rs.or_template_rows_loaded} dòng routing từ OR List / Routing Template ` +
+               `làm nguồn Country/Port/Store duy nhất cho lần chạy này.` +
+               breakdownHtml + reviewTxt + `</div>`;
+      };
       const orListStatusLine = (status, sheetUsed, rowsLoaded, errorText) => {
         if (!status || status === 'NO_FILE') return '';
         if (status === 'OK') {
@@ -686,6 +644,7 @@ async function runPipeline() {
         sublistLine('Sublist Excel', runSummary.sublist_xlsx_status || 'DISABLED', runSummary.sublist_xlsx_path, runSummary.sublist_xlsx_error) +
         sublistLine('Sublist PDF (A5)', runSummary.sublist_pdf_status || 'DISABLED', runSummary.sublist_pdf_path, runSummary.sublist_pdf_error) +
         `</div>` +
+        orTemplateStatusLine(runSummary) +
         orListStatusLine(runSummary.or_list_status, runSummary.or_list_sheet_used, runSummary.or_list_rows_loaded, runSummary.or_list_error) +
         ((runSummary.sublist_pdf_status === 'FAILED' || runSummary.sublist_xlsx_status === 'FAILED') ?
           `<div class="status" style="margin-top:6px;color:#92400e;">Sublist là output tuỳ chọn — FAILED ở đây ` +

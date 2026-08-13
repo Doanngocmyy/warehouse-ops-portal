@@ -48,6 +48,13 @@ LAST_OR_LIST_RESULT = None  # pl_or_list_import.OrListImportResult, populated by
                              # the RUN_SUMMARY block below so the UI can distinguish "no file uploaded" from
                              # "file uploaded but header not recognized" (Turn 12 fix) instead of both looking
                              # identical (or_index empty either way).
+# v21.1 (OR-TEMPLATE): pl_or_routing_template.OrRoutingTemplateResult, set
+# ONLY when the uploaded OR List is the new combined Country Code | Port |
+# Store | OR No. | Ref No. template AND it produced at least one usable
+# row -- None for every other run (no file, legacy OR List shape, or a
+# template with zero usable rows), so the UI can tell "OR-Template routing
+# is authoritative for this run" apart from "legacy/absent OR List".
+LAST_OR_TEMPLATE_RESULT = None
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -74,13 +81,14 @@ RECURSIVE = __RECURSIVE__
 # Export never disabled). Wired from app.html's OR List upload input in a
 # later step (Task 20); defaults to None until then.
 OR_LIST_FILE = __OR_LIST_FILE__
-# v21 (PL OCR V21 spec sections 2/45): the user's routing-rule table, wired
-# from app.html's Country|Port|Store rows -- a JSON array of
-# {"country","port","store"} objects, e.g. [{"country":"CN","port":"",
-# "store":"Tmall"}]. [] (the default) means "no routing rules supplied" and
-# the pipeline falls back 100% to the legacy STORE_MASTER path (spec
-# section 46) -- see classify_packages_for_port()'s docstring.
-ROUTING_RULES = __ROUTING_RULES_JSON__
+# v21.1: the manual Country|Port|Store routing-rule table UI has been
+# removed (spec "OR-TEMPLATE VALIDATION CORRECTION" section 2/9) --
+# routing now comes exclusively from an uploaded OR List / Routing
+# Template (see pl_or_routing_template.py), resolved automatically inside
+# run_pipeline() from OR_LIST_FILE below. run_pipeline()'s routing_rules
+# parameter still exists for direct/programmatic callers (tests); the
+# browser entry point always passes None since there is no more UI source
+# for it.
 # v9: optional manual CNEE / Notify Party, typed in on the app.html page —
 # only used for non-CN factories (CN always auto-fills from STORE_MASTER).
 # None / "" when the user left the field blank.
@@ -637,6 +645,15 @@ class Package:
     or_list_review_reason: str = ""
     or_list_candidate_store: str = ""
     or_list_candidate_score: float = 0.0
+    # v21.1 (OR-TEMPLATE): "" | WARNING_MISSING_OR | WARNING_MISSING_REF |
+    # WARNING_MISSING_OR_REF -- set ONLY in OR-Template routing mode, from
+    # the SAME template row that resolved this package's Country/Port/
+    # Store (pl_or_routing_template.py). A non-blank value here NEVER
+    # means the route failed -- route_match_status is independently
+    # "MATCHED" -- it only flags that OR No./Ref No. were blank on that
+    # row (spec: routing identity and business references are separate
+    # dimensions; missing OR/Ref must never block a valid route).
+    or_ref_warning: str = ""
     # v16 (point 3 correction): the FULL dynamic OR List business-field
     # record for this package (display_header -> value, in upload column
     # order) -- e.g. {"OR#": "OR1172", "Ref#": "po38533"} for a 2-field OR
@@ -3543,83 +3560,170 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     # split step. v12: moved up from below DIM/HS matching -- it now must
     # run BEFORE OR List matching and carton numbering, since both need
     # pkg.store resolved for CN packages that have no OR List coverage.
+    # v21.1 (OR-TEMPLATE): if the uploaded OR List is the new combined
+    # Country Code | Port | Store | OR No. | Ref No. template
+    # (pl_or_routing_template.py), it becomes BOTH the routing_rules
+    # source (authoritative -- replaces whatever routing_rules the caller
+    # passed in) AND the OR/Ref business-reference source for every
+    # package, in ONE pass -- routing identity and business references
+    # travel together on the SAME row, one xlsx, one source of truth (spec
+    # "OR-TEMPLATE VALIDATION CORRECTION" section 3). A legacy OR List (no
+    # Country Code column) keeps the existing two-separate-inputs
+    # compatibility path unchanged below (spec section 9) -- routing_rules
+    # stays whatever the caller passed (None/[] from the browser now that
+    # the manual routing-rule table UI has been removed), so
+    # classify_packages_for_port() falls back to the pre-V21 STORE_MASTER
+    # resolver exactly as it always has when no routing_rules are given.
+    global LAST_OR_TEMPLATE_RESULT, LAST_OR_LIST_RESULT
+    or_template_result = None
+    or_template_lookup: Dict[tuple, object] = {}
+    using_or_template = False
+    prr_mod = None
+    if or_list_file:
+        try:
+            import pl_or_routing_template as ort_mod
+            import pl_routing_rules as prr_mod
+            or_template_result = ort_mod.load_or_routing_template(or_list_file)
+            if or_template_result.status not in ("NO_FILE", "HEADER_NOT_FOUND") and or_template_result.rows:
+                using_or_template = True
+                routing_rules = or_template_result.to_routing_rules()
+                for row in or_template_result.rows:
+                    key = (row.country_norm, prr_mod.normalize_port(row.port_raw), prr_mod.normalize_store(row.store_raw))
+                    or_template_lookup[key] = row
+                log.info(f"OR-Template routing mode ACTIVE: {len(or_template_result.rows)} routing row(s) "
+                         f"loaded from the OR List / Routing Template -- authoritative for this run "
+                         f"(legacy STORE_MASTER fallback disabled, spec section 9).")
+                for w in or_template_result.warnings:
+                    log.warning(f"OR-Template: {w}")
+                for excel_row, reason in or_template_result.skipped_rows:
+                    log.warning(f"OR-Template row {excel_row} skipped: {reason}")
+        except ImportError:
+            log.warning("pl_or_routing_template/pl_routing_rules not importable -- OR-Template mode "
+                        "skipped, falling back to legacy OR List handling.")
+    LAST_OR_TEMPLATE_RESULT = or_template_result if using_or_template else None
+
     classify_packages_for_port(packages, pl_folder, recursive, routing_rules=routing_rules)
 
-    # v12: OR List (optional) — Store/OR/SO matching hierarchy (spec section
-    # 5). Never a fatal error, never disables Run/Export: an unusable/absent
-    # OR List just leaves every package at or_list_match_status="NO_OR_LIST"
-    # and the pipeline continues exactly as it did before this feature.
-    log.info("Matching packages against OR List (optional)...")
-    or_index: Dict[str, list] = {}
-    pge_mod = None
-    try:
-        import pl_or_list_import as oli
-        import pl_group_export as pge_mod
-        or_list_result = oli.load_or_list(or_list_file)
-        global LAST_OR_LIST_RESULT
-        LAST_OR_LIST_RESULT = or_list_result
-        if or_list_result.ok:
-            or_index = oli.build_or_index(or_list_result)
-            log.info(f"OR List loaded: {len(or_list_result.rows)} row(s) from "
-                     f"sheet {or_list_result.sheet_used!r}.")
-        elif or_list_result.status != "NO_FILE":
-            log.warning(f"OR List not usable (status={or_list_result.status}): "
-                        f"{'; '.join(or_list_result.errors) or '(no details)'} "
-                        f"-- continuing without it, Run/Export not affected.")
-    except ImportError:
-        log.warning("pl_or_list_import/pl_group_export not importable — "
-                    "OR List matching skipped, pipeline continues unaffected.")
-
-    if or_index and pge_mod is not None:
-        receiver_cache: Dict[str, str] = {}
+    if using_or_template:
+        # OR/Ref business refs come DIRECTLY from the SAME template row
+        # that supplied this package's resolved Country/Port/Store -- no
+        # second Store-name lookup needed. A package whose route did NOT
+        # resolve (REVIEW) never gets business refs guessed either (spec:
+        # missing OR/Ref is a warning, but an unresolved ROUTE is not --
+        # those stay two genuinely different diagnostics).
+        LAST_OR_LIST_RESULT = None  # legacy OR-List path was not used this run
+        n_ok = n_missing_or = n_missing_ref = n_missing_both = n_no_row = n_review = 0
         for pkg in packages:
-            # v21: a package classified through the user's routing-rule
-            # table (pkg.route_match_status non-blank) uses the V21 OR
-            # matcher -- it trusts the ALREADY-resolved pkg.store (which
-            # can be any user-defined Store, e.g. "Tmall") instead of the
-            # legacy matcher's fixed ~9-Store CN alias table (spec section
-            # 18/19). Packages that went through the legacy STORE_MASTER
-            # path (routing_rules not supplied at all) keep the exact
-            # original behavior (spec section 46).
-            if getattr(pkg, "route_match_status", ""):
-                m = pge_mod.match_store_and_or_v21(pkg, or_index)
+            pkg.or_ref_warning = ""
+            if pkg.route_match_status != "MATCHED":
+                pkg.or_list_match_status = "REVIEW"
+                n_review += 1
+                continue
+            key = (prr_mod.normalize_country(pkg.country), prr_mod.normalize_port(pkg.port), prr_mod.normalize_store(pkg.store))
+            row = or_template_lookup.get(key)
+            if row is None:
+                pkg.or_list_match_status = "NO_OR_LIST"
+                n_no_row += 1
+                continue
+            # PL-text-parsed OR/SO (captured earlier by the Parser) always
+            # takes priority when present -- the OR-Template only fills in
+            # what the PL text itself didn't already give us (same
+            # priority rule as the legacy OR List path below).
+            if not pkg.or_number:
+                pkg.or_number = row.or_raw
+                pkg.or_source = "OR_TEMPLATE"
+            if not pkg.so_number:
+                pkg.so_number = row.ref_raw
+                pkg.so_source = "OR_TEMPLATE"
+            pkg.or_ref_warning = row.warning_code
+            pkg.or_list_match_status = "OK"
+            if row.warning_code == ort_mod.WARNING_MISSING_OR:
+                n_missing_or += 1
+            elif row.warning_code == ort_mod.WARNING_MISSING_REF:
+                n_missing_ref += 1
+            elif row.warning_code == ort_mod.WARNING_MISSING_OR_REF:
+                n_missing_both += 1
             else:
-                receiver_text = pge_mod._collect_cn_signal(pkg, pl_folder, recursive, receiver_cache)
-                m = pge_mod.match_store_and_or(pkg, or_index, receiver_text=receiver_text)
-            pkg.or_list_store = m.matched_store
-            pkg.or_list_match_source = m.match_source
-            pkg.or_list_match_status = m.status
-            pkg.or_list_review_reason = m.review_reason
-            pkg.or_list_candidate_store = m.candidate_store
-            pkg.or_list_candidate_score = m.candidate_score
-            if m.status == "OK":
-                # v16 (point 3 correction): capture the FULL dynamic
-                # business-field record, not just the first two -- see
-                # Package.business_fields' docstring. Independent of the
-                # or_number/so_number "PL text wins" priority rule below
-                # (business_fields is entirely OR-List-sourced, always
-                # reflects what the OR List actually said once matched).
-                pkg.business_fields = dict(m.matched_business_fields or {})
-                # PL-text-parsed OR/SO (captured earlier by the Parser)
-                # always takes priority when present -- OR List only fills
-                # in what the PL text itself didn't already give us.
-                if not pkg.or_number:
-                    pkg.or_number = m.matched_or
-                    pkg.or_source = "OR_LIST"
-                if not pkg.so_number:
-                    pkg.so_number = m.matched_so
-                    pkg.so_source = "OR_LIST"
-        n_ok = sum(1 for p in packages if p.or_list_match_status == "OK")
-        n_review = sum(1 for p in packages if p.or_list_match_status == "REVIEW")
-        n_other = len(packages) - n_ok - n_review
-        log.info(f"OR List match: {n_ok} OK, {n_review} REVIEW, {n_other} other, "
-                 f"out of {len(packages)}")
+                n_ok += 1
+        log.info(f"OR-Template business refs: {n_ok} complete, {n_missing_or} missing OR No. (warning "
+                 f"only), {n_missing_ref} missing Ref No. (warning only), {n_missing_both} missing both "
+                 f"(warning only), {n_review} route REVIEW (no refs attached), {n_no_row} matched-route-"
+                 f"without-template-row (unexpected) -- out of {len(packages)}.")
     else:
-        for pkg in packages:
-            pkg.or_list_match_status = "NO_OR_LIST"
-        log.info("No usable OR List -- every package left at "
-                 "or_list_match_status='NO_OR_LIST' (tool still runs fully; "
-                 "Run/Export never disabled).")
+        # v12: OR List (optional) — Store/OR/SO matching hierarchy (spec section
+        # 5). Never a fatal error, never disables Run/Export: an unusable/absent
+        # OR List just leaves every package at or_list_match_status="NO_OR_LIST"
+        # and the pipeline continues exactly as it did before this feature.
+        log.info("Matching packages against OR List (optional)...")
+        or_index: Dict[str, list] = {}
+        pge_mod = None
+        try:
+            import pl_or_list_import as oli
+            import pl_group_export as pge_mod
+            or_list_result = oli.load_or_list(or_list_file)
+            LAST_OR_LIST_RESULT = or_list_result
+            if or_list_result.ok:
+                or_index = oli.build_or_index(or_list_result)
+                log.info(f"OR List loaded: {len(or_list_result.rows)} row(s) from "
+                         f"sheet {or_list_result.sheet_used!r}.")
+            elif or_list_result.status != "NO_FILE":
+                log.warning(f"OR List not usable (status={or_list_result.status}): "
+                            f"{'; '.join(or_list_result.errors) or '(no details)'} "
+                            f"-- continuing without it, Run/Export not affected.")
+        except ImportError:
+            log.warning("pl_or_list_import/pl_group_export not importable — "
+                        "OR List matching skipped, pipeline continues unaffected.")
+
+        if or_index and pge_mod is not None:
+            receiver_cache: Dict[str, str] = {}
+            for pkg in packages:
+                # v21: a package classified through the user's routing-rule
+                # table (pkg.route_match_status non-blank) uses the V21 OR
+                # matcher -- it trusts the ALREADY-resolved pkg.store (which
+                # can be any user-defined Store, e.g. "Tmall") instead of the
+                # legacy matcher's fixed ~9-Store CN alias table (spec section
+                # 18/19). Packages that went through the legacy STORE_MASTER
+                # path (routing_rules not supplied at all) keep the exact
+                # original behavior (spec section 46).
+                if getattr(pkg, "route_match_status", ""):
+                    m = pge_mod.match_store_and_or_v21(pkg, or_index)
+                else:
+                    receiver_text = pge_mod._collect_cn_signal(pkg, pl_folder, recursive, receiver_cache)
+                    m = pge_mod.match_store_and_or(pkg, or_index, receiver_text=receiver_text)
+                pkg.or_list_store = m.matched_store
+                pkg.or_list_match_source = m.match_source
+                pkg.or_list_match_status = m.status
+                pkg.or_list_review_reason = m.review_reason
+                pkg.or_list_candidate_store = m.candidate_store
+                pkg.or_list_candidate_score = m.candidate_score
+                if m.status == "OK":
+                    # v16 (point 3 correction): capture the FULL dynamic
+                    # business-field record, not just the first two -- see
+                    # Package.business_fields' docstring. Independent of the
+                    # or_number/so_number "PL text wins" priority rule below
+                    # (business_fields is entirely OR-List-sourced, always
+                    # reflects what the OR List actually said once matched).
+                    pkg.business_fields = dict(m.matched_business_fields or {})
+                    # PL-text-parsed OR/SO (captured earlier by the Parser)
+                    # always takes priority when present -- OR List only fills
+                    # in what the PL text itself didn't already give us.
+                    if not pkg.or_number:
+                        pkg.or_number = m.matched_or
+                        pkg.or_source = "OR_LIST"
+                    if not pkg.so_number:
+                        pkg.so_number = m.matched_so
+                        pkg.so_source = "OR_LIST"
+            n_ok = sum(1 for p in packages if p.or_list_match_status == "OK")
+            n_review = sum(1 for p in packages if p.or_list_match_status == "REVIEW")
+            n_other = len(packages) - n_ok - n_review
+            log.info(f"OR List match: {n_ok} OK, {n_review} REVIEW, {n_other} other, "
+                     f"out of {len(packages)}")
+        else:
+            for pkg in packages:
+                pkg.or_list_match_status = "NO_OR_LIST"
+            log.info("No usable OR List -- every package left at "
+                     "or_list_match_status='NO_OR_LIST' (tool still runs fully; "
+                     "Run/Export never disabled).")
 
     # v12: carton numbers are now computed per counting_scope_key (spec
     # section 9), not as one flat sequence across the whole upload.
@@ -3757,7 +3861,7 @@ packages = run_pipeline(
     master_data_sheet=MASTER_DATA_SHEET,
     recursive=RECURSIVE,
     or_list_file=OR_LIST_FILE,
-    routing_rules=ROUTING_RULES,
+    routing_rules=None,  # v21.1: routing now comes solely from an uploaded OR-Template (resolved inside run_pipeline), never a manual table
 )
 
 # ── UI summary (spec section 13) ─────────────────────────────────────────
@@ -3793,6 +3897,47 @@ RUN_SUMMARY = {
     "or_list_sheet_used": LAST_OR_LIST_RESULT.sheet_used if LAST_OR_LIST_RESULT else None,
     "or_list_rows_loaded": len(LAST_OR_LIST_RESULT.rows) if LAST_OR_LIST_RESULT else 0,
     "or_list_error": ("; ".join(LAST_OR_LIST_RESULT.errors) if LAST_OR_LIST_RESULT and LAST_OR_LIST_RESULT.errors else ""),
+    # v21.1 (OR-TEMPLATE): distinct from or_list_status above -- these are
+    # only populated when the uploaded OR List was recognised as the new
+    # Country Code | Port | Store | OR No. | Ref No. template AND used to
+    # drive routing for this run (LAST_OR_TEMPLATE_RESULT is None for
+    # every other case: no file, legacy OR List shape, or a template that
+    # produced zero usable rows -- see run_pipeline()'s docstring).
+    "or_template_active": bool(LAST_OR_TEMPLATE_RESULT),
+    "or_template_rows_loaded": len(LAST_OR_TEMPLATE_RESULT.rows) if LAST_OR_TEMPLATE_RESULT else 0,
+    "or_template_missing_or": sum(1 for p in packages if getattr(p, "or_ref_warning", "") in
+                                   ("WARNING_MISSING_OR", "WARNING_MISSING_OR_REF")) if packages and LAST_OR_TEMPLATE_RESULT else 0,
+    "or_template_missing_ref": sum(1 for p in packages if getattr(p, "or_ref_warning", "") in
+                                    ("WARNING_MISSING_REF", "WARNING_MISSING_OR_REF")) if packages and LAST_OR_TEMPLATE_RESULT else 0,
+    "or_template_route_review": sum(1 for p in packages if p.route_match_status == "REVIEW") if packages and LAST_OR_TEMPLATE_RESULT else 0,
+    # v21.1 (OR-TEMPLATE UI VISIBILITY): the page's run-summary panel has no
+    # other way to show the user which Country/Port/Store/OR/Ref combination
+    # their upload actually resolved to -- without this, a real user gets
+    # zero on-screen confirmation that e.g. "CN | (blank) | Tmall" routing
+    # actually happened, even though the export files are correct. One row
+    # per distinct resolved (country, port, store) among MATCHED packages,
+    # with the OR No. / Ref No. that route carries (same for every package
+    # in the group, since or_template_lookup keys are 1:1 with template rows).
+    "or_template_route_breakdown": (
+        [
+            {
+                "country": country, "port": port, "store": store,
+                "package_count": count,
+                "or_number": or_no, "ref_number": ref_no,
+                "warning": warning,
+            }
+            for (country, port, store), (count, or_no, ref_no, warning) in sorted(
+                {
+                    (p.country, p.port, p.store): (
+                        sum(1 for q in packages if q.route_match_status == "MATCHED"
+                            and q.country == p.country and q.port == p.port and q.store == p.store),
+                        p.or_number, p.so_number, p.or_ref_warning,
+                    )
+                    for p in packages if p.route_match_status == "MATCHED"
+                }.items()
+            )
+        ] if packages and LAST_OR_TEMPLATE_RESULT else []
+    ),
 }
 print("RUN_SUMMARY_JSON=" + json.dumps(RUN_SUMMARY))
 
