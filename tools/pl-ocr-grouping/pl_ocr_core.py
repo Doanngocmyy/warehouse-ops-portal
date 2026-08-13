@@ -428,6 +428,7 @@ def safe_float(v) -> Optional[float]:
     except Exception:
         return None
 
+
 def normalize_sku_key(text: str) -> str:
     """Robust key for SKU/EAN lookup: remove hidden chars, spaces and
     punctuation. Bug fix: the previous version called
@@ -1831,16 +1832,32 @@ class DimMapper:
                         f"missing={missing} non_positive={non_positive}")
             return False
 
+        # V21 final DIM business rule (hotfix v3 -- supersedes the earlier
+        # precision-inference/tolerance approach entirely, per explicit
+        # instruction: no decimal-precision inference, no number_format
+        # inspection, no dynamic rounding allowance, no 5% tolerance).
+        # The uploaded DIM file's declared CBM is the SOURCE OF TRUTH;
+        # L x W x H is ONLY a sanity check, compared at a fixed 2 decimal
+        # places:
+        #   calculated_cbm_2dp = round(calculated_cbm, 2)
+        #   declared_cbm_2dp   = round(declared_cbm, 2)
+        #   equal -> OK, otherwise -> DIM_REVIEW_REQUIRED
+        # `cbm` (declared) is never overwritten -- only compared. Kept as
+        # plain local diagnostics (declared_cbm/calculated_cbm/
+        # calculated_cbm_2dp) for the warning log below; nothing here
+        # mutates the row's stored CBM value.
         expected_cbm = (length * width * height) / 1_000_000 if length and width and height else None
         cbm_diff = abs(cbm - expected_cbm) if (cbm is not None and expected_cbm is not None) else None
-        tolerance = max(0.001, expected_cbm * 0.05) if expected_cbm is not None else None
+        calculated_cbm_2dp = round(expected_cbm, 2) if expected_cbm is not None else None
+        declared_cbm_2dp = round(cbm, 2) if cbm is not None else None
         status = "OK"
-        if cbm_diff is not None and tolerance is not None and cbm_diff > tolerance:
+        if (calculated_cbm_2dp is not None and declared_cbm_2dp is not None
+                and calculated_cbm_2dp != declared_cbm_2dp):
             status = "DIM_REVIEW_REQUIRED"
             self.review_required += 1
             log.warning(f"  Row {excel_row} ({ref_norm}|{pkg_norm}): DIM_REVIEW_REQUIRED "
-                        f"declared_cbm={cbm} expected_cbm={round(expected_cbm,6)} "
-                        f"diff={round(cbm_diff,6)} tolerance={round(tolerance,6)} "
+                        f"declared_cbm={cbm} calculated_cbm={round(expected_cbm,6)} "
+                        f"declared_cbm_2dp={declared_cbm_2dp} calculated_cbm_2dp={calculated_cbm_2dp} "
                         f"-- original CBM kept as-is, NOT overwritten.")
 
         key = f"{ref_norm}|{pkg_norm}"

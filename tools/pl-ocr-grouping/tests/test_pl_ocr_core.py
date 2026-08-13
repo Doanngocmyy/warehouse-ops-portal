@@ -735,6 +735,125 @@ test("blank/merged reference forward-filled from row above", t_dim_reference_for
 test("insufficient cells after package code -> row fails", t_dim_insufficient_positional_fields)
 test("non-numeric dimension -> row fails", t_dim_non_numeric_dimension_fails_row)
 test("CBM outside tolerance -> DIM_REVIEW_REQUIRED, original CBM not overwritten", t_dim_cbm_tolerance_review_required_no_overwrite)
+
+
+# =========================================================================
+# V21 FINAL DIM business rule (hotfix v3 -- supersedes the earlier
+# precision-inference/tolerance approach entirely): declared CBM is the
+# source of truth; L x W x H is only a sanity check, compared at a FIXED
+# 2 decimal places -- round(calculated_cbm, 2) == round(declared_cbm, 2)
+# -> OK, else DIM_REVIEW_REQUIRED. No decimal-precision inference, no
+# number_format inspection, no dynamic rounding allowance, no percentage
+# tolerance. All L/W/H below are synthetic round numbers chosen to
+# reproduce the EXACT declared/calculated CBM pairs from the real
+# production report, without using any real customer reference/package
+# codes.
+# =========================================================================
+def _dim_rounding_case(declared_cbm, length, width, height, ref="REF-RND", pkg="PGKECRND0000001"):
+    path, tmp = _dim_wb(
+        headers=["h1", "h2", "h3", "h4", "h5", "h6", "h7"],
+        rows=[[ref, pkg, length, width, height, 1.0, declared_cbm]],
+    )
+    try:
+        DimMapper = C["DimMapper"]
+        dim = DimMapper(path)
+        d = dim.lookup(ref, pkg)
+        return dim, d
+    finally:
+        shutil.rmtree(tmp)
+
+
+def t_dim_2dp_0_04_vs_0_04452_is_ok():
+    # round(0.04452, 2) == 0.04 == round(0.04, 2) -- real CN-6676 case 1.
+    dim, d = _dim_rounding_case(0.04, 100, 100, 4.452)
+    assert d is not None and d["cbm"] == 0.04, "declared CBM must be preserved unchanged"
+    assert dim.review_required == 0
+
+
+test("DIM fixed-2dp rule: declared 0.04 vs calculated 0.04452 -> round to 0.04/0.04 -> OK (real CN-6676 case)",
+     t_dim_2dp_0_04_vs_0_04452_is_ok)
+
+
+def t_dim_2dp_0_08_vs_0_075036_is_ok():
+    # round(0.075036, 2) == 0.08 == round(0.08, 2) -- real CN-6676 case 2.
+    dim, d = _dim_rounding_case(0.08, 100, 100, 7.5036)
+    assert d is not None and d["cbm"] == 0.08
+    assert dim.review_required == 0
+
+
+test("DIM fixed-2dp rule: declared 0.08 vs calculated 0.075036 -> round to 0.08/0.08 -> OK (real CN-6676 case)",
+     t_dim_2dp_0_08_vs_0_075036_is_ok)
+
+
+def t_dim_2dp_0_07_vs_0_066_is_ok():
+    # round(0.066, 2) == 0.07 == round(0.07, 2) -- real CN-6676 case 3.
+    dim, d = _dim_rounding_case(0.07, 100, 100, 6.6)
+    assert d is not None and d["cbm"] == 0.07
+    assert dim.review_required == 0
+
+
+test("DIM fixed-2dp rule: declared 0.07 vs calculated 0.066 -> round to 0.07/0.07 -> OK (real CN-6676 case)",
+     t_dim_2dp_0_07_vs_0_066_is_ok)
+
+
+def t_dim_2dp_0_06_vs_0_0558_is_ok():
+    # round(0.0558, 2) == 0.06 == round(0.06, 2) -- real CN-6676 case.
+    dim, d = _dim_rounding_case(0.06, 100, 100, 5.58)
+    assert d is not None and d["cbm"] == 0.06
+    assert dim.review_required == 0
+
+
+test("DIM fixed-2dp rule: declared 0.06 vs calculated 0.0558 -> round to 0.06/0.06 -> OK (real CN-6676 case)",
+     t_dim_2dp_0_06_vs_0_0558_is_ok)
+
+
+def t_dim_2dp_0_01_vs_0_014875_is_ok():
+    # round(0.014875, 2) == 0.01 == round(0.01, 2) -- real CN-6676 case,
+    # the tightest one (0.004875 raw diff).
+    dim, d = _dim_rounding_case(0.01, 100, 100, 1.4875)
+    assert d is not None and d["cbm"] == 0.01
+    assert dim.review_required == 0
+
+
+test("DIM fixed-2dp rule: declared 0.01 vs calculated 0.014875 -> round to 0.01/0.01 -> OK (real CN-6676 tightest case)",
+     t_dim_2dp_0_01_vs_0_014875_is_ok)
+
+
+def t_dim_2dp_0_10_vs_0_104_is_ok():
+    # round(0.104, 2) == 0.10 == round(0.10, 2) -- spec section 2 example.
+    dim, d = _dim_rounding_case(0.10, 100, 100, 10.4)
+    assert d is not None and d["cbm"] == 0.10
+    assert dim.review_required == 0
+
+
+test("DIM fixed-2dp rule: declared 0.10 vs calculated 0.104 -> round to 0.10/0.10 -> OK",
+     t_dim_2dp_0_10_vs_0_104_is_ok)
+
+
+def t_dim_2dp_0_04_vs_0_060_still_reviews():
+    # round(0.060, 2) == 0.06 != 0.04 == round(0.04, 2) -- genuine
+    # mismatch must still REVIEW; the fixed rule never disables the check.
+    dim, d = _dim_rounding_case(0.04, 100, 100, 6.0)
+    assert d is not None and d["cbm"] == 0.04, "original declared CBM must never be overwritten"
+    assert dim.review_required == 1, "a real mismatch (0.04 vs 0.060) must still REVIEW"
+    diag = [x for x in dim.diagnostics if x["normalized_package_code"] == "PGKECRND0000001"][0]
+    assert diag["validation_status"] == "DIM_REVIEW_REQUIRED"
+
+
+test("DIM fixed-2dp rule still correctly REVIEWs a genuine mismatch (declared 0.04 vs calculated 0.060)",
+     t_dim_2dp_0_04_vs_0_060_still_reviews)
+
+
+def t_dim_2dp_0_10_vs_0_14_still_reviews():
+    # round(0.14, 2) == 0.14 != 0.10 == round(0.10, 2) -- spec section 2
+    # REVIEW example.
+    dim, d = _dim_rounding_case(0.10, 100, 100, 14.0)
+    assert d is not None and d["cbm"] == 0.10, "original declared CBM must never be overwritten"
+    assert dim.review_required == 1, "declared 0.10 vs calculated 0.14 must REVIEW"
+
+
+test("DIM fixed-2dp rule: declared 0.10 vs calculated 0.14 -> 0.10 != 0.14 -> REVIEW",
+     t_dim_2dp_0_10_vs_0_14_still_reviews)
 test("duplicate DIM key flagged, first occurrence wins (no silent overwrite)", t_dim_duplicate_key_flagged_first_wins)
 test("no fuzzy auto-match of package code / reference", t_dim_no_fuzzy_auto_match)
 test("Raw_Data sheet carries DIM values on every item row (not merge-only)", t_raw_data_sheet_has_dim_per_item_row)

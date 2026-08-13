@@ -707,6 +707,86 @@ test("No routing rules at all -> legacy STORE_MASTER fallback runs exactly as be
      t_legacy_fallback_only_when_no_routing_rules_at_all)
 
 
+# =========================================================================
+# V21 hotfix (real CN-6676 production bug): 04_CN_BY_STORE filename must
+# come from the resolved V21 Store (pkg.store), never the legacy
+# _canonical_store_identity_for_or_row() fuzzy canonicalizer -- that fuzzy
+# path token-collided "Tmall" into the unrelated STORE_MASTER key "IAPM",
+# producing PL_CN_STORE_IAPM.xlsx for a Tmall shipment.
+# =========================================================================
+print("== V21 hotfix: 04_CN_BY_STORE filename uses the resolved V21 Store ==")
+
+business_sort_packages = D["business_sort_packages"]
+assign_counting_scope_keys = D["assign_counting_scope_keys"]
+assign_global_numbers = D["assign_global_numbers"]
+assign_true_global_numbers = D["assign_true_global_numbers"]
+write_workbook = D["write_workbook"]
+
+
+def _v21_store_filename_for(store_name: str, mark: str = "CN-9100-SomeHub-POP") -> set:
+    import tempfile, shutil
+    pkg = _pkg(mark, 1)
+    pkgs = business_sort_packages([pkg])
+    routing_rules = [{"country": "CN", "port": "", "store": store_name}]
+    classify_packages_for_port(pkgs, None, False, routing_rules=routing_rules)
+    assert pkgs[0].route_match_status == "MATCHED", pkgs[0].route_match_reason
+    assign_counting_scope_keys(pkgs)
+    assign_global_numbers(pkgs)
+    assign_true_global_numbers(pkgs)
+
+    out_dir = Path(tempfile.mkdtemp(prefix="pl_v21_store_fname_"))
+    try:
+        pge.export_grouped_pl(packages=pkgs, output_dir=out_dir, write_workbook=write_workbook)
+        store_dir = out_dir / "04_CN_BY_STORE"
+        written = {p.name for p in store_dir.glob("*.xlsx")} if store_dir.exists() else set()
+        return written
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def t_v21_resolved_store_tmall_never_produces_iapm_filename():
+    written = _v21_store_filename_for("Tmall")
+    assert written == {"PL_CN_STORE_TMALL.xlsx"}, written
+    assert "PL_CN_STORE_IAPM.xlsx" not in written, (
+        "resolved V21 Store 'Tmall' must NEVER be written as PL_CN_STORE_IAPM.xlsx "
+        "(the real CN-6676 production bug this hotfix fixes)")
+
+
+test("Resolved V21 Store=Tmall -> 04_CN_BY_STORE filename is PL_CN_STORE_TMALL.xlsx, never IAPM "
+     "(real CN-6676 hotfix)",
+     t_v21_resolved_store_tmall_never_produces_iapm_filename)
+
+
+def t_v21_resolved_store_iapm_stays_iapm():
+    # A routing rule whose Store genuinely IS "Iapm" must still land on the
+    # correct IAPM filename (proves the fix doesn't just blindly avoid
+    # IAPM -- it produces whatever the resolved Store actually is).
+    written = _v21_store_filename_for("Iapm")
+    assert written == {"PL_CN_STORE_IAPM.xlsx"}, written
+
+
+test("Resolved V21 Store=Iapm -> 04_CN_BY_STORE filename remains PL_CN_STORE_IAPM.xlsx",
+     t_v21_resolved_store_iapm_stays_iapm)
+
+
+def t_v21_multiple_stores_each_get_their_own_correct_filename():
+    # Broader regression guard: several arbitrary V21 Store names in the
+    # SAME run, none of which should ever cross-contaminate each other's
+    # filename.
+    for store_name, expected_fname in [
+        ("Tmall", "PL_CN_STORE_TMALL.xlsx"),
+        ("JD Store", "PL_CN_STORE_JD_STORE.xlsx"),
+        ("Douyin", "PL_CN_STORE_DOUYIN.xlsx"),
+    ]:
+        written = _v21_store_filename_for(store_name)
+        assert written == {expected_fname}, (store_name, written)
+
+
+test("Several arbitrary V21 Store names each resolve to their own correct filename, "
+     "never a cross-collision (regression guard)",
+     t_v21_multiple_stores_each_get_their_own_correct_filename)
+
+
 # ── summary ──────────────────────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")
 if _failed:

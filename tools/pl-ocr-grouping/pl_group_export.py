@@ -556,7 +556,33 @@ def _store_file_key(pkg, store_key: str) -> str:
     the raw `store_key` from _resolved_store_for_split() so file contents
     never disagree with pl_ocr_core.compute_counting_scope_key()'s
     numbering scope -- this only affects the filename that scope is
-    written under."""
+    written under.
+
+    V21 hotfix (real CN-6676 production bug): a package that went through
+    the user's routing-rule table (pkg.route_match_status non-blank)
+    already has its Store resolved AUTHORITATIVELY by
+    pl_routing_rules.match_route() -- pkg.store IS that resolved value
+    (e.g. "Tmall") and is the one and only source of truth for both
+    grouping (_resolved_store_for_split, above) and the output filename.
+    Running a clean, already-known V21 Store name through the legacy
+    _canonical_store_identity_for_or_row() fuzzy/token-based canonicalizer
+    below -- built for messy OR List free text like "China World NB1026"
+    -- is wrong: it can spuriously token-match into an unrelated
+    STORE_MASTER key (this is exactly how "Tmall" silently became
+    "PL_CN_STORE_IAPM.xlsx" -- some token inside "Tmall" collided with an
+    IAPM alias token in the legacy index). V21-routed packages therefore
+    skip that legacy canonicalizer entirely: pkg.store is used as-is
+    (falling through to _dynamic_store_filename()'s sanitizer at the call
+    site when it isn't literally a STORE_MASTER key, e.g. "Tmall" ->
+    PL_CN_STORE_TMALL.xlsx) -- UNLESS the resolved Store name happens to
+    literally BE a real STORE_MASTER key (e.g. a routing rule store
+    literally named "KERRY"), in which case that canonical key is used
+    directly, matching legacy filenames byte-for-byte for that case.
+    Legacy (non-V21) packages are completely unaffected -- same
+    canonicalizer, same STORE_MASTER-key-or-fallback logic as before."""
+    if getattr(pkg, "route_match_status", ""):
+        resolved = getattr(pkg, "store", "") or store_key
+        return resolved
     if getattr(pkg, "or_list_match_status", "") == "OK" and getattr(pkg, "or_list_store", ""):
         # _canonical_store_identity_for_or_row() returns space-separated
         # identity form (e.g. "SHANGHAI HONGQIAO") for multi-word keys --
