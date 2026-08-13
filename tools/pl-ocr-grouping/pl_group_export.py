@@ -149,6 +149,16 @@ def _tokens(code: str) -> List[str]:
 # silently folded into one of the other four.
 FACTORY_KEYWORDS = ["SBGEAR", "QIFENG", "POP", "JION", "VN", "CN"]  # longest-first for the flat-suffix fallback
 _KNOWN_FACTORY_TOKENS = {"CN", "POP", "SBGEAR", "QIFENG", "JION", "VN"}
+# v21 (PL OCR V21 spec section 27): "QF" is an established short alias for
+# the QIFENG factory -- confirmed against the real CN-6676 fixture, whose
+# QF-suffixed files (CN_Tmall-6676-CTN_QF.pdf / -PCS_QF.pdf, 28 packages)
+# were previously left at factory=REVIEW because QF isn't itself one of
+# the 6 canonical _KNOWN_FACTORY_TOKENS/FACTORY_KEYWORDS values above.
+# Deliberately a SEPARATE, minimal alias table (not merged into
+# FACTORY_KEYWORDS/_KNOWN_FACTORY_TOKENS themselves) so every unrelated
+# factory/origin token (CN/VN/POP/SBGEAR/JION) keeps behaving exactly as
+# before -- only "QF" gains a new resolution, to QIFENG.
+_FACTORY_TOKEN_ALIASES = {"QF": "QIFENG"}
 
 # v11/v12: carton-NUMBERING business order (spec section 7.2/8) --
 # deliberately separate from FACTORY_KEYWORDS above, which is only a
@@ -250,6 +260,8 @@ def _detect_factory_from_code(code: str) -> Optional[str]:
     last = toks[-1]
     if last in _KNOWN_FACTORY_TOKENS:
         return last
+    if last in _FACTORY_TOKEN_ALIASES:
+        return _FACTORY_TOKEN_ALIASES[last]
 
     # Handle split spellings such as "..._SB_GEAR" or "..._QI_FENG"
     if len(toks) >= 2:
@@ -264,6 +276,9 @@ def _detect_factory_from_code(code: str) -> Optional[str]:
     for kw in FACTORY_KEYWORDS:
         if flat.endswith(kw):
             return kw
+    for alias, canonical in _FACTORY_TOKEN_ALIASES.items():
+        if flat.endswith(alias):
+            return canonical
     return None
 
 
@@ -1183,6 +1198,95 @@ def _match_store_and_or_flat_no_store(all_rows) -> Optional["StoreOrMatchResult"
     return result
 
 
+def match_store_and_or_v21(pkg, or_index: Dict[str, list]) -> "StoreOrMatchResult":
+    """V21 OR/Ref matching (spec section 18-19), used INSTEAD of the legacy
+    match_store_and_or() for any package that went through
+    pl_routing_rules.match_route() (pkg.route_match_status is non-blank --
+    see classify_packages_for_port()). The legacy matcher only recognizes
+    ~9 hardcoded CN Store names (_KEC_STORE_ALIASES) and treats a literal
+    Store/Shop column whose value ISN'T one of those as a genuine "no
+    match" REVIEW (see _match_store_and_or_flat_no_store()'s own
+    docstring) -- exactly wrong for V21, where the Store came from the
+    user's OWN routing-rule table and can be anything (e.g. "Tmall").
+
+    Matching order (spec section 18):
+      1. Package has a resolved Store (pkg.store, not "" / "REVIEW") --
+         normalized exact match against every OR List row's Store/Shop
+         value (pl_routing_rules.normalize_store, spec section 5). Exactly
+         one row match -> OK.
+      2. No resolved Store, OR no row matched it -- if the WHOLE OR List
+         reduces to exactly one distinct business-field record (spec
+         section 19/13's "simple OR/Ref fallback" / unique fallback),
+         apply it regardless of Store. More than one distinct record with
+         no Store to disambiguate -> REVIEW, never a guess.
+    """
+    result = StoreOrMatchResult()
+    all_rows = [r for rows in or_index.values() for r in rows]
+    if not all_rows:
+        result.status = "NO_OR_LIST"
+        return result
+
+    try:
+        import pl_routing_rules as prr
+    except ImportError:
+        result.status = "REVIEW"
+        result.review_reason = "pl_routing_rules not importable."
+        return result
+
+    def _record(row) -> "OrderedDict[str, str]":
+        from collections import OrderedDict as _OD
+        rec: "_OD[str, str]" = _OD()
+        for k, v in (getattr(row, "business_fields", {}) or {}).items():
+            rec[k] = str(v or "").strip()
+        return rec
+
+    pkg_store = getattr(pkg, "store", "") or ""
+    if pkg_store and pkg_store != "REVIEW":
+        store_key = prr.normalize_store(pkg_store)
+        matches = [r for r in all_rows if prr.normalize_store(getattr(r, "store_raw", "")) == store_key]
+        if len(matches) == 1:
+            row = matches[0]
+            rec = _record(row)
+            result.matched_store = pkg_store
+            result.match_source = "V21_ROUTING_STORE_EXACT"
+            result.matched_business_fields = rec
+            vals = list(rec.values())
+            result.matched_or = vals[0] if len(vals) >= 1 else str(getattr(row, "or_raw", "") or "").strip()
+            result.matched_so = vals[1] if len(vals) >= 2 else str(getattr(row, "so_raw", "") or "").strip()
+            result.status = "OK"
+            return result
+        if len(matches) > 1:
+            result.status = "REVIEW"
+            result.review_reason = (
+                f"Store {pkg_store!r} (from routing rules) matches {len(matches)} different OR List rows "
+                "-- cannot pick one."
+            )
+            return result
+        # 0 matches -- fall through to the unique-record fallback below.
+
+    # Unique business-field fallback (spec section 13/19): safe regardless
+    # of whether pkg_store was blank or simply didn't match any OR row.
+    records = [_record(r) for r in all_rows]
+    fingerprints = {tuple(v for v in rec.values()) for rec in records}
+    if len(fingerprints) == 1:
+        rec = records[0]
+        result.matched_store = pkg_store if (pkg_store and pkg_store != "REVIEW") else ""
+        result.match_source = "V21_UNIQUE_FALLBACK"
+        result.matched_business_fields = rec
+        vals = list(rec.values())
+        result.matched_or = vals[0] if len(vals) >= 1 else ""
+        result.matched_so = vals[1] if len(vals) >= 2 else ""
+        result.status = "OK"
+        return result
+
+    result.status = "REVIEW"
+    result.review_reason = (
+        f"No OR List row's Store/Shop matches routed Store {pkg_store!r}, and the OR List has "
+        f"{len(fingerprints)} distinct business-field records -- Store/routing evidence is required."
+    )
+    return result
+
+
 def match_store_and_or(pkg, or_index: Dict[str, list], receiver_text: str = "") -> StoreOrMatchResult:
     result = StoreOrMatchResult()
     if not or_index:
@@ -1583,9 +1687,19 @@ def _validate(packages, classified, factory_groups, cn_by_port, by_store,
     # value PL_Total's Packing List sheet already wrote, so this also
     # guards PL_Total/Raw_Data/PL_SPLIT_CONTROL/03_CN_BY_PORT from ever
     # silently disagreeing with each other again. --
+    # v21 (PL OCR V21 spec sections 4/16): a resolved Store with a BLANK
+    # Port is legitimate when it comes from a user routing rule that
+    # explicitly leaves Port blank (e.g. CN|blank|Tmall) -- route_match_
+    # status is only ever non-blank on a package that went through
+    # pl_routing_rules.match_route() (see classify_packages_for_port()),
+    # so it safely distinguishes "V21 routing intentionally left Port
+    # blank" from the legacy STORE_MASTER path, where every entry always
+    # has a Port and a resolved Store with a blank Port really was a bug.
     resolved_store_blank_port = [c for c in cn_port_eligible
-                                  if c["store"] and c["store"] != "REVIEW" and not c["port"]]
-    check("No destination-CN package has a resolved Store but a blank PORT",
+                                  if c["store"] and c["store"] != "REVIEW" and not c["port"]
+                                  and not getattr(c["pkg"], "route_match_status", "")]
+    check("No destination-CN package has a resolved Store but a blank PORT "
+          "(excluding V21 routing rules that intentionally leave Port blank)",
           not resolved_store_blank_port,
           f"packages={[c['pkg'].package_code for c in resolved_store_blank_port]}" if resolved_store_blank_port else "")
 

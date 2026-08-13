@@ -74,6 +74,13 @@ RECURSIVE = __RECURSIVE__
 # Export never disabled). Wired from app.html's OR List upload input in a
 # later step (Task 20); defaults to None until then.
 OR_LIST_FILE = __OR_LIST_FILE__
+# v21 (PL OCR V21 spec sections 2/45): the user's routing-rule table, wired
+# from app.html's Country|Port|Store rows -- a JSON array of
+# {"country","port","store"} objects, e.g. [{"country":"CN","port":"",
+# "store":"Tmall"}]. [] (the default) means "no routing rules supplied" and
+# the pipeline falls back 100% to the legacy STORE_MASTER path (spec
+# section 46) -- see classify_packages_for_port()'s docstring.
+ROUTING_RULES = __ROUTING_RULES_JSON__
 # v9: optional manual CNEE / Notify Party, typed in on the app.html page —
 # only used for non-CN factories (CN always auto-fills from STORE_MASTER).
 # None / "" when the user left the field blank.
@@ -91,6 +98,15 @@ GENERATE_SUBLIST = __GENERATE_SUBLIST__
 # pdf). Its failure must NEVER block the legacy ZIP/export -- see
 # SUBLIST_PDF_STATUS handling in the AUTO SPLIT section at the bottom.
 GENERATE_SUBLIST_PDF = __GENERATE_SUBLIST_PDF__
+# v21 (PL OCR V21 spec sections 25-31): two independent Sublist display
+# options, both DEFAULT OFF (spec section 28: with neither selected, the
+# Sublist stays byte-for-byte the pre-v21 SKU|EAN|QTY layout with raw
+# UOM/QTY semantics preserved). CONVERT_CARTON_TO_PCS derives QTY (CARTON_
+# <N>PCS -> N x qty, output UOM "PCS") via pl_uom_resolver -- Raw_Data is
+# NEVER affected either way. SHOW_UOM_IN_SUBLIST only changes whether the
+# Sublist prints a UOM column between EAN and QTY.
+CONVERT_CARTON_TO_PCS = __CONVERT_TO_PCS__
+SHOW_UOM_IN_SUBLIST = __SHOW_UOM_IN_SUBLIST__
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -536,6 +552,16 @@ class Package:
     # each independently re-deriving it from the canonical STORE_MASTER
     # key (same "one canonical value per Package" principle as pkg.port).
     store_display: str = ""
+    # v21 (PL OCR V21 spec sections 2-17): diagnostics from the USER-provided
+    # routing-rule table match (pl_routing_rules.match_route()), additive-
+    # only. route_match_status/method/reason are blank ("") whenever no
+    # routing_rules were supplied to run_pipeline() at all -- that is the
+    # v20-and-earlier legacy STORE_MASTER code path (section 46: manual
+    # routing rules are authoritative when supplied; legacy alias logic is
+    # a backward-compatible fallback only, never a silent override).
+    route_match_status: str = ""   # "MATCHED" | "REVIEW" | ""
+    route_match_method: str = ""   # ROUTE_EXACT_MATCH | ROUTE_PARTIAL_MATCH | ROUTE_UNIQUE_FALLBACK | ROUTE_CONFLICT | ROUTE_AMBIGUOUS | ROUTE_NO_MATCH | ROUTE_NO_RULE_FOR_COUNTRY | ""
+    route_match_reason: str = ""
     # v14 (spec sections 2-3): destination country/market, resolved once by
     # detect_shipment_country() in run_pipeline() -- declared here (not just
     # set dynamically) so every caller/test that builds a Package directly
@@ -1079,10 +1105,36 @@ def parse_item_cells(cells: List[str], source_page: Optional[int] = None) -> Opt
             unit_idx = idx
             continue
 
+        # v21 UOM fix (spec sections 21-22): business UOMs of the shape
+        # CARTON_<N>PCS (e.g. CARTON_10PCS, CARTON_40PCS, CARTON_200PCS)
+        # are NOT a fixed set (VALID_UNITS above is a closed whitelist and
+        # will never contain every possible per-carton pack size) -- this
+        # is a STRUCTURAL pattern, not a whitelist lookup, and it applies to
+        # EVERY item row, not only confirmed material SKUs (the old rule
+        # here gated this on is_material_sku(prod_code), which is exactly
+        # why ordinary-merchandise rows using CARTON_10PCS/CARTON_40PCS/etc
+        # previously fell through to the product-name bucket below --
+        # "Summit Duffle Large CARTON_10PCS" -- with `unit` silently
+        # defaulting to "PCS", AND (worse) the quantity-capture branch two
+        # cases below never fires because it's gated on unit_idx>=0, so the
+        # whole item was silently dropped (quantity stayed 0) whenever the
+        # table layout put condition/quantity in their own separate cells
+        # instead of a merged "Moi 1" cell. RE_MATERIAL_UOM's pattern is
+        # reused here (still permissive of BAG/BOX/etc, not just CARTON) --
+        # only the is_material_sku() gate is removed; the material-only
+        # branch right below stays for parity/clarity but is now redundant
+        # for the CARTON_<N>PCS case specifically.
+        if RE_MATERIAL_UOM.fullmatch(cell.upper()):
+            unit = cell.upper()
+            unit_idx = idx
+            continue
+
         # Material rows use business UOMs such as CARTON_50PCS /
         # CARTON_200PCS, which are intentionally not part of VALID_UNITS for
         # ordinary merchandise. Preserve that UOM and allow the following
-        # quantity cell to be parsed normally.
+        # quantity cell to be parsed normally. (Kept as an explicit branch
+        # for is_material_sku() callers/tests that reference it directly;
+        # the generic check above already covers this case for every SKU.)
         if prod_code and is_material_sku(prod_code) and RE_MATERIAL_UOM.fullmatch(cell.upper()):
             unit = cell.upper()
             unit_idx = idx
@@ -2279,7 +2331,8 @@ def assign_true_global_numbers(packages: List[Package]):
         )
 
 
-def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recursive: bool):
+def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recursive: bool,
+                                routing_rules=None):
     """Fill pkg.port / pkg.store / pkg.store_confidence / pkg.store_suggestion
     -- the ONE canonical Store/Port resolution for every package, using
     detect_factory() + match_store() (pl_group_export.py) — "quy luật chia
@@ -2308,12 +2361,95 @@ def classify_packages_for_port(packages: List[Package], pdf_folder: Path, recurs
     from here rather than re-running match_store() itself -- see
     is_cn_port_eligible()'s docstring for why (single canonical port
     resolution per Package, spec: "there must be ONE canonical port
-    resolution result per Package")."""
+    resolution result per Package").
+
+    v21 (PL OCR V21 spec): when `routing_rules` is a non-empty list (raw
+    dicts with country/port/store keys, OR already-validated
+    pl_routing_rules.RoutingRule instances), those USER-supplied rules are
+    authoritative (spec section 46) and completely replace the legacy
+    STORE_MASTER/match_store() path below for every package whose country
+    has at least one rule defined -- for ANY country, not just CN (the
+    routing-rule table is the new general mechanism; CN is no longer a
+    special case in this function). Store/Port come from the matched rule
+    exactly, never re-derived or fuzzy-guessed. When `routing_rules` is
+    None/empty, behavior is 100% unchanged from v20 (this parameter is
+    purely additive -- every existing caller that never passes it keeps
+    getting the old CN-only STORE_MASTER resolution)."""
     try:
         import pl_group_export as pge
     except ImportError:
         log.warning("pl_group_export not importable — PORT column will stay blank for all packages.")
         return
+
+    if routing_rules:
+        try:
+            import pl_routing_rules as prr
+        except ImportError:
+            log.warning("pl_routing_rules not importable — routing_rules ignored, PORT/Store stay blank.")
+            routing_rules = None
+
+    if routing_rules:
+        if all(isinstance(r, prr.RoutingRule) for r in routing_rules):
+            rules = list(routing_rules)
+        else:
+            validation = prr.validate_routing_rules(routing_rules)
+            rules = validation.rules
+        # v21 gap-fix (static audit, "NO SILENT SKIP"): once routing_rules
+        # is non-empty, manual routing is AUTHORITATIVE for every package in
+        # the run -- there is no pre-filter here any more. Every package
+        # gets an explicit route_match_status/method/reason, never a quiet
+        # `continue` that leaves those fields at their untouched defaults.
+        # Two distinct unresolved shapes, two distinct diagnostics:
+        #   - pkg.country is blank -> we never even resolved a destination
+        #     Country Code for this package -> REVIEW / COUNTRY_UNRESOLVED,
+        #     handled here (match_route's contract requires an already-
+        #     resolved country, so an unresolved one never reaches it).
+        #   - pkg.country is resolved but no rule exists for it -> REVIEW /
+        #     NO_RULE_FOR_COUNTRY, already handled correctly INSIDE
+        #     match_route() (candidates = rules whose country matches; empty
+        #     -> METHOD_NO_RULE_FOR_COUNTRY) -- the old rule_countries
+        #     pre-check just never let the package reach that logic.
+        n_total = len(packages)
+        n_matched = n_review = 0
+        for pkg in packages:
+            if not pkg.country:
+                pkg.route_match_status = "REVIEW"
+                pkg.route_match_method = prr.METHOD_COUNTRY_UNRESOLVED
+                pkg.route_match_reason = (
+                    "Package has no resolvable destination Country Code (pkg.country is "
+                    "blank) -- cannot look up a routing rule. Manual routing rules are "
+                    "in effect for this run, so this package is never silently left "
+                    "unclassified; resolve/verify the Shipping Mark or filename instead.")
+                pkg.store = "REVIEW"
+                pkg.port = ""
+                pkg.store_display = ""
+                n_review += 1
+                continue
+            mark_tokens = prr.tokenize_shipping_mark(pkg.shipping_mark or pkg.reference_code).body_tokens
+            ref_tokens = prr.tokenize_shipping_mark(pkg.reference_code).body_tokens if pkg.reference_code else []
+            body_tokens = list(mark_tokens)
+            for t in ref_tokens:
+                if t not in body_tokens:
+                    body_tokens.append(t)
+            match = prr.match_route(pkg.country, body_tokens, rules)
+            pkg.route_match_status = match.status
+            pkg.route_match_method = match.method
+            pkg.route_match_reason = match.reason
+            if match.status == "MATCHED":
+                pkg.store = match.store
+                pkg.port = match.port
+                pkg.store_display = match.store
+                n_matched += 1
+            else:
+                pkg.store = "REVIEW"
+                pkg.port = ""
+                pkg.store_display = ""
+                n_review += 1
+        log.info(f"V21 routing-rule classification (manual routing authoritative for all "
+                 f"{n_total} package(s)): {n_matched} matched, {n_review} REVIEW "
+                 f"(never silently skipped).")
+        return
+
     cache: Dict[str, str] = {}
     n_eligible = n_matched = 0
     for pkg in packages:
@@ -2978,15 +3114,36 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
         # never silently lost, just not physically shown on those two
         # fixed-column documents.
         "business_fields",
+        # v21 gap-fix (static audit, requirement 3): explicitly-named raw +
+        # derived UOM/QTY audit fields, and the V21 routing diagnostics.
+        # "uom"/"quantity" above already carry the same raw values (never
+        # renamed/removed -- byte-for-byte backward compatible for any
+        # existing reader) -- these four are the SAME raw values under the
+        # exact field names the audit spec asks for, plus the two derived
+        # columns computed via pl_uom_resolver.resolve_output_uom_qty()'s
+        # `pcs_per_unit`/`qty_pcs` (which that function documents as
+        # "ALWAYS computed, independent of convert_to_pcs" -- so these two
+        # audit columns are identical whether the Convert-to-PCS checkbox
+        # is OFF or ON; the checkbox only changes the customer-facing
+        # Sublist output, never this audit trail or the raw UOM/QTY it's
+        # derived from).
+        "uom_raw", "qty_raw", "pcs_per_unit", "qty_pcs",
+        "route_status", "route_method", "route_reason",
     ]
     ws3.append(raw_headers)
     for cell in ws3[1]:
         cell.fill = MS_HDR_FILL
         cell.font = MS_HDR_FONT
+    import pl_uom_resolver as _uomr_raw_data  # local import: leaf module, no circular dependency
     for pkg in packages:
         pstatus = audit_status(pkg)
         dim_status = "EXACT_MATCH" if pkg.dim_matched else "MISMATCH"
         rows = pkg.items if pkg.items else [None]
+        # v21 gap-fix (requirement 3): route diagnostics are per-PACKAGE
+        # (never per-item), computed once per package -- "" when no
+        # routing_rules were supplied for this run (legacy path), never
+        # fabricated.
+        route_tail = [pkg.route_match_status, pkg.route_match_method, pkg.route_match_reason]
         for item in rows:
             diag_tail = [
                 pkg.master_match_status, pkg.country, pkg.country_source,
@@ -2997,6 +3154,10 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                 "; ".join(f"{k}: {v}" for k, v in (pkg.business_fields or {}).items()),
             ]
             if item is None:
+                # No item on this package -> nothing to report for the raw/
+                # derived UOM audit columns either; they still occupy their
+                # column so every later column stays aligned with header.
+                uom_qty_tail = ["", "", "", ""]
                 ws3.append([
                     pkg.source_file, pkg.first_page, pkg.reference_code, normalize(pkg.reference_code),
                     pkg.package_code, normalize_code(pkg.package_code), pkg.pdf_package_seq,
@@ -3010,8 +3171,19 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     pstatus, dim_status, pkg.dim_source_method,
                     pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
                     "ZERO_ITEMS_IN_PACKAGE",
-                ] + diag_tail)
+                ] + diag_tail + uom_qty_tail + route_tail)
             else:
+                # v21 gap-fix (requirement 3): uom_raw/qty_raw are the SAME
+                # untouched raw values as the existing "uom"/"quantity"
+                # columns above (never mutated by the Convert-to-PCS
+                # checkbox); pcs_per_unit/qty_pcs come from
+                # resolve_output_uom_qty(), which documents pcs_per_unit/
+                # qty_pcs as ALWAYS computed independent of convert_to_pcs
+                # -- so passing convert_to_pcs=False here is just the
+                # cheapest correct call, not a behavioural choice; the
+                # result is identical either way (see pl_uom_resolver.py).
+                _resolved = _uomr_raw_data.resolve_output_uom_qty(item.unit, item.quantity, False)
+                uom_qty_tail = [item.unit, item.quantity, _resolved.pcs_per_unit, _resolved.qty_pcs]
                 ws3.append([
                     pkg.source_file, item.source_page, pkg.reference_code, normalize(pkg.reference_code),
                     pkg.package_code, normalize_code(pkg.package_code), pkg.pdf_package_seq,
@@ -3022,7 +3194,7 @@ def write_workbook(output_path: Path, packages: List[Package], run_meta: Optiona
                     pstatus, dim_status, pkg.dim_source_method,
                     pkg.length, pkg.width, pkg.height, pkg.weight, pkg.cbm,
                     item.parse_method,
-                ] + diag_tail)
+                ] + diag_tail + uom_qty_tail + route_tail)
     _auto_w(ws3)
     ws3.freeze_panes = None
 
@@ -3201,7 +3373,13 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
                  master_data_file: Optional[Path] = None,
                  master_data_sheet: Optional[str] = None,
                  recursive: bool = False,
-                 or_list_file: Optional[Path] = None):
+                 or_list_file: Optional[Path] = None,
+                 routing_rules=None):
+    # routing_rules (v21): optional list of {"country","port","store"} dicts
+    # (or already-validated pl_routing_rules.RoutingRule) from the user's
+    # routing-rule table (spec section 2/45). None/empty == 100% legacy
+    # behavior (spec section 46) -- see classify_packages_for_port()'s own
+    # docstring for the full authoritative-vs-fallback contract.
     run_started_at = datetime.now(timezone.utc)
     if output_path is None:
         output_path = pl_folder / "PL_Output_v6_HS_DIM.xlsx"
@@ -3348,7 +3526,7 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     # split step. v12: moved up from below DIM/HS matching -- it now must
     # run BEFORE OR List matching and carton numbering, since both need
     # pkg.store resolved for CN packages that have no OR List coverage.
-    classify_packages_for_port(packages, pl_folder, recursive)
+    classify_packages_for_port(packages, pl_folder, recursive, routing_rules=routing_rules)
 
     # v12: OR List (optional) — Store/OR/SO matching hierarchy (spec section
     # 5). Never a fatal error, never disables Run/Export: an unusable/absent
@@ -3378,8 +3556,19 @@ def run_pipeline(pl_folder: Path, dim_xlsx: Path,
     if or_index and pge_mod is not None:
         receiver_cache: Dict[str, str] = {}
         for pkg in packages:
-            receiver_text = pge_mod._collect_cn_signal(pkg, pl_folder, recursive, receiver_cache)
-            m = pge_mod.match_store_and_or(pkg, or_index, receiver_text=receiver_text)
+            # v21: a package classified through the user's routing-rule
+            # table (pkg.route_match_status non-blank) uses the V21 OR
+            # matcher -- it trusts the ALREADY-resolved pkg.store (which
+            # can be any user-defined Store, e.g. "Tmall") instead of the
+            # legacy matcher's fixed ~9-Store CN alias table (spec section
+            # 18/19). Packages that went through the legacy STORE_MASTER
+            # path (routing_rules not supplied at all) keep the exact
+            # original behavior (spec section 46).
+            if getattr(pkg, "route_match_status", ""):
+                m = pge_mod.match_store_and_or_v21(pkg, or_index)
+            else:
+                receiver_text = pge_mod._collect_cn_signal(pkg, pl_folder, recursive, receiver_cache)
+                m = pge_mod.match_store_and_or(pkg, or_index, receiver_text=receiver_text)
             pkg.or_list_store = m.matched_store
             pkg.or_list_match_source = m.match_source
             pkg.or_list_match_status = m.status
@@ -3551,6 +3740,7 @@ packages = run_pipeline(
     master_data_sheet=MASTER_DATA_SHEET,
     recursive=RECURSIVE,
     or_list_file=OR_LIST_FILE,
+    routing_rules=ROUTING_RULES,
 )
 
 # ── UI summary (spec section 13) ─────────────────────────────────────────
@@ -3679,8 +3869,10 @@ if GENERATE_SUBLIST:
         # Lists / Sublist PDF -- see RESOLVED_OPTIONAL_BUSINESS_FIELD_
         # LABELS, computed once above.
         sublist_result = pl_sublist_export.generate_sublist_workbook(
-            packages, sublist_path, optional_business_field_labels=RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS)
-        sublist_ok, sublist_report = pl_sublist_export.validate_sublist(packages, sublist_result)
+            packages, sublist_path, optional_business_field_labels=RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS,
+            convert_to_pcs=CONVERT_CARTON_TO_PCS, show_uom=SHOW_UOM_IN_SUBLIST)
+        sublist_ok, sublist_report = pl_sublist_export.validate_sublist(
+            packages, sublist_result, convert_to_pcs=CONVERT_CARTON_TO_PCS)
         print("\n" + "=" * 70)
         print("SUBLIST (XLSX) VALIDATION REPORT")
         print("=" * 70)
@@ -3725,7 +3917,8 @@ if GENERATE_SUBLIST_PDF:
         # when no OR List was uploaded/matched, so the PDF shows exactly
         # Store/OR No./Ref No. with no invented optional metadata rows.
         pdf_result = pl_sublist_pdf_export.generate_sublist_pdf(
-            packages, pdf_path, optional_business_field_labels=RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS)
+            packages, pdf_path, optional_business_field_labels=RESOLVED_OPTIONAL_BUSINESS_FIELD_LABELS,
+            convert_to_pcs=CONVERT_CARTON_TO_PCS, show_uom=SHOW_UOM_IN_SUBLIST)
         pdf_problems = pl_sublist_pdf_export.validate_sublist_pdf(packages, pdf_result)
         print("\n" + "=" * 70)
         print("SUBLIST (PDF) VALIDATION REPORT")

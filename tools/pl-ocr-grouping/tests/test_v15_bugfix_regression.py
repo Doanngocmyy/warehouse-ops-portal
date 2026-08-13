@@ -53,6 +53,9 @@ def _substitute_placeholders(src: str) -> str:
             .replace("__GENERATE_SUBLIST__", "True")
             .replace("__GENERATE_SUBLIST_PDF__", "True")
             .replace("__OR_LIST_FILE__", "None")
+            .replace("__ROUTING_RULES_JSON__", "[]")
+            .replace("__CONVERT_TO_PCS__", "False")
+            .replace("__SHOW_UOM_IN_SUBLIST__", "False")
             .replace("__GIT_COMMIT__", lit("test-v15")))
 
 

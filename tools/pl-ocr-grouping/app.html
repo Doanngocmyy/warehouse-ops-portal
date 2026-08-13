@@ -113,6 +113,39 @@
       </div>
     </div>
 
+    <div class="panel manual-panel">
+      <h4>4. (Tuỳ chọn) Routing Rules — Country | Port | Store</h4>
+      <p class="desc" style="margin:4px 0 10px;">
+        Bảng này thay thế hoàn toàn logic Store/Port cứng (hardcode) cũ — bạn khai báo trước các tuyến hàng hợp lệ,
+        OCR chỉ đọc tín hiệu (Country/Port/Store) trên Shipping Mark rồi khớp với đúng 1 dòng trong bảng này.
+        <b>Country Code</b> bắt buộc, đúng 2 chữ cái (VD: CN, SG, JP — không giới hạn danh sách cố định).
+        <b>Port</b> và <b>Store</b> đều tuỳ chọn — để trống Port là hợp lệ (VD: <code>CN | (để trống) | Tmall</code>
+        nghĩa là điểm đến CN, Store Tmall, không cần Port). Không có dòng nào thì tool giữ nguyên hành vi cũ
+        (STORE_MASTER có sẵn) như trước — bảng này KHÔNG bắt buộc phải điền.
+      </p>
+      <table id="routingRulesTable" style="width:100%; border-collapse:collapse; font-size:12.5px;">
+        <thead>
+          <tr>
+            <th style="text-align:left; padding:4px 6px; width:30%;">Country Code</th>
+            <th style="text-align:left; padding:4px 6px; width:30%;">Port</th>
+            <th style="text-align:left; padding:4px 6px; width:30%;">Store</th>
+            <th style="width:10%;"></th>
+          </tr>
+        </thead>
+        <tbody id="routingRulesBody"></tbody>
+      </table>
+      <button type="button" class="adv-toggle" id="addRoutingRuleBtn" style="margin-top:8px;">+ Thêm dòng routing rule</button>
+      <div class="status" id="routingRulesStatus" style="margin-top:6px; font-size:11.5px; color:#64748b;"></div>
+    </div>
+
+    <div class="panel manual-panel">
+      <h4>5. (Tuỳ chọn) Hiển thị Sublist</h4>
+      <label class="checkline"><input type="checkbox" id="convertToPcsCheck"> Convert CARTON UOM to PCS (chuyển
+        đổi CARTON_10PCS/CARTON_40PCS... thành PCS trên Sublist — mặc định TẮT, giữ nguyên UOM/QTY gốc)</label>
+      <label class="checkline"><input type="checkbox" id="showUomInSublistCheck"> Show UOM in Sublist (thêm cột
+        UOM giữa EAN và QTY trên Sublist — mặc định TẮT)</label>
+    </div>
+
     <div style="margin-top:16px;">
       <button class="btn" id="runBtn" disabled>Chạy OCR + Tách nhóm</button>
       <span class="status" id="mainStatus">Cần chọn: PDF (thư mục hoặc zip) + file DIM + Master Data.</span>
@@ -175,6 +208,11 @@ const generateSublistCheck = document.getElementById('generateSublistCheck');
 const generateSublistPdfCheck = document.getElementById('generateSublistPdfCheck');
 const manualConsigneeInput = document.getElementById('manualConsigneeInput');
 const manualNotifyInput    = document.getElementById('manualNotifyInput');
+const routingRulesBody = document.getElementById('routingRulesBody');
+const addRoutingRuleBtn = document.getElementById('addRoutingRuleBtn');
+const routingRulesStatus = document.getElementById('routingRulesStatus');
+const convertToPcsCheck = document.getElementById('convertToPcsCheck');
+const showUomInSublistCheck = document.getElementById('showUomInSublistCheck');
 const advToggle        = document.getElementById('advToggle');
 const advBox           = document.getElementById('advBox');
 const runBtn           = document.getElementById('runBtn');
@@ -187,6 +225,66 @@ const runSummaryEl     = document.getElementById('runSummary');
 let selectedPdfEntries = null; // [{path, file}], path = relative path under the PDF folder
 let runSummary_lastLogText = '';
 let runSummary_lastJson = null;
+
+// ── V21 routing-rule table (spec sections 2/45) ─────────────────────────
+function addRoutingRuleRow(country, port, store) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td style="padding:2px 6px;"><input type="text" class="rr-country" maxlength="2" style="width:100%; padding:4px 6px; border:1px solid #e2e8f0; border-radius:6px; text-transform:uppercase;" placeholder="CN"></td>
+    <td style="padding:2px 6px;"><input type="text" class="rr-port" style="width:100%; padding:4px 6px; border:1px solid #e2e8f0; border-radius:6px; text-transform:uppercase;" placeholder="(để trống)"></td>
+    <td style="padding:2px 6px;"><input type="text" class="rr-store" style="width:100%; padding:4px 6px; border:1px solid #e2e8f0; border-radius:6px;" placeholder="(để trống)"></td>
+    <td style="padding:2px 6px; text-align:center;"><button type="button" class="adv-toggle rr-remove">✕</button></td>
+  `;
+  tr.querySelector('.rr-country').value = country || '';
+  tr.querySelector('.rr-port').value = port || '';
+  tr.querySelector('.rr-store').value = store || '';
+  tr.querySelector('.rr-remove').addEventListener('click', () => {
+    tr.remove();
+    validateRoutingRules();
+  });
+  tr.querySelectorAll('input').forEach(inp => inp.addEventListener('input', validateRoutingRules));
+  routingRulesBody.appendChild(tr);
+}
+
+function readRoutingRules() {
+  const rows = [...routingRulesBody.querySelectorAll('tr')];
+  return rows.map(tr => ({
+    country: tr.querySelector('.rr-country').value.trim().toUpperCase(),
+    port: tr.querySelector('.rr-port').value.trim().toUpperCase(),
+    store: tr.querySelector('.rr-store').value.trim(),
+  })).filter(r => r.country || r.port || r.store);
+}
+
+// Client-side mirror of pl_routing_rules.validate_routing_rules() (spec
+// sections 3/6) -- purely a fast UI hint before Run; the Python source of
+// truth still validates again server-... err, browser-side, inside
+// pl_routing_rules.py itself once the run actually executes.
+function validateRoutingRules() {
+  const rules = readRoutingRules();
+  const errors = [];
+  const seen = new Set();
+  for (const r of rules) {
+    if (!/^[A-Z]{2}$/.test(r.country)) {
+      errors.push(`Country Code "${r.country}" phải đúng 2 chữ cái (VD: CN, SG, JP).`);
+      continue;
+    }
+    const key = `${r.country}|${r.port}|${r.store.toLowerCase().replace(/[\s\-_]+/g, '')}`;
+    if (seen.has(key)) {
+      errors.push(`Dòng trùng lặp: ${r.country} | ${r.port || '(trống)'} | ${r.store || '(trống)'}.`);
+      continue;
+    }
+    seen.add(key);
+  }
+  routingRulesStatus.textContent = errors.length
+    ? `⚠ ${errors.length} lỗi: ${errors.join(' ')}`
+    : (rules.length ? `${rules.length} routing rule hợp lệ.` : 'Không có routing rule nào -- tool sẽ dùng logic Store/Port cũ.');
+  routingRulesStatus.style.color = errors.length ? '#b91c1c' : '#64748b';
+  return errors.length === 0;
+}
+
+addRoutingRuleBtn.addEventListener('click', () => addRoutingRuleRow('', '', ''));
+// Start with one empty row so the table is never confusingly blank.
+addRoutingRuleRow('', '', '');
 
 function downloadText(filename, text) {
   const blob = new Blob([text], { type: 'text/plain' });
@@ -364,6 +462,13 @@ async function writeIntoVirtualFs(pyodide, path, bytes) {
 }
 
 async function runPipeline() {
+  // v21 (spec section 6): validate the routing-rule table BEFORE running
+  // OCR -- an invalid/duplicate row is caught here rather than silently
+  // producing REVIEW packages after a full run.
+  if (!validateRoutingRules()) {
+    mainStatus.textContent = 'Routing rules có lỗi -- sửa lại bảng ở mục 4 trước khi chạy.';
+    return;
+  }
   runBtn.disabled = true;
   resultFiles.innerHTML = '';
   logBox.textContent = '';
@@ -414,6 +519,14 @@ async function runPipeline() {
     pyodide.FS.writeFile('/pl_or_list_import.py', orListImportSrc);
     const sublistPdfExportSrc = await (await fetch('pl_sublist_pdf_export.py?v=' + _cacheBust, { cache: 'no-store' })).text();
     pyodide.FS.writeFile('/pl_sublist_pdf_export.py', sublistPdfExportSrc);
+    // v21: pl_routing_rules.py (Country|Port|Store routing engine) + pl_uom_
+    // resolver.py (CARTON_<N>PCS / PCS resolver) -- leaf modules pl_ocr_core.py,
+    // pl_group_export.py, pl_sublist_export.py and pl_sublist_pdf_export.py
+    // all import.
+    const routingRulesSrc = await (await fetch('pl_routing_rules.py?v=' + _cacheBust, { cache: 'no-store' })).text();
+    pyodide.FS.writeFile('/pl_routing_rules.py', routingRulesSrc);
+    const uomResolverSrc = await (await fetch('pl_uom_resolver.py?v=' + _cacheBust, { cache: 'no-store' })).text();
+    pyodide.FS.writeFile('/pl_uom_resolver.py', uomResolverSrc);
 
     // Small brand logo drawn top-center on every Sublist PDF page
     // (business owner's request). Written next to pl_sublist_pdf_export.py
@@ -445,6 +558,9 @@ async function runPipeline() {
       .replace('__GENERATE_SUBLIST__', generateSublistCheck.checked ? 'True' : 'False')
       .replace('__GENERATE_SUBLIST_PDF__', generateSublistPdfCheck.checked ? 'True' : 'False')
       .replace('__OR_LIST_FILE__', orListFileLiteral)
+      .replace('__ROUTING_RULES_JSON__', JSON.stringify(readRoutingRules()))
+      .replace('__CONVERT_TO_PCS__', convertToPcsCheck.checked ? 'True' : 'False')
+      .replace('__SHOW_UOM_IN_SUBLIST__', showUomInSublistCheck.checked ? 'True' : 'False')
       // No build step serves this page (plain static file on GitHub Pages), so
       // there is no real git-commit-at-build-time value to inject here. Left
       // blank on purpose rather than faking a SHA -- PARSER_VERSION (shown in

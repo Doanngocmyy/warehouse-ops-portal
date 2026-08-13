@@ -355,6 +355,23 @@ COL_X_EAN = COL_X_ITEM_NO + ITEM_NO_COL_WIDTH
 COL_X_QTY = COL_X_EAN + EAN_COL_WIDTH
 COL_X_QTY_CENTER = COL_X_QTY + QTY_COL_WIDTH / 2
 
+# v21 (spec section 26): "Show UOM in Sublist" -- Item No. | EAN | UOM |
+# QTY. A separate, narrower Item No./EAN split makes room for a fixed-
+# width UOM column between EAN and QTY, staying inside the exact same
+# CONTENT_WIDTH as the 3-column layout above (no page-width change) --
+# only used when show_uom is on; the default (off) path renders with the
+# untouched constants above, byte-for-byte the same as before this option
+# existed.
+UOM_COL_WIDTH = 48
+_remaining_uom = CONTENT_WIDTH - QTY_COL_WIDTH - UOM_COL_WIDTH
+ITEM_NO_COL_WIDTH_UOM = _remaining_uom * 0.56
+EAN_COL_WIDTH_UOM = _remaining_uom * 0.44
+COL_X_ITEM_NO_UOM = CONTENT_LEFT
+COL_X_EAN_UOM = COL_X_ITEM_NO_UOM + ITEM_NO_COL_WIDTH_UOM
+COL_X_UOM = COL_X_EAN_UOM + EAN_COL_WIDTH_UOM
+COL_X_QTY_UOM = COL_X_UOM + UOM_COL_WIDTH
+COL_X_QTY_CENTER_UOM = COL_X_QTY_UOM + QTY_COL_WIDTH / 2
+
 ROW_HEIGHT_ITEM_HEADER = 16
 ROW_HEIGHT_ITEM = 14
 
@@ -524,7 +541,7 @@ def _draw_metadata_row(c: canvas.Canvas, y: float, label: str, value_lines: "lis
     return y - (len(value_lines or [""]) - 1) * ROW_HEIGHT_META
 
 
-def _draw_item_table_grid(c: canvas.Canvas, header_bottom_y: float, n_rows: int):
+def _draw_item_table_grid(c: canvas.Canvas, header_bottom_y: float, n_rows: int, show_uom: bool = False):
     """Draws the bordered grid (outer box + column separators + row
     separators + a light-gray header fill) for the item table -- ONLY
     called when there is at least 1 item row (spec: "co SKU data moi ke
@@ -552,10 +569,18 @@ def _draw_item_table_grid(c: canvas.Canvas, header_bottom_y: float, n_rows: int)
         y_line = header_bottom_y - i * ROW_HEIGHT_ITEM
         c.line(CONTENT_LEFT, y_line, CONTENT_RIGHT, y_line)
     # Column separators, spanning the FULL table height (header + rows).
-    col_x_ean_line = COL_X_EAN - (VALUE_LABEL_GAP / 2)
-    col_x_qty_line = COL_X_QTY - (VALUE_LABEL_GAP / 2)
-    c.line(col_x_ean_line, table_bottom, col_x_ean_line, table_top)
-    c.line(col_x_qty_line, table_bottom, col_x_qty_line, table_top)
+    if show_uom:
+        col_x_ean_line = COL_X_EAN_UOM - (VALUE_LABEL_GAP / 2)
+        col_x_uom_line = COL_X_UOM - (VALUE_LABEL_GAP / 2)
+        col_x_qty_line = COL_X_QTY_UOM - (VALUE_LABEL_GAP / 2)
+        c.line(col_x_ean_line, table_bottom, col_x_ean_line, table_top)
+        c.line(col_x_uom_line, table_bottom, col_x_uom_line, table_top)
+        c.line(col_x_qty_line, table_bottom, col_x_qty_line, table_top)
+    else:
+        col_x_ean_line = COL_X_EAN - (VALUE_LABEL_GAP / 2)
+        col_x_qty_line = COL_X_QTY - (VALUE_LABEL_GAP / 2)
+        c.line(col_x_ean_line, table_bottom, col_x_ean_line, table_top)
+        c.line(col_x_qty_line, table_bottom, col_x_qty_line, table_top)
 
 
 def _draw_continuation_page_marker(c: canvas.Canvas, block: PdfPageBlock):
@@ -575,7 +600,8 @@ def _draw_continuation_page_marker(c: canvas.Canvas, block: PdfPageBlock):
                  f"{block.block_index + 1}/{block.block_count}")
 
 
-def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None, optional_business_field_labels=None):
+def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None, optional_business_field_labels=None,
+               show_uom: bool = False):
     carton = block.carton
     y = METADATA_TOP_Y
 
@@ -635,7 +661,11 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None, optional_b
         # which is exactly what `y` (tracked through the metadata loop
         # above) already reflects.
         header_bottom_y = y - ROW_HEIGHT_ITEM_HEADER
-        _draw_item_table_grid(c, header_bottom_y, n_items)
+        _draw_item_table_grid(c, header_bottom_y, n_items, show_uom=show_uom)
+
+        col_item_no = COL_X_ITEM_NO_UOM if show_uom else COL_X_ITEM_NO
+        col_ean = COL_X_EAN_UOM if show_uom else COL_X_EAN
+        col_qty_center = COL_X_QTY_CENTER_UOM if show_uom else COL_X_QTY_CENTER
 
         # -- Item table header text (bordered, light-gray fill -- spec:
         #    "dung de bang trong tron", draw real grid lines, not just a
@@ -645,20 +675,25 @@ def _draw_page(c: canvas.Canvas, block: PdfPageBlock, logo_path=None, optional_b
         # before decrementing) so header text is vertically centered-ish
         # inside its shaded/bordered cell.
         header_baseline_y = y - HEADER_ASCENT
-        c.drawString(COL_X_ITEM_NO + 4, header_baseline_y, "Item No.")
-        c.drawString(COL_X_EAN + 4, header_baseline_y, "EAN")
-        c.drawCentredString(COL_X_QTY_CENTER, header_baseline_y, "QTY")
+        c.drawString(col_item_no + 4, header_baseline_y, "Item No.")
+        c.drawString(col_ean + 4, header_baseline_y, "EAN")
+        if show_uom:
+            c.drawCentredString((COL_X_UOM + COL_X_QTY_UOM) / 2, header_baseline_y, "UOM")
+        c.drawCentredString(col_qty_center, header_baseline_y, "QTY")
         y -= ROW_HEIGHT_ITEM_HEADER
 
-        # -- Item rows: Item No. / EAN left-aligned, QTY centered --
+        # -- Item rows: Item No. / EAN left-aligned, [UOM centered,] QTY
+        #    centered --
         c.setFont(FONT_ITEM, SIZE_ITEM)
         for row in block.items:
             # baseline sits ROW_ASCENT below the cell's TOP edge (== y
             # here, before decrementing) -- same convention as the header.
             row_baseline_y = y - ROW_ASCENT
-            c.drawString(COL_X_ITEM_NO + 4, row_baseline_y, str(row.item_no))
-            c.drawString(COL_X_EAN + 4, row_baseline_y, str(row.ean))
-            c.drawCentredString(COL_X_QTY_CENTER, row_baseline_y, str(row.qty))
+            c.drawString(col_item_no + 4, row_baseline_y, str(row.item_no))
+            c.drawString(col_ean + 4, row_baseline_y, str(row.ean))
+            if show_uom:
+                c.drawCentredString((COL_X_UOM + COL_X_QTY_UOM) / 2, row_baseline_y, str(getattr(row, "uom", "")))
+            c.drawCentredString(col_qty_center, row_baseline_y, str(row.qty))
             y -= ROW_HEIGHT_ITEM
 
         # -- Total QTY: placed DYNAMICALLY immediately after the last
@@ -716,7 +751,9 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
                           carton_display_mode: str = "current_total",
                           enabled: bool = True,
                           logo_path=None,
-                          optional_business_field_labels=None) -> SublistPdfBuildResult:
+                          optional_business_field_labels=None,
+                          convert_to_pcs: bool = False,
+                          show_uom: bool = False) -> SublistPdfBuildResult:
     """packages -> A5 PDF at `output_path`, one page per carton block.
     NEVER raises -- any failure is captured into the returned result's
     status="FAILED" (spec: Sublist PDF is optional, its failure must never
@@ -764,7 +801,8 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
         items_per_page = _items_per_pdf_page(n_meta_rows)
 
         output_path = Path(output_path)
-        cartons = [pse.build_sublist_carton_model(pkg, carton_display_mode=carton_display_mode)
+        cartons = [pse.build_sublist_carton_model(pkg, carton_display_mode=carton_display_mode,
+                                                   convert_to_pcs=convert_to_pcs)
                    for pkg in packages]
         blocks = _paginate_for_pdf(cartons, items_per_page=items_per_page)
 
@@ -779,7 +817,8 @@ def generate_sublist_pdf(packages: list, output_path: Path, *,
         c.setCreator("")
 
         for block in blocks:
-            _draw_page(c, block, logo_path=logo_path, optional_business_field_labels=optional_labels)
+            _draw_page(c, block, logo_path=logo_path, optional_business_field_labels=optional_labels,
+                       show_uom=show_uom)
             c.showPage()
         c.save()
 

@@ -76,6 +76,47 @@ test("flat no-separator suffix 'TW8785SBGEAR' -> SBGEAR", t_factory_flat_suffix_
 test("reference_code with no suffix falls back to filename stem", t_factory_falls_back_to_filename)
 test("unclassifiable code -> REVIEW (never guessed)", t_factory_unclassifiable_is_review)
 
+
+# -- V21 spec section 27: 'QF' short alias must resolve to factory QIFENG --
+# (synthetic Shipmark-style codes only; no real customer data)
+
+def t_factory_qf_alias_suffix_on_reference_code():
+    assert pge.detect_factory("SYN-9001-WarehouseAlpha-QF", "x.pdf") == "QIFENG"
+
+
+def t_factory_qf_alias_flat_suffix_no_separator():
+    assert pge.detect_factory("TW9001QF", "x.pdf") == "QIFENG"
+
+
+def t_factory_qf_alias_falls_back_to_filename_stem():
+    assert pge.detect_factory("random-code-xyz", "Kerry_QF.pdf") == "QIFENG"
+
+
+def t_factory_qf_alias_with_trailing_copy_suffix_stripped():
+    assert pge.detect_factory("Kerry_QF_1", "Kerry_QF_1.pdf") == "QIFENG"
+    assert pge.detect_factory("Kerry_QF(2)", "x.pdf") == "QIFENG"
+
+
+def t_factory_qf_alias_does_not_shadow_other_factory_tokens():
+    # Ensure adding the QF alias didn't disturb the other known tokens
+    assert pge.detect_factory("SYN-9002-WarehouseAlpha-CN", "x.pdf") == "CN"
+    assert pge.detect_factory("SYN-9003-WarehouseAlpha-VN", "x.pdf") == "VN"
+    assert pge.detect_factory("SYN-9004-WarehouseAlpha-POP", "x.pdf") == "POP"
+    assert pge.detect_factory("SYN-9005-WarehouseAlpha-SBGEAR", "x.pdf") == "SBGEAR"
+    assert pge.detect_factory("SYN-9006-WarehouseAlpha-JION", "x.pdf") == "JION"
+
+
+test("'QF' suffix on reference_code resolves to factory QIFENG (spec section 27)",
+     t_factory_qf_alias_suffix_on_reference_code)
+test("'QF' flat no-separator suffix resolves to factory QIFENG (spec section 27)",
+     t_factory_qf_alias_flat_suffix_no_separator)
+test("'QF' alias falls back to filename stem the same way other factory tokens do",
+     t_factory_qf_alias_falls_back_to_filename_stem)
+test("'QF' alias still resolves after trailing copy-suffix is stripped",
+     t_factory_qf_alias_with_trailing_copy_suffix_stripped)
+test("adding 'QF' alias does not disturb CN/VN/POP/SBGEAR/JION detection (regression guard)",
+     t_factory_qf_alias_does_not_shadow_other_factory_tokens)
+
 print("== pl_group_export.match_store ==")
 
 

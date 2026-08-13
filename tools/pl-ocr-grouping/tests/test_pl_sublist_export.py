@@ -36,6 +36,9 @@ def _substitute(src: str) -> str:
             .replace("__GENERATE_SUBLIST__", "True")
             .replace("__GENERATE_SUBLIST_PDF__", "True")
             .replace("__OR_LIST_FILE__", "None")
+            .replace("__ROUTING_RULES_JSON__", "[]")
+            .replace("__CONVERT_TO_PCS__", "False")
+            .replace("__SHOW_UOM_IN_SUBLIST__", "False")
             .replace("__GIT_COMMIT__", repr("test-suite")))
 
 
@@ -606,6 +609,74 @@ def t_generate_sublist_handles_zero_item_package():
         assert result.blocks[0].block_total_qty == 0
 
 
+# --- v21 fix (found via the real CN-6676 browser smoke test, Sublist mode
+#     B/D): validate_sublist() must be told convert_to_pcs too, or it wrongly
+#     compares the sheet's DERIVED (PCS-converted) qty against an always-RAW
+#     expected total and fails reconciliation on every carton containing a
+#     CARTON_<N>PCS row -- even though nothing was actually wrong. ---
+
+def t_validate_sublist_passes_with_carton_uom_when_convert_to_pcs_off():
+    # convert_to_pcs=False (default): sublist qty stays the raw printed qty
+    # -- byte-for-byte the same reconciliation every existing caller relies on.
+    items = [SimpleNamespace(product_code="SKU1", barcode="EAN1", quantity=2, unit="CARTON_10PCS")]
+    pkg = _mk_full_pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook([pkg], Path(td) / "s.xlsx", convert_to_pcs=False)
+        ok, report = pse.validate_sublist([pkg], result, convert_to_pcs=False)
+        assert ok, report
+        assert result.cartons[0].total_qty == 2, "raw mode must keep the printed qty (2), never x10"
+    # QTY_RAW itself must never be mutated by any of this.
+    assert pkg.items[0].quantity == 2
+
+
+def t_validate_sublist_passes_with_carton_uom_when_convert_to_pcs_on():
+    # convert_to_pcs=True: sublist qty becomes the PCS-converted total
+    # (2 cartons x 10 pcs = 20) -- validate_sublist must reconcile against
+    # THAT derived total, not the raw printed qty of 2 (regression guard for
+    # the exact bug the CN-6676 browser smoke test caught).
+    items = [SimpleNamespace(product_code="SKU1", barcode="EAN1", quantity=2, unit="CARTON_10PCS")]
+    pkg = _mk_full_pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook([pkg], Path(td) / "s.xlsx", convert_to_pcs=True)
+        ok, report = pse.validate_sublist([pkg], result, convert_to_pcs=True)
+        assert ok, report
+        assert result.cartons[0].total_qty == 20, "convert_to_pcs mode must show 2 CTN x 10 PCS = 20"
+    # QTY_RAW on the source package itself must still never be mutated,
+    # even though the DERIVED sheet output is converted (spec non-negotiable:
+    # PCS conversion is a strictly separate derived-output layer).
+    assert pkg.items[0].quantity == 2
+
+
+def t_validate_sublist_mismatched_convert_flag_fails_as_expected():
+    # Sanity check the other direction: if generate_sublist_workbook() and
+    # validate_sublist() ever disagree about convert_to_pcs again, the
+    # reconciliation SHOULD fail -- proving this isn't just a check that
+    # always passes no matter what.
+    items = [SimpleNamespace(product_code="SKU1", barcode="EAN1", quantity=2, unit="CARTON_10PCS")]
+    pkg = _mk_full_pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook([pkg], Path(td) / "s.xlsx", convert_to_pcs=True)
+        ok, report = pse.validate_sublist([pkg], result, convert_to_pcs=False)
+        assert not ok, "mismatched convert_to_pcs flags between build and validate must FAIL, not silently pass"
+
+
+def t_validate_sublist_mixed_carton_and_pcs_items_reconciles_when_converted():
+    # Realistic CN-6676-shaped carton: one CARTON_5PCS row + one plain PCS
+    # row -- PCS row must pass through unconverted (5x1=5 stays 1x3=3) while
+    # the carton row converts (1 CTN x 5 PCS = 5), matching the same mixed
+    # shape real Tmall cartons have.
+    items = [
+        SimpleNamespace(product_code="SKU1", barcode="EAN1", quantity=1, unit="CARTON_5PCS"),
+        SimpleNamespace(product_code="SKU2", barcode="EAN2", quantity=3, unit="PCS"),
+    ]
+    pkg = _mk_full_pkg(1, 1, items)
+    with tempfile.TemporaryDirectory() as td:
+        result = pse.generate_sublist_workbook([pkg], Path(td) / "s.xlsx", convert_to_pcs=True)
+        ok, report = pse.validate_sublist([pkg], result, convert_to_pcs=True)
+        assert ok, report
+        assert result.cartons[0].total_qty == 8, "1 CTN x 5 PCS (=5) + 3 PCS (=3) = 8"
+
+
 # --- scope-aware carton_sequence validation (Turn 12: per-Store numbering
 #     legitimately repeats 1, 2, 3... across different counting_scope_key
 #     values -- validate_sublist() must key uniqueness/completeness on
@@ -686,6 +757,14 @@ test("Sublist carton order exactly matches the order packages were passed in (==
      t_sublist_carton_order_matches_input_order)
 test("validate_sublist passes (OK) for well-formed input, full reconciliation", t_validate_sublist_passes_for_well_formed_input)
 test("zero-item package produces a valid (empty) carton block, not a crash", t_generate_sublist_handles_zero_item_package)
+test("convert_to_pcs=False keeps raw printed qty in reconciliation (byte-for-byte unchanged default behaviour)",
+     t_validate_sublist_passes_with_carton_uom_when_convert_to_pcs_off)
+test("convert_to_pcs=True reconciles against the PCS-converted total, not the raw qty (regression: CN-6676 browser smoke test bug)",
+     t_validate_sublist_passes_with_carton_uom_when_convert_to_pcs_on)
+test("mismatched convert_to_pcs between build and validate correctly FAILS (sanity check the validator isn't a no-op)",
+     t_validate_sublist_mismatched_convert_flag_fails_as_expected)
+test("mixed CARTON_<N>PCS + plain PCS items reconcile correctly when converted (real CN-6676 carton shape)",
+     t_validate_sublist_mixed_carton_and_pcs_items_reconciles_when_converted)
 test("scope-aware validation: two Stores each with their own 1/2, 2/2 -> PASS", t_validate_sublist_two_stores_each_1_of_2_2_of_2_passes)
 test("scope-aware validation: duplicate carton_sequence=1 WITHIN one Store's scope -> FAIL", t_validate_sublist_duplicate_within_same_scope_fails)
 test("scope-aware validation: missing carton_sequence=2 WITHIN one Store's scope -> FAIL", t_validate_sublist_missing_within_one_scope_fails)
@@ -819,7 +898,7 @@ def t_end_to_end_generate_sublist_off_still_produces_everything_else():
         master_xlsx = td / "master.xlsx"
         _make_empty_master_xlsx(master_xlsx)
         src = CORE_PY.read_text(encoding="utf-8")
-        src = _substitute(src).replace("__GENERATE_SUBLIST__", "True").replace("__GENERATE_SUBLIST_PDF__", "True").replace("__OR_LIST_FILE__", "None")  # placeholder for the next replace
+        src = _substitute(src).replace("__GENERATE_SUBLIST__", "True").replace("__GENERATE_SUBLIST_PDF__", "True").replace("__OR_LIST_FILE__", "None").replace("__ROUTING_RULES_JSON__", "[]").replace("__CONVERT_TO_PCS__", "False").replace("__SHOW_UOM_IN_SUBLIST__", "False")  # placeholder for the next replace
         # re-substitute with GENERATE_SUBLIST=False specifically
         src = CORE_PY.read_text(encoding="utf-8")
         src = (src.replace("__DIM_WEIGHT_SHEET__", "None").replace("__MASTER_DATA_SHEET__", "None")
@@ -827,6 +906,9 @@ def t_end_to_end_generate_sublist_off_still_produces_everything_else():
                   .replace("__MANUAL_NOTIFY_PARTY__", "None").replace("__GENERATE_SUBLIST__", "False")
                   .replace("__GENERATE_SUBLIST_PDF__", "False")
                   .replace("__OR_LIST_FILE__", "None")
+                  .replace("__ROUTING_RULES_JSON__", "[]")
+                  .replace("__CONVERT_TO_PCS__", "False")
+                  .replace("__SHOW_UOM_IN_SUBLIST__", "False")
                   .replace("__GIT_COMMIT__", repr("test-suite")))
         src = src.replace('PL_FOLDER = Path("/work/pdfs")', f'PL_FOLDER = Path({str(pdf_dir)!r})')
         src = src.replace('OUTPUT_XLSX = Path("/work/PL_Total.xlsx")', f'OUTPUT_XLSX = Path({str(td / "PL_Total.xlsx")!r})')

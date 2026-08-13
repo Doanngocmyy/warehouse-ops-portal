@@ -60,6 +60,8 @@ log = logging.getLogger("pl_sublist_export")
 if not log.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+import pl_uom_resolver as uomr  # v21 spec sections 21-31: ONE canonical UOM/PCS resolver
+
 # =========================================================================
 # 1) Layout constants (see module docstring for how each was derived)
 # =========================================================================
@@ -162,11 +164,18 @@ def _resolve_metadata_labels(optional_labels=None):
     rows.append((off["packing_code"], "Packing Code #"))
     return rows
 ITEM_HEADERS = ["Item No.", "EAN", "QTY"]
+# v21 (spec section 26): "Show UOM in Sublist" inserts a UOM column between
+# EAN and QTY -- SKU | EAN | UOM | QTY. Only used when that option is ON;
+# the real physical "topologie standard sublist.xlsx" template (see module
+# docstring) has no UOM column at all, so the default (OFF) path is
+# byte-for-byte the same 3-column layout as before this option existed.
+ITEM_HEADERS_WITH_UOM = ["Item No.", "EAN", "UOM", "QTY"]
 
 # Normalized (see docstring) column widths, applied identically to all 4 blocks.
 COL_WIDTH_ITEM_NO = 42
 COL_WIDTH_EAN = 34
 COL_WIDTH_QTY = 16
+COL_WIDTH_UOM = 20
 ROW_HEIGHT_METADATA = 33.6
 ROW_HEIGHT_SPACER = 31.2
 ROW_HEIGHT_ITEM = 36.6
@@ -229,6 +238,11 @@ class SublistItemRow:
     item_no: str
     ean: str
     qty: int
+    # v21 (spec section 26): output UOM for this row, ALWAYS populated
+    # (resolve_output_uom_qty always returns one) regardless of whether
+    # "Show UOM in Sublist" is on -- the writer decides whether to render
+    # a 4th column, this model doesn't need a second shape to do that.
+    uom: str = ""
 
 
 @dataclass
@@ -335,18 +349,30 @@ def calculate_carton_total_qty(package) -> int:
     return sum(int(getattr(it, "quantity", 0) or 0) for it in getattr(package, "items", []))
 
 
-def build_sublist_carton_model(package, *, carton_display_mode: str = "current_total") -> SublistCartonModel:
+def build_sublist_carton_model(package, *, carton_display_mode: str = "current_total",
+                                convert_to_pcs: bool = False) -> SublistCartonModel:
     """Pure helper (spec section 10): package -> SublistCartonModel. Does
-    NOT mutate `package`."""
+    NOT mutate `package`.
+
+    convert_to_pcs (v21, spec sections 24-31): when True, every item's
+    displayed QTY/UOM comes from pl_uom_resolver.resolve_output_uom_qty()
+    -- CARTON_<N>PCS becomes N x qty PCS, plain PCS is unchanged. When
+    False (default), item.qty/uom are the untouched raw values, so every
+    existing caller/test that never passes this keeps getting byte-for-
+    byte the same output as before this option existed (spec section 28:
+    "no checkbox selected" must still work exactly like today)."""
     meta = resolve_sublist_metadata(package)
-    items = [
-        SublistItemRow(
+    items = []
+    for it in getattr(package, "items", []):
+        raw_uom = str(getattr(it, "unit", "") or "PCS")
+        raw_qty = int(getattr(it, "quantity", 0) or 0)
+        resolved = uomr.resolve_output_uom_qty(raw_uom, raw_qty, convert_to_pcs)
+        items.append(SublistItemRow(
             item_no=str(getattr(it, "product_code", "") or ""),
             ean=str(getattr(it, "barcode", "") or ""),
-            qty=int(getattr(it, "quantity", 0) or 0),
-        )
-        for it in getattr(package, "items", [])
-    ]
+            qty=resolved.output_qty,
+            uom=resolved.output_uom,
+        ))
     carton_sequence = int(getattr(package, "carton_sequence", 0) or 0)
     carton_total = int(getattr(package, "carton_total", 0) or 0)
     if carton_display_mode == "current_only":
@@ -434,14 +460,18 @@ def _set_text_cell(ws, row, col, value):
     return cell
 
 
-def _apply_col_widths(ws, block_start_col: int):
+def _apply_col_widths(ws, block_start_col: int, show_uom: bool = False):
     ws.column_dimensions[get_column_letter(block_start_col)].width = COL_WIDTH_ITEM_NO
     ws.column_dimensions[get_column_letter(block_start_col + 1)].width = COL_WIDTH_EAN
-    ws.column_dimensions[get_column_letter(block_start_col + 2)].width = COL_WIDTH_QTY
+    if show_uom:
+        ws.column_dimensions[get_column_letter(block_start_col + 2)].width = COL_WIDTH_UOM
+        ws.column_dimensions[get_column_letter(block_start_col + 3)].width = COL_WIDTH_QTY
+    else:
+        ws.column_dimensions[get_column_letter(block_start_col + 2)].width = COL_WIDTH_QTY
 
 
 def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start_col: int,
-                        optional_business_field_labels=None):
+                        optional_business_field_labels=None, show_uom: bool = False):
     """Writes one carton block (metadata + item grid + total) into `ws` at
     the given page/column position. Never mutates `block`/`block.carton`.
 
@@ -455,9 +485,14 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
     list here than was used for pagination would misalign this block)."""
     optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
     off = _sublist_offsets(len(optional_labels))
+    # v21 (spec section 26): metadata label/value always sit in the block's
+    # 2nd/3rd columns exactly as before -- ONLY the item grid below grows a
+    # 4th (UOM) column when show_uom is on, so the metadata rows' layout
+    # is completely unaffected by this option.
     label_col = block_start_col + 1
     value_col = block_start_col + 2
-    _apply_col_widths(ws, block_start_col)
+    qty_col = block_start_col + (3 if show_uom else 2)
+    _apply_col_widths(ws, block_start_col, show_uom=show_uom)
 
     carton = block.carton
     opt_map = dict(getattr(carton, "optional_business_fields", None) or [])
@@ -486,7 +521,8 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
 
     header_row = page_start_row + off["item_header"]
     ws.row_dimensions[header_row].height = ROW_HEIGHT_ITEM
-    for i, htext in enumerate(ITEM_HEADERS):
+    headers = ITEM_HEADERS_WITH_UOM if show_uom else ITEM_HEADERS
+    for i, htext in enumerate(headers):
         c = ws.cell(row=header_row, column=block_start_col + i, value=htext)
         c.font = FONT_ITEM_HEADER
         c.alignment = ALIGN_ITEM
@@ -500,15 +536,20 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
         item = block.items[offset] if offset < len(block.items) else None
         item_no_cell = _set_text_cell(ws, r, block_start_col, item.item_no if item else "")
         ean_cell = _set_text_cell(ws, r, block_start_col + 1, item.ean if item else "")
-        qty_cell = ws.cell(row=r, column=block_start_col + 2, value=(item.qty if item else None))
-        for c in (item_no_cell, ean_cell, qty_cell):
+        row_cells = [item_no_cell, ean_cell]
+        if show_uom:
+            uom_cell = _set_text_cell(ws, r, block_start_col + 2, item.uom if item else "")
+            row_cells.append(uom_cell)
+        qty_cell = ws.cell(row=r, column=qty_col, value=(item.qty if item else None))
+        row_cells.append(qty_cell)
+        for c in row_cells:
             c.font = FONT_ITEM
             c.alignment = ALIGN_ITEM
             c.border = BOX_BORDER
 
     n_written = min(len(block.items), SUBLIST_ITEM_CAPACITY_PER_BLOCK)
     total_row = page_start_row + off["total"]
-    qty_col_letter = get_column_letter(block_start_col + 2)
+    qty_col_letter = get_column_letter(qty_col)
     if n_written > 0:
         formula = f"=SUM({qty_col_letter}{first_row}:{qty_col_letter}{first_row + n_written - 1})"
         # Formula stays scoped to the rows actually written (matches the
@@ -522,11 +563,11 @@ def write_carton_block(ws, block: SublistBlock, page_start_row: int, block_start
         # any live SUM formula could cover across multiple side-by-side
         # blocks / previous pages).
         if block.is_last_block and block.block_count > 1:
-            total_cell = ws.cell(row=total_row, column=block_start_col + 2, value=block.block_total_qty)
+            total_cell = ws.cell(row=total_row, column=qty_col, value=block.block_total_qty)
         else:
-            total_cell = ws.cell(row=total_row, column=block_start_col + 2, value=formula)
+            total_cell = ws.cell(row=total_row, column=qty_col, value=formula)
     else:
-        total_cell = ws.cell(row=total_row, column=block_start_col + 2, value=0)
+        total_cell = ws.cell(row=total_row, column=qty_col, value=0)
     total_cell.font = FONT_TOTAL
     total_cell.alignment = ALIGN_ITEM
 
@@ -538,6 +579,8 @@ def generate_sublist_workbook(
     template_path=None,
     carton_display_mode: str = "current_total",
     optional_business_field_labels=None,
+    convert_to_pcs: bool = False,
+    show_uom: bool = False,
 ) -> "SublistBuildResult":
     """Build the Sublist workbook for `packages`, in the EXACT SAME ORDER
     they were passed in (caller is responsible for passing them in PL_TOTAL
@@ -558,8 +601,15 @@ def generate_sublist_workbook(
     """
     optional_labels = [str(l) for l in (optional_business_field_labels or []) if str(l or "").strip()]
     page_cycle_rows = _sublist_offsets(len(optional_labels))["page_cycle_rows"]
-    cartons = [build_sublist_carton_model(p, carton_display_mode=carton_display_mode) for p in packages]
+    cartons = [build_sublist_carton_model(p, carton_display_mode=carton_display_mode,
+                                           convert_to_pcs=convert_to_pcs) for p in packages]
     blocks = paginate_carton_blocks(cartons)
+    # v21 (spec section 26): the item grid grows one column (SKU|EAN|UOM|QTY)
+    # only when show_uom is on; block width stays the default 3 (SKU|EAN|
+    # QTY, matching the real physical template, see module docstring)
+    # otherwise -- byte-for-byte the same page geometry as before this
+    # option existed.
+    block_width_cols = (BLOCK_WIDTH_COLS + 1) if show_uom else BLOCK_WIDTH_COLS
 
     wb = Workbook()
     ws = wb.active
@@ -571,9 +621,9 @@ def generate_sublist_workbook(
         page_idx = i // BLOCKS_PER_PAGE
         slot = i % BLOCKS_PER_PAGE
         page_start_row = 1 + page_idx * page_cycle_rows
-        block_start_col = 1 + BLOCK_WIDTH_COLS * slot
+        block_start_col = 1 + block_width_cols * slot
         write_carton_block(ws, block, page_start_row, block_start_col,
-                            optional_business_field_labels=optional_labels)
+                            optional_business_field_labels=optional_labels, show_uom=show_uom)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -615,11 +665,24 @@ class SublistBuildResult:
 # =========================================================================
 # 4) Validation (spec section 13) -- never silently drop/duplicate anything
 # =========================================================================
-def validate_sublist(packages: List, result: "SublistBuildResult"):
+def validate_sublist(packages: List, result: "SublistBuildResult", *,
+                      convert_to_pcs: bool = False):
     """Reconcile the generated Sublist against the source `packages`.
     Returns (ok: bool, report_text: str). Raises nothing itself -- caller
     decides whether a failed reconciliation should abort the run (mirrors
-    pl_group_export.export_grouped_pl's own validate-then-raise pattern)."""
+    pl_group_export.export_grouped_pl's own validate-then-raise pattern).
+
+    convert_to_pcs (v21 fix, found via the real-fixture browser smoke test
+    on CN-6676 Mode B/D): the Sublist's own QTY column is a DERIVED value
+    when convert_to_pcs is on (build_sublist_carton_model() runs every raw
+    item through pl_uom_resolver.resolve_output_uom_qty()), never the raw
+    QTY_RAW printed on the source PL. Comparing that derived total against
+    a strictly-raw `pkg_qty` unconditionally made every carton containing a
+    CARTON_<N>PCS row fail reconciliation any time the checkbox was on --
+    not because anything was actually wrong, but because the validator
+    itself hadn't been told about the derived-output layer. This mirrors
+    the same raw-vs-derived split used everywhere else in v21: QTY_RAW is
+    never touched; PCS is a separate, explicitly-computed comparison here."""
     lines: List[str] = []
     ok = True
 
@@ -688,7 +751,18 @@ def validate_sublist(packages: List, result: "SublistBuildResult"):
               sublist_item_count == len(pkg_items),
               f"sublist={sublist_item_count} package={len(pkg_items)}")
         sublist_qty = sum(r.qty for b in blocks_for_carton for r in b.items)
-        pkg_qty = sum(int(getattr(it, "quantity", 0) or 0) for it in pkg_items)
+        # v21 fix: expected qty must go through the SAME raw->output
+        # resolution build_sublist_carton_model() used to build the sheet
+        # (identity when convert_to_pcs=False -- byte-for-byte the old
+        # raw-only check every existing caller/test already relies on).
+        pkg_qty = sum(
+            uomr.resolve_output_uom_qty(
+                str(getattr(it, "unit", "") or "PCS"),
+                int(getattr(it, "quantity", 0) or 0),
+                convert_to_pcs,
+            ).output_qty
+            for it in pkg_items
+        )
         check(f"Total QTY matches for carton {carton.carton_display or carton.package_code}",
               sublist_qty == pkg_qty, f"sublist={sublist_qty} package={pkg_qty}")
         sublist_item_nos = [r.item_no for b in blocks_for_carton for r in b.items]
